@@ -5,6 +5,8 @@ using Jarvis.Api.Authentication;
 using Jarvis.Api.Conversations;
 using Jarvis.Api.Outbox;
 using Jarvis.Api.Realtime;
+using Jarvis.Api.Tasks;
+using Jarvis.Api.Notifications;
 using Jarvis.Application.Outbox;
 using Jarvis.Contracts;
 using Jarvis.Infrastructure;
@@ -38,7 +40,12 @@ builder.Services.AddOpenApi(options =>
             or "CreateRealtimeClientSecret"
             or "MarkRealtimeSessionConnected"
             or "MarkRealtimeSessionEnded"
-            or "IngestRealtimeEvents")
+            or "IngestRealtimeEvents"
+            or "CreateTask"
+            or "CancelTask"
+            or "MarkNotificationDelivered"
+            or "MarkNotificationRead"
+            or "DismissNotification")
         {
             operation.Parameters ??= [];
             operation.Parameters.Add(new OpenApiParameter
@@ -59,6 +66,12 @@ builder.Services.AddOpenApi(options =>
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.StartsWith(
                 "api/v1/realtime",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith(
+                "api/v1/tasks",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith(
+                "api/v1/notifications",
                 StringComparison.OrdinalIgnoreCase) == true)
         {
             operation.Security =
@@ -140,6 +153,8 @@ app.MapGet("/api/v1/phase0/health", () =>
 
 app.MapConversationEndpoints();
 app.MapRealtimeEndpoints();
+app.MapTaskEndpoints();
+app.MapNotificationEndpoints();
 app.MapHub<ClientHub>("/hubs/client").RequireAuthorization();
 
 await using (var scope = app.Services.CreateAsyncScope())

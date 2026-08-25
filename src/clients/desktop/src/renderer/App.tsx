@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from "react";
+import { decodeSignalREventEnvelope } from "@jarvis/contracts-ts";
 import { ensureConversation } from "./conversation-flow.js";
-import { DesktopRealtimeController, type DesktopRealtimeStatus } from "./realtime.js";
+import {
+  DesktopRealtimeController,
+  mapRealtimeCancelResponse,
+  mapRealtimeTaskStatusResponse,
+  type DesktopRealtimeStatus
+} from "./realtime.js";
+import {
+  DesktopTaskNotificationFeed,
+  ensureActiveDesktopTaskNotificationFeed,
+  refreshFeedIfCurrent,
+  refreshOnBackendConnectionState,
+  type DesktopNotification,
+  type DesktopTask
+} from "./task-feed.js";
 
 type Message = {
   id: string;
@@ -27,6 +41,64 @@ type ClientSecret = {
 };
 
 type Device = { deviceId: string; name: string; platform: string };
+
+function taskFrom(value: unknown): DesktopTask {
+  const item = asRecord(value);
+  return {
+    ...item,
+    id: String(item.id),
+    status: String(item.status),
+    goal: typeof item.goal === "string" ? item.goal : undefined,
+    progressSummary: typeof item.progressSummary === "string" ? item.progressSummary : null,
+    resultSummary: typeof item.resultSummary === "string" ? item.resultSummary : null
+  };
+}
+
+function notificationFrom(value: unknown): DesktopNotification {
+  const item = asRecord(value);
+  return {
+    ...item,
+    id: String(item.id),
+    status: String(item.status),
+    title: String(item.title),
+    body: String(item.body)
+  };
+}
+
+function listItems(value: unknown): unknown[] {
+  const item = asRecord(value);
+  return Array.isArray(item.items) ? item.items : [];
+}
+
+function createTaskFeed(): DesktopTaskNotificationFeed {
+  return new DesktopTaskNotificationFeed({
+    getTasks: async (conversationId, cursor, status) => {
+      const page = asRecord(await window.jarvis.getTasks({ conversationId, cursor, status }));
+      const nextCursor = page.nextCursor;
+      if (nextCursor !== undefined && nextCursor !== null && typeof nextCursor !== "string") {
+        throw new Error("Backend returned an invalid task cursor.");
+      }
+      return {
+        items: listItems(page).map(taskFrom),
+        nextCursor: typeof nextCursor === "string" ? nextCursor : null
+      };
+    },
+    getUnreadNotifications: async () =>
+      listItems(await window.jarvis.getNotifications()).map(notificationFrom),
+    markDelivered: (notificationId, idempotencyKey) => window.jarvis.markNotificationDelivered({
+      notificationId,
+      idempotencyKey
+    }),
+    markRead: (notificationId, idempotencyKey) => window.jarvis.markNotificationRead({
+      notificationId,
+      idempotencyKey
+    }),
+    dismiss: (notificationId, idempotencyKey) => window.jarvis.dismissNotification({
+      notificationId,
+      idempotencyKey
+    })
+  });
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -88,14 +160,87 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [muted, setMuted] = useState(false);
   const [conversationIdInput, setConversationIdInput] = useState("");
+  const [tasks, setTasks] = useState<readonly DesktopTask[]>([]);
+  const [notifications, setNotifications] = useState<readonly DesktopNotification[]>([]);
+  const [backendConnectionState, setBackendConnectionState] = useState("connecting");
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
+  const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
+  const activeConversationId = useRef<string | undefined>(undefined);
+  activeConversationId.current = conversation?.id;
+
+  feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
+
+  async function refreshFeed(conversationId?: string): Promise<void> {
+    const currentFeed = feed.current;
+    if (!currentFeed) {
+      return;
+    }
+
+    await refreshFeedIfCurrent(
+      currentFeed,
+      () => feed.current,
+      (nextTasks, nextNotifications) => {
+        setTasks(nextTasks);
+        setNotifications(nextNotifications);
+      },
+      conversationId);
+  }
 
   useEffect(() => {
+    feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
+    let effectActive = true;
     void window.jarvis.getAppVersion().then(setVersion);
     void window.jarvis.getDesktopDevice()
       .then(value => setDevice(deviceFrom(value)))
       .catch(reason => setError(reason instanceof Error ? reason.message : "Desktop bootstrap failed."));
+
+    const removeEventListener = window.jarvis.onBackendEvent(value => {
+      try {
+        const currentFeed = feed.current;
+        if (!currentFeed) {
+          return;
+        }
+
+        void currentFeed.applyEvent(decodeSignalREventEnvelope(value))
+          .then(() => {
+            if (!effectActive) {
+              return;
+            }
+            setTasks(currentFeed.tasks);
+            setNotifications(currentFeed.notifications);
+          })
+          .catch(reason => {
+            if (effectActive) {
+              setError(reason instanceof Error ? reason.message : "Task feed refresh failed.");
+            }
+          });
+      } catch (reason) {
+        if (effectActive) {
+          setError(reason instanceof Error ? reason.message : "Invalid backend event.");
+        }
+      }
+    });
+    const removeConnectionListener = window.jarvis.onBackendConnectionState(value => {
+      const state = asRecord(value).state;
+      setBackendConnectionState(typeof state === "string" ? state : "disconnected");
+      void refreshOnBackendConnectionState(state, refreshFeed, activeConversationId.current).catch(reason => {
+        if (effectActive) {
+          setError(reason instanceof Error ? reason.message : "Task feed refresh failed.");
+        }
+      });
+    });
+    return () => {
+      effectActive = false;
+      removeEventListener();
+      removeConnectionListener();
+      feed.current?.dispose();
+    };
   }, []);
+
+  useEffect(() => {
+    void refreshFeed(conversation?.id).catch(reason =>
+      setError(reason instanceof Error ? reason.message : "Task feed refresh failed."));
+  }, [conversation?.id]);
 
   useEffect(() => () => {
     void controller.current?.disconnect("desktop-closed");
@@ -161,7 +306,23 @@ export function App() {
             const refreshed = await window.jarvis.getConversation(activeConversation.id);
             setConversation(conversationFrom(refreshed));
             return result;
-          }
+          },
+          delegateTask: async (input, idempotencyKey) => {
+            const result = await window.jarvis.delegateTask({
+              ...input,
+              conversationId: activeConversation.id,
+              idempotencyKey
+            });
+            await refreshFeed(activeConversation.id);
+            return result;
+          },
+          getTaskStatus: async input => mapRealtimeTaskStatusResponse(
+            await window.jarvis.getTaskStatus(input.taskId)),
+          cancelTask: async (input, idempotencyKey) => mapRealtimeCancelResponse(
+            await window.jarvis.cancelTask({
+              taskId: input.taskId,
+              idempotencyKey
+            }))
         },
         (nextStatus, nextError) => {
           setStatus(nextStatus);
@@ -253,6 +414,8 @@ export function App() {
     }
   }
 
+  const popupNotification = notifications[0];
+
   return (
     <main>
       <h1>Jarvis</h1>
@@ -304,6 +467,28 @@ export function App() {
         <button type="submit" disabled={!conversation || status === "connecting" || !draft.trim()}>发送文字</button>
       </form>
       {error ? <p role="alert">{error}</p> : null}
+      {popupNotification ? (
+        <aside role="dialog" aria-label="Notification popup" aria-live="polite">
+          <h2>{popupNotification.title}</h2>
+          <p>{popupNotification.body}</p>
+          <button
+            type="button"
+            onClick={() => void feed.current?.read(popupNotification.id).then(() => {
+              setNotifications(feed.current?.notifications ?? []);
+            }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification read failed."))}
+          >
+            已读并关闭
+          </button>
+          <button
+            type="button"
+            onClick={() => void feed.current?.dismiss(popupNotification.id).then(() => {
+              setNotifications(feed.current?.notifications ?? []);
+            }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification dismiss failed."))}
+          >
+            忽略并关闭
+          </button>
+        </aside>
+      ) : null}
       {conversation ? (
         <section aria-label="Conversation messages">
           <h2>{conversation.title}</h2>
@@ -318,6 +503,63 @@ export function App() {
           </ol>
         </section>
       ) : <p>尚未选择 Conversation。</p>}
+      <section aria-label="Task Center">
+        <h2>Task Center</h2>
+        <p>Control Plane：{backendConnectionState} · {tasks.length} 个任务</p>
+        {tasks.length > 0 ? (
+          <ul>
+            {tasks.map(task => (
+              <li key={task.id}>
+                <strong>{task.status}</strong> {task.goal ?? task.id}
+                {task.resultSummary ? <p>{task.resultSummary}</p> : null}
+                {task.status !== "succeeded"
+                  && task.status !== "failed"
+                  && task.status !== "cancelled" ? (
+                    <button
+                      type="button"
+                      onClick={() => void window.jarvis.cancelTask({
+                        taskId: task.id,
+                        idempotencyKey: crypto.randomUUID()
+                      }).then(() => refreshFeed(conversation?.id)).catch(reason =>
+                        setError(reason instanceof Error ? reason.message : "Task cancellation failed."))}
+                    >
+                      取消任务
+                    </button>
+                  ) : null}
+              </li>
+            ))}
+          </ul>
+        ) : <p>当前没有非终态任务。</p>}
+      </section>
+      <section aria-label="Notifications">
+        <h2>通知 ({notifications.length})</h2>
+        {notifications.length > 0 ? (
+          <ul>
+            {notifications.map(notification => (
+              <li key={notification.id}>
+                <strong>{notification.title}</strong>
+                <p>{notification.body}</p>
+                <button
+                  type="button"
+                  onClick={() => void feed.current?.read(notification.id).then(() => {
+                    setNotifications(feed.current?.notifications ?? []);
+                  }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification read failed."))}
+                >
+                  已读
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void feed.current?.dismiss(notification.id).then(() => {
+                    setNotifications(feed.current?.notifications ?? []);
+                  }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification dismiss failed."))}
+                >
+                  忽略
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : <p>没有未读通知。</p>}
+      </section>
       <small>Desktop version: {version}</small>
     </main>
   );

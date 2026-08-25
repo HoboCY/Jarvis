@@ -11,6 +11,12 @@ export const realtimeToolNames = ["delegate_task", "get_task_status", "cancel_ta
 
 export type RealtimeToolName = (typeof realtimeToolNames)[number];
 
+export type RealtimeTaskBackend = {
+  delegateTask: (input: DelegateTaskInput, idempotencyKey: string) => Promise<unknown>;
+  getTaskStatus: (input: TaskStatusInput, idempotencyKey: string) => Promise<unknown>;
+  cancelTask: (input: TaskStatusInput, idempotencyKey: string) => Promise<unknown>;
+};
+
 export type NormalizedRealtimeEvent = {
   version: 1;
   eventId: string;
@@ -58,7 +64,15 @@ const delegateTaskInput = z.object({
   sourceMessageIds: z.array(z.string().uuid()),
   attachmentRefs: z.array(z.string())
 });
-const rememberFactInput = z.object({ fact: z.string().min(1) });
+const rememberFactInput = z.object({
+  key: z.string().min(1),
+  value: z.string().min(1),
+  sourceMessageId: z.string().uuid(),
+  sensitive: z.boolean()
+});
+
+export type TaskStatusInput = z.infer<typeof taskIdInput>;
+export type DelegateTaskInput = z.infer<typeof delegateTaskInput>;
 
 export type RealtimeToolResult = {
   available: false;
@@ -75,34 +89,132 @@ function unavailable(toolName: RealtimeToolName): string {
   return JSON.stringify(result);
 }
 
-export const realtimeTools = [
-  tool({
-    name: "delegate_task",
-    description: "Queue backend work. Phase 2 has no task execution and returns unavailable.",
-    parameters: delegateTaskInput,
-    execute: async () => unavailable("delegate_task")
-  }),
-  tool({
-    name: "get_task_status",
-    description: "Read a backend task status. Phase 2 has no task execution and returns unavailable.",
-    parameters: taskIdInput,
-    execute: async () => unavailable("get_task_status")
-  }),
-  tool({
-    name: "cancel_task",
-    description: "Cancel backend work. Phase 2 has no task execution and returns unavailable.",
-    parameters: taskIdInput,
-    execute: async () => unavailable("cancel_task")
-  }),
-  tool({
-    name: "remember_fact",
-    description: "Store a durable fact. Phase 2 memory storage is unavailable.",
-    parameters: rememberFactInput,
-    execute: async () => unavailable("remember_fact")
-  })
-] as const;
+export type RealtimeToolOptions = {
+  backend?: RealtimeTaskBackend;
+  sessionScope?: string;
+};
 
-export function createRealtimeAgent(instructions: string, voice?: string): RealtimeAgent {
+export function createRealtimeToolIdempotencyKey(
+  sessionScope: string,
+  toolName: Exclude<RealtimeToolName, "remember_fact">,
+  callId: string | undefined
+): string {
+  const scope = sessionScope.trim() || "realtime-session";
+  const call = callId?.trim() || "missing-call-id";
+  const key = `${scope}:${toolName}:${call}`;
+  if (key.length <= 200) {
+    return key;
+  }
+
+  // Keep a short readable scope/tool prefix, but hash the complete input so
+  // long call ids that share a prefix cannot alias the backend idempotency key.
+  return `${scope.slice(0, 64)}:${toolName}:${hashRealtimeKey(key)}`;
+}
+
+function hashRealtimeKey(value: string): string {
+  let first = 2_166_136_261;
+  let second = 2_246_822_519;
+  let third = 3_266_480_991;
+  let fourth = 668_265_263;
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    first = Math.imul(first ^ code, 16_777_619);
+    second = Math.imul(second ^ (code + first), 2_654_435_761);
+    third = Math.imul(third ^ (code + second), 2_246_822_519);
+    fourth = Math.imul(fourth ^ (code + third), 3_266_480_991);
+  }
+
+  return [first, second, third, fourth]
+    .map(valuePart => (valuePart >>> 0).toString(16).padStart(8, "0"))
+    .join("");
+}
+
+function backendError(toolName: RealtimeToolName): string {
+  return JSON.stringify({
+    available: false,
+    code: "backend-error",
+    tool: toolName,
+    message: "The authenticated backend could not complete this tool call."
+  });
+}
+
+export function createRealtimeTools(options: RealtimeToolOptions = {}) {
+  const backend = options.backend;
+  const sessionScope = options.sessionScope ?? "realtime-session";
+  const responseCache = new Map<string, string>();
+
+  const executeBackend = async <TInput>(
+    toolName: Exclude<RealtimeToolName, "remember_fact">,
+    input: TInput,
+    callId: string | undefined,
+    execute: (idempotencyKey: string) => Promise<unknown>
+  ): Promise<string> => {
+    if (!backend) {
+      return unavailable(toolName);
+    }
+
+    const idempotencyKey = createRealtimeToolIdempotencyKey(sessionScope, toolName, callId);
+    const cached = responseCache.get(idempotencyKey);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const response = JSON.stringify(await execute(idempotencyKey)) ?? "null";
+      responseCache.set(idempotencyKey, response);
+      return response;
+    } catch {
+      return backendError(toolName);
+    }
+  };
+
+  return [
+    tool({
+      name: "delegate_task",
+      description: "Queue backend work and return the persisted task acceptance state.",
+      parameters: delegateTaskInput,
+      execute: async (input, _context, details) => executeBackend(
+        "delegate_task",
+        input,
+        details?.toolCall?.callId,
+        idempotencyKey => backend!.delegateTask(input, idempotencyKey))
+    }),
+    tool({
+      name: "get_task_status",
+      description: "Read the authenticated user's persisted backend task status.",
+      parameters: taskIdInput,
+      execute: async (input, _context, details) => executeBackend(
+        "get_task_status",
+        input,
+        details?.toolCall?.callId,
+        idempotencyKey => backend!.getTaskStatus(input, idempotencyKey))
+    }),
+    tool({
+      name: "cancel_task",
+      description: "Request cancellation of the authenticated user's backend task.",
+      parameters: taskIdInput,
+      execute: async (input, _context, details) => executeBackend(
+        "cancel_task",
+        input,
+        details?.toolCall?.callId,
+        idempotencyKey => backend!.cancelTask(input, idempotencyKey))
+    }),
+    tool({
+      name: "remember_fact",
+      description: "Store a durable fact. Phase 5 memory storage is unavailable.",
+      parameters: rememberFactInput,
+      execute: async () => unavailable("remember_fact")
+    })
+  ] as const;
+}
+
+export const realtimeTools = createRealtimeTools();
+
+export function createRealtimeAgent(
+  instructions: string,
+  voice?: string,
+  toolOptions: RealtimeToolOptions = {}
+): RealtimeAgent {
   const normalizedInstructions = instructions.trim();
   if (!normalizedInstructions) {
     throw new Error("Realtime instructions are required.");
@@ -112,7 +224,7 @@ export function createRealtimeAgent(instructions: string, voice?: string): Realt
     name: "jarvis-realtime",
     instructions: normalizedInstructions,
     voice,
-    tools: [...realtimeTools]
+    tools: [...createRealtimeTools(toolOptions)]
   });
 }
 

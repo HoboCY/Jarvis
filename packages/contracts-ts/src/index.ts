@@ -5,6 +5,9 @@ export {
 } from "./outbox.js";
 export type {
   ConversationCreatedPayload,
+  NotificationCreatedPayload,
+  NotificationUpdatedPayload,
   SignalREventEnvelope,
+  TaskUpdatedPayload,
   TypedMessageCreatedPayload,
 } from "./outbox.js";

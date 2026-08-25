@@ -35,7 +35,45 @@ const jarvisApi = {
     conversationId: string;
     events: unknown[];
     idempotencyKey: string;
-  }): Promise<unknown> => ipcRenderer.invoke("backend:ingestRealtimeEvents", input) as Promise<unknown>
+  }): Promise<unknown> => ipcRenderer.invoke("backend:ingestRealtimeEvents", input) as Promise<unknown>,
+  delegateTask: (input: {
+    conversationId: string;
+    goal: string;
+    expectedOutput?: string | null;
+    requiredCapabilities: string[];
+    preferredDeviceId?: string | null;
+    sourceMessageIds: string[];
+    attachmentRefs: string[];
+    idempotencyKey: string;
+  }): Promise<unknown> => ipcRenderer.invoke("backend:delegateTask", input) as Promise<unknown>,
+  getTaskStatus: (taskId: string): Promise<unknown> =>
+    ipcRenderer.invoke("backend:getTaskStatus", { taskId }) as Promise<unknown>,
+  cancelTask: (input: { taskId: string; idempotencyKey: string }): Promise<unknown> =>
+    ipcRenderer.invoke("backend:cancelTask", input) as Promise<unknown>,
+  getTasks: (input?: {
+    conversationId?: string;
+    cursor?: string;
+    status?: "queued" | "assigned" | "running" | "waitingForApproval" | "waitingForUserInput" | "recovering" | "cancellationRequested";
+  }): Promise<unknown> =>
+    ipcRenderer.invoke("backend:getTasks", input ?? {}) as Promise<unknown>,
+  getNotifications: (conversationId?: string): Promise<unknown> =>
+    ipcRenderer.invoke("backend:getNotifications", { conversationId }) as Promise<unknown>,
+  markNotificationDelivered: (input: { notificationId: string; idempotencyKey: string }): Promise<unknown> =>
+    ipcRenderer.invoke("backend:deliveredNotification", input) as Promise<unknown>,
+  markNotificationRead: (input: { notificationId: string; idempotencyKey: string }): Promise<unknown> =>
+    ipcRenderer.invoke("backend:readNotification", input) as Promise<unknown>,
+  dismissNotification: (input: { notificationId: string; idempotencyKey: string }): Promise<unknown> =>
+    ipcRenderer.invoke("backend:dismissNotification", input) as Promise<unknown>,
+  onBackendEvent: (listener: (event: unknown) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => listener(value);
+    ipcRenderer.on("backend:event", handler);
+    return () => ipcRenderer.removeListener("backend:event", handler);
+  },
+  onBackendConnectionState: (listener: (event: unknown) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => listener(value);
+    ipcRenderer.on("backend:connectionState", handler);
+    return () => ipcRenderer.removeListener("backend:connectionState", handler);
+  }
 };
 
 contextBridge.exposeInMainWorld("jarvis", jarvisApi);

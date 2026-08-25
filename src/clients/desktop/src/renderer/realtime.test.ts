@@ -2,7 +2,11 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { NormalizedRealtimeEvent, RealtimeSession } from "@jarvis/realtime-agent";
 import { ensureConversation } from "./conversation-flow.js";
-import { DesktopRealtimeController } from "./realtime.js";
+import {
+  DesktopRealtimeController,
+  mapRealtimeCancelResponse,
+  mapRealtimeTaskStatusResponse
+} from "./realtime.js";
 
 type Listener = (...args: never[]) => void;
 
@@ -17,6 +21,63 @@ test("ensureConversation creates once and lets the first connect continue", asyn
 
   assert.equal(result, created);
   assert.equal(createCalls, 1);
+});
+
+test("maps full backend task responses to the strict Realtime status contract", () => {
+  assert.deepEqual(
+    mapRealtimeTaskStatusResponse({
+      id: "0198b0a1-0000-7000-8000-000000000001",
+      status: "waitingForApproval",
+      progressSummary: "等待用户确认",
+      resultSummary: "must not leak",
+      errorMessage: "must not leak"
+    }),
+    {
+      taskId: "0198b0a1-0000-7000-8000-000000000001",
+      status: "waitingForApproval",
+      progressSummary: "等待用户确认",
+      requiresUserAction: true
+    }
+  );
+  assert.deepEqual(
+    mapRealtimeTaskStatusResponse({
+      taskId: "0198b0a1-0000-7000-8000-000000000002",
+      status: "running",
+      progressSummary: null
+    }),
+    {
+      taskId: "0198b0a1-0000-7000-8000-000000000002",
+      status: "running",
+      progressSummary: null,
+      requiresUserAction: false
+    }
+  );
+});
+
+test("maps cancellation responses without leaking the backend task id", () => {
+  assert.deepEqual(
+    mapRealtimeCancelResponse({
+      taskId: "0198b0a1-0000-7000-8000-000000000003",
+      accepted: true,
+      status: "cancellationRequested"
+    }),
+    { accepted: true, status: "cancellationRequested" }
+  );
+});
+
+test("rejects malformed backend responses before they reach Realtime tools", () => {
+  assert.throws(
+    () => mapRealtimeTaskStatusResponse({ status: "running", progressSummary: null }),
+    /Invalid Realtime task status response/
+  );
+  assert.throws(
+    () => mapRealtimeTaskStatusResponse({ id: "0198b0a1-0000-7000-8000-000000000004", status: "running", progressSummary: 1 }),
+    /Invalid Realtime task status response/
+  );
+  assert.throws(
+    () => mapRealtimeCancelResponse({ accepted: "true", status: "cancelled" }),
+    /Invalid Realtime cancellation response/
+  );
 });
 
 class FakeTransport {

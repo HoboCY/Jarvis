@@ -1,3 +1,4 @@
+import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import {
@@ -6,11 +7,24 @@ import {
   isAllowedNavigation,
   secureWebPreferences
 } from "./security.js";
+import { isUuid } from "./input-validation.js";
 
 type JsonRecord = Record<string, unknown>;
 
 const backendBaseUrl = process.env.JARVIS_API_BASE_URL ?? "http://127.0.0.1:5000";
 const backendBearer = process.env.JARVIS_LOCAL_BEARER;
+const clientHubPath = "/hubs/client";
+const taskApiPath = "/api/v1/tasks";
+const notificationApiPath = "/api/v1/notifications";
+const nonTerminalTaskStatuses = new Set([
+  "queued",
+  "assigned",
+  "running",
+  "waitingForApproval",
+  "waitingForUserInput",
+  "recovering",
+  "cancellationRequested"
+]);
 
 async function requestBackend(
   path: string,
@@ -52,6 +66,24 @@ function record(value: unknown): JsonRecord {
   return value as JsonRecord;
 }
 
+function isSignalREnvelope(value: unknown): value is JsonRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const envelope = value as JsonRecord;
+  return typeof envelope.eventId === "string"
+    && envelope.eventId.length > 0
+    && envelope.eventId.length <= 200
+    && typeof envelope.occurredAt === "number"
+    && Number.isFinite(envelope.occurredAt)
+    && typeof envelope.type === "string"
+    && envelope.type.length > 0
+    && typeof envelope.payload === "object"
+    && envelope.payload !== null
+    && !Array.isArray(envelope.payload);
+}
+
 function requiredString(value: unknown, name: string, maxLength = 200): string {
   if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) {
     throw new Error(`Invalid ${name}.`);
@@ -61,6 +93,31 @@ function requiredString(value: unknown, name: string, maxLength = 200): string {
 
 function requiredBody(value: unknown): JsonRecord {
   return record(value);
+}
+
+function optionalString(value: unknown, name: string, maxLength = 200): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  return requiredString(value, name, maxLength);
+}
+
+function requiredStringArray(value: unknown, name: string, maxItems = 100): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw new Error(`Invalid ${name}.`);
+  }
+
+  return value.map(item => requiredString(item, name));
+}
+
+function requiredUuidArray(value: unknown, name: string, maxItems = 100): string[] {
+  return requiredStringArray(value, name, maxItems).map(item => {
+    if (!isUuid(item)) {
+      throw new Error(`Invalid ${name}.`);
+    }
+    return item;
+  });
 }
 
 function createMainWindow(rendererEntryUrl: string): BrowserWindow {
@@ -93,6 +150,52 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
 
   void window.loadURL(rendererEntryUrl);
   return window;
+}
+
+function startSignalR(window: BrowserWindow): HubConnection | undefined {
+  if (!backendBearer || backendBearer.length < 32) {
+    return undefined;
+  }
+
+  const connection = new HubConnectionBuilder()
+    .withUrl(new URL(clientHubPath, backendBaseUrl).toString(), {
+      accessTokenFactory: () => backendBearer
+    })
+    .withAutomaticReconnect()
+    .build();
+
+  const sendConnectionState = (state: "connected" | "reconnecting" | "disconnected", error?: Error): void => {
+    if (!window.isDestroyed()) {
+      window.webContents.send("backend:connectionState", {
+        state,
+        error: error?.message
+      });
+    }
+  };
+
+  for (const eventType of [
+    "task.updated",
+    "task.eventAdded",
+    "notification.created",
+    "notification.updated"
+  ]) {
+    connection.on(eventType, envelope => {
+      if (!isSignalREnvelope(envelope)) {
+        return;
+      }
+      if (!window.isDestroyed()) {
+        window.webContents.send("backend:event", envelope);
+      }
+    });
+  }
+
+  connection.onreconnecting(error => sendConnectionState("reconnecting", error));
+  connection.onreconnected(() => sendConnectionState("connected"));
+  connection.onclose(error => sendConnectionState("disconnected", error));
+  void connection.start()
+    .then(() => sendConnectionState("connected"))
+    .catch(error => sendConnectionState("disconnected", error instanceof Error ? error : undefined));
+  return connection;
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -174,7 +277,91 @@ if (!app.requestSingleInstanceLock()) {
         { version: 1, events: input.events },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
+    ipcMain.handle("backend:delegateTask", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const requiredCapabilities = requiredStringArray(input.requiredCapabilities, "requiredCapabilities", 20);
+      const sourceMessageIds = requiredUuidArray(input.sourceMessageIds, "sourceMessageIds");
+      const preferredDeviceId = input.preferredDeviceId === null || input.preferredDeviceId === undefined
+        ? null
+        : requiredString(input.preferredDeviceId, "preferredDeviceId");
+      const expectedOutput = input.expectedOutput === null || input.expectedOutput === undefined
+        ? null
+        : requiredString(input.expectedOutput, "expectedOutput", 100_000);
+      return requestBackend(
+        taskApiPath,
+        "POST",
+        {
+          conversationId: requiredString(input.conversationId, "conversationId"),
+          goal: requiredString(input.goal, "goal", 100_000),
+          expectedOutput,
+          requiredCapabilities,
+          preferredDeviceId,
+          sourceMessageIds,
+          attachmentRefs: requiredStringArray(input.attachmentRefs, "attachmentRefs", 100)
+        },
+        requiredString(input.idempotencyKey, "idempotencyKey"));
+    });
+    ipcMain.handle("backend:getTaskStatus", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      return requestBackend(
+        `${taskApiPath}/${encodeURIComponent(requiredString(input.taskId, "taskId"))}`,
+        "GET");
+    });
+    ipcMain.handle("backend:cancelTask", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      return requestBackend(
+        `${taskApiPath}/${encodeURIComponent(requiredString(input.taskId, "taskId"))}/cancel`,
+        "POST",
+        {},
+        requiredString(input.idempotencyKey, "idempotencyKey"));
+    });
+    ipcMain.handle("backend:getTasks", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const conversationId = optionalString(input.conversationId, "conversationId");
+      const cursor = optionalString(input.cursor, "cursor");
+      const status = optionalString(input.status, "status");
+      if (status && !nonTerminalTaskStatuses.has(status)) {
+        throw new Error("Invalid task status filter.");
+      }
+      const query = new URLSearchParams({ limit: "100" });
+      if (conversationId) {
+        query.set("conversationId", conversationId);
+      }
+      if (cursor) {
+        query.set("cursor", cursor);
+      }
+      if (status) {
+        query.set("status", status);
+      }
+      const suffix = query.toString();
+      return requestBackend(`${taskApiPath}${suffix ? `?${suffix}` : ""}`, "GET");
+    });
+    ipcMain.handle("backend:getNotifications", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const conversationId = optionalString(input.conversationId, "conversationId");
+      const query = new URLSearchParams({ status: "unread" });
+      if (conversationId) {
+        query.set("conversationId", conversationId);
+      }
+      return requestBackend(`${notificationApiPath}?${query.toString()}`, "GET");
+    });
+    for (const action of ["delivered", "read", "dismiss"] as const) {
+      ipcMain.handle(`backend:${action}Notification`, (_event, value: unknown) => {
+        const input = requiredBody(value);
+        return requestBackend(
+          `${notificationApiPath}/${encodeURIComponent(requiredString(input.notificationId, "notificationId"))}/${action}`,
+          "POST",
+          {},
+          requiredString(input.idempotencyKey, "idempotencyKey"));
+      });
+    }
     const rendererEntryUrl = getRendererEntryUrl(app.isPackaged, process.env.JARVIS_DEV_SERVER_URL);
-    createMainWindow(rendererEntryUrl);
+    const window = createMainWindow(rendererEntryUrl);
+    const signalRConnection = startSignalR(window);
+    app.on("before-quit", () => {
+      if (signalRConnection) {
+        void signalRConnection.stop();
+      }
+    });
   });
 }

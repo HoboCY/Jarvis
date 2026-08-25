@@ -34,6 +34,21 @@ export type RealtimeEventsIngestResponse =
 export type DesktopDeviceBootstrapResponse =
   paths["/api/v1/realtime/desktop-device"]["post"]["responses"][200]["content"]["application/json"];
 
+export type CreateTaskRequest =
+  paths["/api/v1/tasks"]["post"]["requestBody"]["content"]["application/json"];
+export type TaskAcceptedResponse =
+  paths["/api/v1/tasks"]["post"]["responses"][202]["content"]["application/json"];
+export type TaskResponse =
+  paths["/api/v1/tasks/{taskId}"]["get"]["responses"][200]["content"]["application/json"];
+export type TaskListResponse =
+  paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
+export type TaskCancelResponse =
+  paths["/api/v1/tasks/{taskId}/cancel"]["post"]["responses"][200]["content"]["application/json"];
+export type NotificationListResponse =
+  paths["/api/v1/notifications"]["get"]["responses"][200]["content"]["application/json"];
+export type NotificationResponse =
+  paths["/api/v1/notifications/{notificationId}/read"]["post"]["responses"][200]["content"]["application/json"];
+
 export async function getDesktopDevice(
   baseUrl: string,
   idempotencyKey: string,
@@ -45,6 +60,99 @@ export async function getDesktopDevice(
     idempotencyKey,
     options
   ) as Promise<DesktopDeviceBootstrapResponse>;
+}
+
+export async function createTask(
+  baseUrl: string,
+  request: CreateTaskRequest,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<TaskAcceptedResponse> {
+  return requestJson(
+    new URL("/api/v1/tasks", baseUrl),
+    request,
+    idempotencyKey,
+    options
+  ) as Promise<TaskAcceptedResponse>;
+}
+
+export async function getTask(
+  baseUrl: string,
+  taskId: string,
+  options: ApiRequestOptions = {}
+): Promise<TaskResponse> {
+  return requestGetJson(
+    new URL(`/api/v1/tasks/${encodeURIComponent(taskId)}`, baseUrl),
+    options
+  ) as Promise<TaskResponse>;
+}
+
+export async function listTasks(
+  baseUrl: string,
+  query: { conversationId?: string; status?: string; cursor?: string; limit?: number | string } = {},
+  options: ApiRequestOptions = {}
+): Promise<TaskListResponse> {
+  const url = new URL("/api/v1/tasks", baseUrl);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+  return requestGetJson(url, options) as Promise<TaskListResponse>;
+}
+
+export async function cancelTask(
+  baseUrl: string,
+  taskId: string,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<TaskCancelResponse> {
+  return requestJson(
+    new URL(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, baseUrl),
+    {},
+    idempotencyKey,
+    options
+  ) as Promise<TaskCancelResponse>;
+}
+
+export async function listUnreadNotifications(
+  baseUrl: string,
+  conversationId?: string,
+  options: ApiRequestOptions = {}
+): Promise<NotificationListResponse> {
+  const url = new URL("/api/v1/notifications", baseUrl);
+  url.searchParams.set("status", "unread");
+  if (conversationId) {
+    url.searchParams.set("conversationId", conversationId);
+  }
+  return requestGetJson(url, options) as Promise<NotificationListResponse>;
+}
+
+export async function markNotificationDelivered(
+  baseUrl: string,
+  notificationId: string,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<NotificationResponse> {
+  return updateNotification(baseUrl, notificationId, "delivered", idempotencyKey, options);
+}
+
+export async function markNotificationRead(
+  baseUrl: string,
+  notificationId: string,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<NotificationResponse> {
+  return updateNotification(baseUrl, notificationId, "read", idempotencyKey, options);
+}
+
+export async function dismissNotification(
+  baseUrl: string,
+  notificationId: string,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<NotificationResponse> {
+  return updateNotification(baseUrl, notificationId, "dismiss", idempotencyKey, options);
 }
 
 export interface ApiRequestOptions {
@@ -136,4 +244,33 @@ async function requestJson(
   }
 
   return response.json();
+}
+
+async function requestGetJson(url: URL, options: ApiRequestOptions): Promise<unknown> {
+  const headers = new Headers();
+  if (options.bearerToken) {
+    headers.set("Authorization", `Bearer ${options.bearerToken}`);
+  }
+
+  const response = await (options.fetcher ?? fetch)(url, { method: "GET", headers });
+  if (!response.ok) {
+    throw new Error(`Jarvis API request failed with ${response.status}.`);
+  }
+
+  return response.json();
+}
+
+async function updateNotification(
+  baseUrl: string,
+  notificationId: string,
+  action: "delivered" | "read" | "dismiss",
+  idempotencyKey: string,
+  options: ApiRequestOptions
+): Promise<NotificationResponse> {
+  return requestJson(
+    new URL(`/api/v1/notifications/${encodeURIComponent(notificationId)}/${action}`, baseUrl),
+    {},
+    idempotencyKey,
+    options
+  ) as Promise<NotificationResponse>;
 }

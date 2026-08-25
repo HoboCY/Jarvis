@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Jarvis.Application.Realtime;
+using Jarvis.Application.Tasks;
 
 namespace Jarvis.Api.IntegrationTests;
 
@@ -16,6 +17,8 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
     private readonly IOutboxPublisher? _outboxPublisher;
     private readonly TimeProvider? _timeProvider;
     private readonly IRealtimeClientSecretProvider? _realtimeProvider;
+    private readonly IFakeDelayAdapter? _fakeDelayAdapter;
+    private readonly string? _workerDeviceId;
 
     public TestApplicationFactory()
         : this(null, true, null)
@@ -28,7 +31,9 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         IOutboxPublisher? outboxPublisher,
         TimeProvider? timeProvider = null,
         DbCommandInterceptor? dbCommandInterceptor = null,
-        IRealtimeClientSecretProvider? realtimeProvider = null)
+        IRealtimeClientSecretProvider? realtimeProvider = null,
+        IFakeDelayAdapter? fakeDelayAdapter = null,
+        string? workerDeviceId = null)
     {
         DatabasePath = databasePath ?? Path.Combine(
             Path.GetTempPath(),
@@ -38,6 +43,8 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         _timeProvider = timeProvider;
         DbCommandInterceptor = dbCommandInterceptor;
         _realtimeProvider = realtimeProvider;
+        _fakeDelayAdapter = fakeDelayAdapter;
+        _workerDeviceId = workerDeviceId;
     }
 
     public string DatabasePath { get; }
@@ -49,20 +56,28 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(
-            new Dictionary<string, string?>
-            {
-                ["Authentication:BearerToken"] = Token,
-                ["ConnectionStrings:Jarvis"] = $"Data Source={DatabasePath}",
-                ["Outbox:Enabled"] = "false",
-                ["OpenAI:ApiKey"] = "test-openai-key",
-                ["OpenAI:BaseUrl"] = "https://api.openai.com/",
-                ["OpenAI:RealtimeModel"] = "gpt-4o-realtime-preview",
-                ["OpenAI:RealtimeVoice"] = "alloy",
-                ["OpenAI:AllowedVoices:0"] = "alloy",
-                ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
-                ["OpenAI:ClientSecretLifetimeSeconds"] = "600"
-            }));
+        var settings = new Dictionary<string, string?>
+        {
+            ["Authentication:BearerToken"] = Token,
+            ["ConnectionStrings:Jarvis"] = $"Data Source={DatabasePath}",
+            ["Outbox:Enabled"] = "false",
+            ["FakeWorker:Enabled"] = "false",
+            ["FakeWorker:DelayMs"] = "0",
+            ["FakeWorker:LeaseRenewalIntervalMs"] = "10",
+            ["OpenAI:ApiKey"] = "test-openai-key",
+            ["OpenAI:BaseUrl"] = "https://api.openai.com/",
+            ["OpenAI:RealtimeModel"] = "gpt-4o-realtime-preview",
+            ["OpenAI:RealtimeVoice"] = "alloy",
+            ["OpenAI:AllowedVoices:0"] = "alloy",
+            ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
+            ["OpenAI:ClientSecretLifetimeSeconds"] = "600"
+        };
+        if (_workerDeviceId is not null)
+        {
+            settings["FakeWorker:WorkerDeviceId"] = _workerDeviceId;
+        }
+
+        builder.ConfigureAppConfiguration((_, configuration) => configuration.AddInMemoryCollection(settings));
         if (_outboxPublisher is not null)
         {
             builder.ConfigureTestServices(services =>
@@ -89,6 +104,14 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             {
                 services.RemoveAll<IRealtimeClientSecretProvider>();
                 services.AddSingleton(_realtimeProvider);
+            });
+        }
+        if (_fakeDelayAdapter is not null)
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IFakeDelayAdapter>();
+                services.AddSingleton(_fakeDelayAdapter);
             });
         }
     }

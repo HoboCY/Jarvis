@@ -18,6 +18,35 @@ export interface TypedMessageCreatedPayload {
   sequence: number;
 }
 
+export interface TaskUpdatedPayload {
+  userId: string;
+  conversationId: string;
+  taskId: string;
+  status: string;
+  eventType: string;
+  occurredAt: number;
+  entityVersion: number;
+}
+
+export interface NotificationCreatedPayload {
+  userId: string;
+  notificationId: string;
+  taskId?: string | null;
+  conversationId?: string | null;
+  type: string;
+  severity: string;
+  title: string;
+  body: string;
+  status: "pending" | "delivered";
+  dedupKey: string;
+  entityVersion: number;
+}
+
+export interface NotificationUpdatedPayload extends Omit<NotificationCreatedPayload, "status"> {
+  status: "pending" | "delivered" | "read" | "actioned" | "dismissed";
+  action: "delivered" | "read" | "dismiss";
+}
+
 export function decodeSignalREventEnvelope(
   value: unknown,
 ): SignalREventEnvelope {

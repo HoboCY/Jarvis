@@ -5,6 +5,7 @@ import {
   createRealtimeAgent,
   mapRealtimeConnectionError,
   sendTypedMessage,
+  type RealtimeTaskBackend,
   type NormalizedRealtimeEvent
 } from "@jarvis/realtime-agent";
 
@@ -25,6 +26,80 @@ export interface DesktopRealtimeBackend {
     events: NormalizedRealtimeEvent[];
     idempotencyKey: string;
   }) => Promise<unknown>;
+  delegateTask?: RealtimeTaskBackend["delegateTask"];
+  getTaskStatus?: RealtimeTaskBackend["getTaskStatus"];
+  cancelTask?: RealtimeTaskBackend["cancelTask"];
+}
+
+export type RealtimeTaskStatusResponse = {
+  taskId: string;
+  status: string;
+  progressSummary: string | null;
+  requiresUserAction: boolean;
+};
+
+export type RealtimeCancelResponse = {
+  accepted: boolean;
+  status: string;
+};
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function responseRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function responseString(value: unknown, message: string, maxLength = 200): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) {
+    throw new Error(message);
+  }
+  return value.trim();
+}
+
+function responseStatus(value: unknown, message: string): string {
+  return responseString(value, message, 100);
+}
+
+export function mapRealtimeTaskStatusResponse(value: unknown): RealtimeTaskStatusResponse {
+  const message = "Invalid Realtime task status response.";
+  const item = responseRecord(value, message);
+  const rawTaskId = item.taskId ?? item.id;
+  if (typeof rawTaskId !== "string" || !uuidPattern.test(rawTaskId)) {
+    throw new Error(message);
+  }
+
+  const status = responseStatus(item.status, message);
+  const progressSummary = item.progressSummary;
+  if (progressSummary !== undefined
+    && progressSummary !== null
+    && (typeof progressSummary !== "string" || progressSummary.length > 2_000)) {
+    throw new Error(message);
+  }
+
+  const normalizedStatus = status.toLowerCase();
+  return {
+    taskId: rawTaskId,
+    status,
+    progressSummary: progressSummary === undefined || progressSummary === null ? null : progressSummary,
+    requiresUserAction: normalizedStatus === "waitingforapproval"
+      || normalizedStatus === "waitingforuserinput"
+  };
+}
+
+export function mapRealtimeCancelResponse(value: unknown): RealtimeCancelResponse {
+  const message = "Invalid Realtime cancellation response.";
+  const item = responseRecord(value, message);
+  if (typeof item.accepted !== "boolean") {
+    throw new Error(message);
+  }
+
+  return {
+    accepted: item.accepted,
+    status: responseStatus(item.status, message)
+  };
 }
 
 export type DesktopRealtimeStatus = "disconnected" | "connecting" | "connected" | "degraded";
@@ -154,7 +229,17 @@ export class DesktopRealtimeController {
 
   private async prepareSession(input: DesktopRealtimeConnectionInput): Promise<PreparedRealtimeSession> {
     const generation = ++this.nextConnectionGeneration;
-    const session = this.createSession(createRealtimeAgent(input.instructions, input.voice), {
+    const taskBackend = this.backend.delegateTask && this.backend.getTaskStatus && this.backend.cancelTask
+      ? {
+          delegateTask: this.backend.delegateTask,
+          getTaskStatus: this.backend.getTaskStatus,
+          cancelTask: this.backend.cancelTask
+        }
+      : undefined;
+    const session = this.createSession(createRealtimeAgent(input.instructions, input.voice, {
+      backend: taskBackend,
+      sessionScope: input.realtimeSessionId
+    }), {
       transport: "webrtc",
       model: input.model,
       historyStoreAudio: false,

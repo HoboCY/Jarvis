@@ -170,6 +170,116 @@ public sealed record DesktopDeviceBootstrapResponse(
     string Platform,
     DeviceStatusValue Status);
 
+[JsonConverter(typeof(CamelCaseEnumConverter<TaskStatusValue>))]
+public enum TaskStatusValue
+{
+    Queued,
+    Assigned,
+    Running,
+    WaitingForApproval,
+    WaitingForUserInput,
+    CancellationRequested,
+    Recovering,
+    Succeeded,
+    Failed,
+    Cancelled
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<WorkerKindValue>))]
+public enum WorkerKindValue
+{
+    Internal,
+    Responses,
+    Codex
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<NotificationSeverityValue>))]
+public enum NotificationSeverityValue
+{
+    Info,
+    Success,
+    Warning,
+    Error
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<NotificationStatusValue>))]
+public enum NotificationStatusValue
+{
+    Pending,
+    Delivered,
+    Read,
+    Actioned,
+    Dismissed
+}
+
+public sealed record CreateTaskRequest(
+    Guid ConversationId,
+    IReadOnlyList<Guid>? SourceMessageIds,
+    string Goal,
+    string? ExpectedOutput,
+    IReadOnlyList<string>? RequiredCapabilities,
+    Guid? PreferredDeviceId = null,
+    IReadOnlyList<string>? AttachmentRefs = null);
+
+public sealed record TaskResponse(
+    Guid Id,
+    Guid ConversationId,
+    Guid? CreatedByMessageId,
+    string Goal,
+    string? ExpectedOutput,
+    IReadOnlyList<string> RequiredCapabilities,
+    IReadOnlyList<string> AttachmentRefs,
+    Guid? PreferredDeviceId,
+    Guid? AssignedDeviceId,
+    WorkerKindValue WorkerKind,
+    TaskStatusValue Status,
+    int Priority,
+    int Attempt,
+    string? ProgressSummary,
+    string? ResultSummary,
+    string? ResultPayloadJson,
+    string? ErrorCode,
+    string? ErrorMessage,
+    long EntityVersion,
+    long CreatedAtMs,
+    long? StartedAtMs,
+    long? CompletedAtMs);
+
+public sealed record TaskAcceptedResponse(
+    bool Accepted,
+    Guid TaskId,
+    TaskStatusValue Status,
+    WorkerKindValue WorkerKind,
+    string Message = "任务已进入后台队列");
+
+public sealed record TaskListResponse(
+    IReadOnlyList<TaskResponse> Items,
+    string? NextCursor = null);
+
+public sealed record TaskCancelResponse(
+    Guid TaskId,
+    bool Accepted,
+    TaskStatusValue Status);
+
+public sealed record NotificationResponse(
+    Guid Id,
+    Guid? ConversationId,
+    Guid? TaskId,
+    string Type,
+    NotificationSeverityValue Severity,
+    string Title,
+    string Body,
+    string ActionsJson,
+    string DedupKey,
+    NotificationStatusValue Status,
+    long EntityVersion,
+    long CreatedAtMs,
+    long? DeliveredAtMs,
+    long? ReadAtMs,
+    long? ActionedAtMs);
+
+public sealed record NotificationListResponse(IReadOnlyList<NotificationResponse> Items);
+
 [JsonConverter(typeof(CamelCaseEnumConverter<DeviceTypeValue>))]
 public enum DeviceTypeValue
 {

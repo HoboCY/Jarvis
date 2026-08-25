@@ -1,11 +1,15 @@
 using Jarvis.Application.Conversations;
 using Jarvis.Application.Identity;
+using Jarvis.Application.Notifications;
 using Jarvis.Application.Realtime;
+using Jarvis.Application.Tasks;
 using Jarvis.Infrastructure.Conversations;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
 using Jarvis.Infrastructure.Outbox;
+using Jarvis.Infrastructure.Notifications;
 using Jarvis.Infrastructure.Realtime;
+using Jarvis.Infrastructure.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -41,6 +45,21 @@ public static class InfrastructureServiceCollectionExtensions
             .ValidateOnStart();
         services.AddScoped<IConversationStore, EfConversationStore>();
         services.AddScoped<ConversationService>();
+        services.AddScoped<EfTaskStore>();
+        services.AddScoped<ITaskStore>(serviceProvider => serviceProvider.GetRequiredService<EfTaskStore>());
+        services.AddScoped<TaskService>();
+        services.AddScoped<INotificationStore, EfNotificationStore>();
+        services.AddScoped<NotificationService>();
+        services.AddScoped<FakeDelayWorker>();
+        services.AddSingleton<IFakeDelayAdapter, FakeDelayAdapter>();
+        services.AddOptions<FakeDelayOptions>()
+            .Bind(configuration.GetSection(FakeDelayOptions.SectionName))
+            .Validate(options => options.DelayMs is >= 0 and <= 60_000, "FakeWorker:DelayMs must be between 0 and 60000.")
+            .Validate(options => options.PollingIntervalMs is >= 25 and <= 60_000, "FakeWorker:PollingIntervalMs must be between 25 and 60000.")
+            .Validate(options => options.LeaseRenewalIntervalMs is >= 1 and <= 60_000, "FakeWorker:LeaseRenewalIntervalMs must be between 1 and 60000.")
+            .Validate(options => FakeDelayOptions.IsValidWorkerDeviceId(options.WorkerDeviceId), "FakeWorker:WorkerDeviceId must be empty or a non-empty GUID.")
+            .ValidateOnStart();
+        services.AddHostedService<FakeDelayWorkerHostedService>();
         services.AddSingleton<ContextAssembler>();
         services.AddSingleton<EphemeralSecretReplayCache>();
         services.AddSingleton<RealtimeClientSecretSingleFlight>();
