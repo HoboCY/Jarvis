@@ -1,0 +1,28 @@
+{
+  "name": "@jarvis/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "lint": "../../../node_modules/.bin/eslint --config ../../../eslint.config.mjs src",
+    "test": "tsx --test src/security.test.ts",
+    "build": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json && tsc -p tsconfig.renderer.json && node scripts/copy-assets.mjs"
+  },
+  "dependencies": {
+    "@jarvis/api-client-ts": "workspace:*",
+    "@jarvis/contracts-ts": "workspace:*",
+    "@jarvis/realtime-agent": "workspace:*",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "@types/react": "19.1.9",
+    "@types/react-dom": "19.1.7",
+    "electron": "37.2.6",
+    "tsx": "4.19.2",
+    "typescript": "5.9.2"
+  }
+}

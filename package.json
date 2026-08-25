@@ -1,0 +1,30 @@
+{
+  "name": "jarvis",
+  "private": true,
+  "packageManager": "pnpm@10.24.0",
+  "engines": {
+    "node": "24.19.0",
+    "pnpm": "10.24.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.35.0",
+    "eslint": "9.35.0",
+    "globals": "16.4.0",
+    "openapi-typescript": "7.9.1",
+    "typescript-eslint": "8.42.0"
+  },
+  "scripts": {
+    "typecheck": "pnpm --filter @jarvis/contracts-ts build && pnpm --recursive --if-present run typecheck",
+    "lint": "eslint .",
+    "test": "pnpm --recursive --if-present run test",
+    "build": "pnpm --recursive --if-present run build",
+    "generate:openapi": "node eng/scripts/generate-openapi.mjs",
+    "check:openapi": "node eng/scripts/check-openapi-diff.mjs",
+    "canonicalize:codex-schema": "node eng/scripts/canonicalize-codex-schema.mjs",
+    "check:codex-schema": "node eng/scripts/check-codex-schema.mjs",
+    "check:codex-schema-canonical": "node eng/scripts/check-codex-schema-canonical.mjs",
+    "test:codex-schema-canonical": "node --test eng/scripts/codex-schema-canonical.test.mjs",
+    "check:secrets": "node eng/scripts/check-secrets.mjs",
+    "test:secret-scan": "node --test eng/scripts/secret-scan.test.mjs"
+  }
+}

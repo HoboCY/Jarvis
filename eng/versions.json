@@ -1,0 +1,10 @@
+{
+  "dotnetSdk": "10.0.100",
+  "node": "24.19.0",
+  "pnpm": "10.24.0",
+  "codex": {
+    "version": "0.146.0",
+    "platform": "darwin-arm64",
+    "sha256": "ae1d3ffe6d48aec6a4dc3f50e7eb8e0d11962485a6a9406c5a7012139383da02"
+  }
+}

@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  phase-0:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Setup pnpm 10.24.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Restore backend with lock files
+        run: dotnet restore Jarvis.sln --locked-mode
+
+      - name: Build backend
+        run: dotnet build Jarvis.sln --configuration Release --no-restore
+
+      - name: Test backend
+        run: dotnet test Jarvis.sln --configuration Release --no-build --no-restore
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck workspace
+        run: pnpm typecheck
+
+      - name: Lint workspace
+        run: pnpm lint
+
+      - name: Test workspace
+        run: pnpm test
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Verify OpenAPI generated contract
+        run: pnpm check:openapi
+
+      - name: Reject OpenAPI generated drift
+        run: git diff --exit-code -- artifacts/openapi/openapi.json packages/contracts-ts/src/generated/openapi.ts
+
+      - name: Verify Codex 0.146.0 schema contract
+        run: pnpm check:codex-schema
+
+      - name: Verify Codex schema canonical JSON
+        run: pnpm check:codex-schema-canonical
+
+      - name: Test Codex schema canonicalizer
+        run: pnpm test:codex-schema-canonical
+
+      - name: Run source secret scan
+        run: pnpm check:secrets
+
+      - name: Test secret scan fixtures
+        run: pnpm test:secret-scan
+
+      - name: Run Electron security configuration test
+        run: pnpm --filter @jarvis/desktop test

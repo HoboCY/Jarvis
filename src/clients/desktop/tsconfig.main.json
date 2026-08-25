@@ -1,0 +1,11 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src/main",
+    "outDir": "dist/main",
+    "types": ["node", "electron"],
+    "lib": ["ES2022"]
+  },
+  "include": ["src/main/**/*.ts"]
+}

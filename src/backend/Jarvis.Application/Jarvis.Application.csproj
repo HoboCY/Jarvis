@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Jarvis.Application</AssemblyName>
+    <RootNamespace>Jarvis.Application</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Jarvis.Domain/Jarvis.Domain.csproj" />
+    <ProjectReference Include="../Jarvis.Contracts/Jarvis.Contracts.csproj" />
+  </ItemGroup>
+</Project>

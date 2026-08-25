@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/realtime-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "../../node_modules/.bin/eslint --config ../../eslint.config.mjs src",
+    "test": "tsx --test src/realtime-agent.test.ts",
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "tsx": "4.19.2",
+    "typescript": "5.9.2"
+  }
+}

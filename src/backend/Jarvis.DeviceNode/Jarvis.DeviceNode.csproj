@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Jarvis.DeviceNode</AssemblyName>
+    <RootNamespace>Jarvis.DeviceNode</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../Jarvis.Application/Jarvis.Application.csproj" />
+    <ProjectReference Include="../Jarvis.Infrastructure/Jarvis.Infrastructure.csproj" />
+    <ProjectReference Include="../Jarvis.Contracts/Jarvis.Contracts.csproj" />
+  </ItemGroup>
+</Project>

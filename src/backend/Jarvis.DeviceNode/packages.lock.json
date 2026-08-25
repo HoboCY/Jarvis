@@ -1,0 +1,28 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "jarvis.application": {
+        "type": "Project",
+        "dependencies": {
+          "Jarvis.Contracts": "[1.0.0, )",
+          "Jarvis.Domain": "[1.0.0, )"
+        }
+      },
+      "jarvis.contracts": {
+        "type": "Project"
+      },
+      "jarvis.domain": {
+        "type": "Project"
+      },
+      "jarvis.infrastructure": {
+        "type": "Project",
+        "dependencies": {
+          "Jarvis.Application": "[1.0.0, )",
+          "Jarvis.Contracts": "[1.0.0, )",
+          "Jarvis.Domain": "[1.0.0, )"
+        }
+      }
+    }
+  }
+}

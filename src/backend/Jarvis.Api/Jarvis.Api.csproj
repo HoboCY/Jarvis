@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Jarvis.Api</AssemblyName>
+    <RootNamespace>Jarvis.Api</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <ProjectReference Include="../Jarvis.Application/Jarvis.Application.csproj" />
+    <ProjectReference Include="../Jarvis.Infrastructure/Jarvis.Infrastructure.csproj" />
+    <ProjectReference Include="../Jarvis.Contracts/Jarvis.Contracts.csproj" />
+  </ItemGroup>
+</Project>
