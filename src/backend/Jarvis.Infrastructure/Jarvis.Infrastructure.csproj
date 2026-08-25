@@ -3,9 +3,21 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>Jarvis.Infrastructure</AssemblyName>
     <RootNamespace>Jarvis.Infrastructure</RootNamespace>
+    <NoWarn>$(NoWarn);CA1861</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Update="Data/Migrations/**/*.cs">
+      <NoWarn>$(NoWarn);CA1861</NoWarn>
+    </Compile>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
     <ProjectReference Include="../Jarvis.Application/Jarvis.Application.csproj" />
     <ProjectReference Include="../Jarvis.Domain/Jarvis.Domain.csproj" />
     <ProjectReference Include="../Jarvis.Contracts/Jarvis.Contracts.csproj" />

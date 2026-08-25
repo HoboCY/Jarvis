@@ -1,13 +1,18 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { dirname, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const apiProject = resolve(root, "src/backend/Jarvis.Api/Jarvis.Api.csproj");
 const openApiPath = resolve(root, "artifacts/openapi/openapi.json");
 const contractsPath = resolve(root, "packages/contracts-ts/src/generated/openapi.ts");
 const port = "45432";
+const temporaryDirectory = await mkdtemp(join(tmpdir(), "jarvis-openapi-"));
+const temporaryDatabase = join(temporaryDirectory, "jarvis.db");
+const temporaryBearerToken = randomBytes(48).toString("base64url");
 
 await mkdir(dirname(openApiPath), { recursive: true });
 await mkdir(dirname(contractsPath), { recursive: true });
@@ -22,7 +27,13 @@ const dotnet = spawn("dotnet", [
 ], {
   cwd: root,
   stdio: "ignore",
-  env: { ...process.env, ASPNETCORE_ENVIRONMENT: "Production" }
+  env: {
+    ...process.env,
+    ASPNETCORE_ENVIRONMENT: "Production",
+    Authentication__BearerToken: temporaryBearerToken,
+    ConnectionStrings__Jarvis: `Data Source=${temporaryDatabase}`,
+    Outbox__Enabled: "false"
+  }
 });
 
 let ready = false;
@@ -72,4 +83,5 @@ try {
   if (!dotnet.killed) {
     dotnet.kill("SIGTERM");
   }
+  await rm(temporaryDirectory, { recursive: true, force: true });
 }

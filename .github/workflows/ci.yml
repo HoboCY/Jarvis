@@ -33,6 +33,12 @@ jobs:
       - name: Restore backend with lock files
         run: dotnet restore Jarvis.sln --locked-mode
 
+      - name: Restore local .NET tools
+        run: dotnet tool restore
+
+      - name: Verify EF migration model has no drift
+        run: dotnet ef migrations has-pending-model-changes --project src/backend/Jarvis.Infrastructure/Jarvis.Infrastructure.csproj --startup-project src/backend/Jarvis.Api/Jarvis.Api.csproj --context Jarvis.Infrastructure.Data.JarvisDbContext
+
       - name: Build backend
         run: dotnet build Jarvis.sln --configuration Release --no-restore
 

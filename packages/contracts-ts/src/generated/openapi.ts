@@ -21,16 +21,154 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Creates a conversation for the authenticated local user. */
+        post: operations["CreateConversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{conversationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Returns an owned conversation and its recent messages. */
+        get: operations["GetConversation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{conversationId}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Returns owned conversation messages using a descending cursor. */
+        get: operations["GetConversationMessages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{conversationId}/messages/typed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Persists a typed message exactly once for an idempotency key. */
+        post: operations["AddTypedConversationMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ConversationResponse: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            status: components["schemas"]["ConversationStatusValue"];
+            /** Format: int64 */
+            lastActivityAtMs: number | string;
+            /** Format: int64 */
+            createdAtMs: number | string;
+            messages: components["schemas"]["MessageResponse"][];
+            /** Format: int32 */
+            messageCount: number | string;
+        };
+        /** @enum {unknown} */
+        ConversationStatusValue: "active" | "archived";
+        CreateConversationRequest: {
+            title: null | string;
+        };
+        /** @enum {unknown} */
+        MessageInputModalityValue: "voice" | "typedText" | "image" | "tool" | null;
+        /** @enum {unknown} */
+        MessageOutputModalityValue: "audio" | "text" | "audioWithTranscript" | null;
+        MessagePageResponse: {
+            items: components["schemas"]["MessageResponse"][];
+            nextCursor: null | string;
+        };
+        MessageResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            conversationId: string;
+            role: components["schemas"]["MessageRoleValue"];
+            inputModality: null | components["schemas"]["MessageInputModalityValue"];
+            outputModality: null | components["schemas"]["MessageOutputModalityValue"];
+            text: null | string;
+            status: components["schemas"]["MessageStatusValue"];
+            externalItemId: null | string;
+            clientRequestId: null | string;
+            /** Format: int64 */
+            sequence: number | string;
+            /** Format: int64 */
+            startedAtMs: number | string;
+            /** Format: int64 */
+            completedAtMs: null | number | string;
+        };
+        /** @enum {unknown} */
+        MessageRoleValue: "user" | "assistant" | "tool" | "system";
+        /** @enum {unknown} */
+        MessageStatusValue: "pending" | "streaming" | "completed" | "interrupted" | "failed";
         Phase0HealthResponse: {
             status: components["schemas"]["Phase0Status"];
             version: string;
         };
         /** @enum {unknown} */
         Phase0Status: "ready";
+        ProblemDetails: {
+            type?: null | string;
+            title?: null | string;
+            /** Format: int32 */
+            status?: null | number | string;
+            detail?: null | string;
+            instance?: null | string;
+        };
+        TypedMessageRequest: {
+            clientRequestId: string;
+            text: string;
+            /** @default text */
+            replyMode: string;
+        };
+        TypedMessageResponse: {
+            /** Format: uuid */
+            messageId: string;
+            /** Format: int64 */
+            sequence: number | string;
+            accepted: boolean;
+        };
     };
     responses: never;
     parameters: never;
@@ -56,6 +194,215 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Phase0HealthResponse"];
+                };
+            };
+        };
+    };
+    CreateConversation: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConversationRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetConversationMessages: {
+        parameters: {
+            query?: {
+                cursor?: number | string;
+                limit?: number | string;
+            };
+            header?: never;
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagePageResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    AddTypedConversationMessage: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TypedMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TypedMessageResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
                 };
             };
         };
