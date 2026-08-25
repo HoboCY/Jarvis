@@ -464,6 +464,7 @@
           "Microsoft.EntityFrameworkCore": "[10.0.11, )",
           "Microsoft.EntityFrameworkCore.Sqlite": "[10.0.11, )",
           "Microsoft.Extensions.Hosting": "[10.0.11, )",
+          "Microsoft.Extensions.Http": "[10.0.11, )",
           "SQLitePCLRaw.bundle_e_sqlite3": "[2.1.13, )"
         }
       },
@@ -521,6 +522,20 @@
           "Microsoft.Extensions.Logging.Debug": "10.0.11",
           "Microsoft.Extensions.Logging.EventLog": "10.0.11",
           "Microsoft.Extensions.Logging.EventSource": "10.0.11",
+          "Microsoft.Extensions.Options": "10.0.11"
+        }
+      },
+      "Microsoft.Extensions.Http": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.11, )",
+        "resolved": "10.0.11",
+        "contentHash": "ujx8RvcKzkxPFBguwgiygbwWVHVK0P7HFlNJ6I0JBRb28tzwe42jixBoA+dGmqG9IHepPVcm04vv2IDnU93ekA==",
+        "dependencies": {
+          "Microsoft.Extensions.Configuration.Abstractions": "10.0.11",
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.11",
+          "Microsoft.Extensions.Diagnostics": "10.0.11",
+          "Microsoft.Extensions.Logging": "10.0.11",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.11",
           "Microsoft.Extensions.Options": "10.0.11"
         }
       },

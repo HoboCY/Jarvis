@@ -1,0 +1,674 @@
+import { strict as assert } from "node:assert";
+import { test } from "node:test";
+import type { NormalizedRealtimeEvent, RealtimeSession } from "@jarvis/realtime-agent";
+import { ensureConversation } from "./conversation-flow.js";
+import { DesktopRealtimeController } from "./realtime.js";
+
+type Listener = (...args: never[]) => void;
+
+test("ensureConversation creates once and lets the first connect continue", async () => {
+  const created = { id: "conversation-created" };
+  let createCalls = 0;
+
+  const result = await ensureConversation(undefined, async () => {
+    createCalls++;
+    return created;
+  });
+
+  assert.equal(result, created);
+  assert.equal(createCalls, 1);
+});
+
+class FakeTransport {
+  public readonly sentEvents: unknown[] = [];
+  private readonly listeners = new Map<string, Listener[]>();
+
+  public on(event: string, listener: Listener): this {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
+    return this;
+  }
+
+  public emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener(...(args as never[]));
+    }
+  }
+
+  public sendEvent(event: unknown): void {
+    this.sentEvents.push(event);
+  }
+}
+
+class FakeSession {
+  public readonly transport = new FakeTransport();
+  public readonly calls: string[] = [];
+  public history: unknown[] = [];
+  private readonly listeners = new Map<string, Listener[]>();
+
+  public constructor(
+    private readonly emitSessionCreated = true,
+    private readonly connectError?: Error,
+    private readonly deferSessionCreated = false
+  ) {}
+
+  public async connect(): Promise<void> {
+    if (this.connectError) {
+      throw this.connectError;
+    }
+
+    if (this.emitSessionCreated) {
+      const emitCreated = () => {
+        this.transport.emit("*", { type: "session.created", session: { id: "external-scripted" } });
+      };
+      if (this.deferSessionCreated) {
+        await Promise.resolve();
+        setImmediate(emitCreated);
+      } else {
+        emitCreated();
+      }
+    }
+  }
+
+  public on(event: string, listener: Listener): this {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
+    return this;
+  }
+
+  public emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener(...(args as never[]));
+    }
+  }
+
+  public interrupt(): void {
+    this.calls.push("interrupt");
+  }
+
+  public close(): void {
+    this.calls.push("close");
+  }
+
+  public mute(): void {
+    this.calls.push("mute");
+  }
+}
+
+test("Desktop controller uses the injected session and preserves typed persistence order", async () => {
+  const fakeSession = new FakeSession();
+  const lifecycle: string[] = [];
+  let agentInstructions = "";
+  const controller = new DesktopRealtimeController(
+    "conversation-1",
+    {
+      markConnected: async input => {
+        lifecycle.push(`connected:${input.externalSessionId}`);
+      },
+      markEnded: async input => {
+        lifecycle.push(`ended:${input.status}`);
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    agent => {
+      agentInstructions = typeof agent.instructions === "string" ? agent.instructions : "";
+      return fakeSession as unknown as RealtimeSession;
+    }
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000001",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context with preferences"
+    });
+    assert.equal(controller.status, "connected");
+    assert.equal(agentInstructions, "server context with preferences");
+    assert.deepEqual(lifecycle, ["connected:external-scripted"]);
+
+    await controller.sendTyped("继续", async text => {
+      lifecycle.push(`persist:${text}`);
+    });
+    assert.deepEqual(lifecycle, ["connected:external-scripted", "persist:继续"]);
+    assert.deepEqual(fakeSession.calls, ["interrupt"]);
+    assert.equal(fakeSession.transport.sentEvents.length, 2);
+    assert.deepEqual(fakeSession.transport.sentEvents[1], {
+      type: "response.create",
+      response: { output_modalities: ["text"] }
+    });
+  } finally {
+    await controller.disconnect();
+  }
+
+  assert.deepEqual(fakeSession.calls, ["interrupt", "close"]);
+  assert.deepEqual(lifecycle, [
+    "connected:external-scripted",
+    "persist:继续",
+    "ended:disconnected"
+  ]);
+});
+
+test("Desktop controller rejects a connection without the actual WebRTC session id", async () => {
+  const fakeSession = new FakeSession(false);
+  let connectedExternalSessionId = "";
+  const controller = new DesktopRealtimeController(
+    "conversation-1",
+    {
+      markConnected: async input => {
+        connectedExternalSessionId = input.externalSessionId;
+      },
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  await assert.rejects(
+    controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000002",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    }),
+    /actual WebRTC session id/
+  );
+  assert.equal(connectedExternalSessionId, "");
+});
+
+test("Desktop controller waits for session.created emitted after connect resolves", async () => {
+  const fakeSession = new FakeSession(true, undefined, true);
+  let connectedExternalSessionId = "";
+  const controller = new DesktopRealtimeController(
+    "conversation-deferred-session-id",
+    {
+      markConnected: async input => {
+        connectedExternalSessionId = input.externalSessionId;
+      },
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000003",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    assert.equal(connectedExternalSessionId, "external-scripted");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("rotation marks the replacement connected before closing the old session", async () => {
+  const first = new FakeSession();
+  const second = new FakeSession();
+  const sessions = [first, second];
+  const lifecycle: string[] = [];
+  let sessionIndex = 0;
+  let now = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-rotation",
+    {
+      markConnected: async input => lifecycle.push(`connected:${input.sessionId}`),
+      markEnded: async input => lifecycle.push(`ended:${input.sessionId}:${input.status}`),
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => sessions[sessionIndex++] as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000011",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => ({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000012",
+      clientSecret: "ek_scripted-2",
+      model: "model",
+      voice: "voice",
+      instructions: "server context after rotation"
+    }));
+    now = 50 * 60 * 1000;
+
+    await controller.rotateIfIdle();
+
+    // A late disconnect from the old transport must not tear down the new one.
+    first.transport.emit("connection_change", "disconnected");
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(lifecycle, [
+      "connected:00000000-0000-0000-0000-000000000011",
+      "connected:00000000-0000-0000-0000-000000000012",
+      "ended:00000000-0000-0000-0000-000000000011:rotated"
+    ]);
+    assert.deepEqual(first.calls, ["close"]);
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000012");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("failed rotation keeps the old session open and does not end it", async () => {
+  const first = new FakeSession();
+  const failedReplacement = new FakeSession(false, new Error("network unavailable"));
+  const sessions = [first, failedReplacement];
+  const lifecycle: string[] = [];
+  let sessionIndex = 0;
+  let now = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-rotation-failure",
+    {
+      markConnected: async input => lifecycle.push(`connected:${input.sessionId}`),
+      markEnded: async input => lifecycle.push(`ended:${input.sessionId}:${input.status}`),
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => sessions[sessionIndex++] as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000021",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => ({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000022",
+      clientSecret: "ek_scripted-2",
+      model: "model",
+      voice: "voice",
+      instructions: "server context after rotation"
+    }));
+    now = 50 * 60 * 1000;
+
+    await controller.rotateIfIdle();
+
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000021");
+    assert.equal(controller.status, "connected");
+    assert.deepEqual(first.calls, []);
+    assert.deepEqual(lifecycle, [
+      "connected:00000000-0000-0000-0000-000000000021",
+      "ended:00000000-0000-0000-0000-000000000022:failed"
+    ]);
+    assert.equal(lifecycle.some(item => item.includes("00000000-0000-0000-0000-000000000021") && item.includes("ended")), false);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("rotation secret/bootstrap failure keeps the old session connected", async () => {
+  const first = new FakeSession();
+  let now = 0;
+  const lifecycle: string[] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-bootstrap-failure",
+    {
+      markConnected: async input => lifecycle.push(`connected:${input.sessionId}`),
+      markEnded: async input => lifecycle.push(`ended:${input.sessionId}:${input.status}`),
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => first as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000061",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => {
+      throw new Error("client secret bootstrap unavailable");
+    });
+    now = 50 * 60 * 1000;
+
+    await controller.rotateIfIdle();
+
+    assert.equal(controller.status, "connected");
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000061");
+    assert.deepEqual(first.calls, []);
+    assert.deepEqual(lifecycle, ["connected:00000000-0000-0000-0000-000000000061"]);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("disconnect persistence failure keeps the controller reachable for an explicit retry", async () => {
+  const fakeSession = new FakeSession();
+  let failPersistence = true;
+  const ingestedEventIds: string[] = [];
+  const attemptedBatchKeys: string[] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-disconnect-retry",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async input => {
+        attemptedBatchKeys.push(input.idempotencyKey);
+        if (failPersistence) {
+          throw new Error("persistence unavailable");
+        }
+        ingestedEventIds.push(...input.events.map(event => event.eventId));
+      }
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000062",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    fakeSession.transport.emit("output_text_delta", { itemId: "retry-item", delta: "待重试", responseId: "response-1" });
+
+    assert.equal(await controller.disconnect("user-requested"), false);
+    assert.equal(controller.status, "degraded");
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000062");
+    assert.deepEqual(fakeSession.calls, []);
+
+    failPersistence = false;
+    assert.equal(await controller.retryPersistence(), true);
+    assert.equal(controller.status, "connected");
+    assert.equal(ingestedEventIds.length, 1);
+    assert.equal(attemptedBatchKeys.length, 2);
+    assert.equal(attemptedBatchKeys[0], attemptedBatchKeys[1]);
+    assert.equal(await controller.disconnect("user-requested"), true);
+  } finally {
+    failPersistence = false;
+    await controller.disconnect();
+  }
+});
+
+test("failed rotated lifecycle closes the old transport and retries with the same operation", async () => {
+  const first = new FakeSession();
+  const second = new FakeSession();
+  const sessions = [first, second];
+  const lifecycle: string[] = [];
+  const rotatedEndKeys: string[] = [];
+  let failRotatedEnd = true;
+  let sessionIndex = 0;
+  let now = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-rotation-end-retry",
+    {
+      markConnected: async input => lifecycle.push(`connected:${input.sessionId}`),
+      markEnded: async input => {
+        lifecycle.push(`ended:${input.sessionId}:${input.status}`);
+        if (input.status === "rotated") {
+          rotatedEndKeys.push(input.idempotencyKey);
+        }
+        if (input.status === "rotated" && failRotatedEnd) {
+          throw new Error("lifecycle persistence unavailable");
+        }
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => sessions[sessionIndex++] as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000071",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => ({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000072",
+      clientSecret: "ek_scripted-2",
+      model: "model",
+      voice: "voice",
+      instructions: "server context after rotation"
+    }));
+    now = 50 * 60 * 1000;
+
+    await controller.rotateIfIdle();
+
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000072");
+    assert.equal(controller.status, "connected");
+    assert.deepEqual(first.calls, ["close"]);
+    assert.deepEqual(second.calls, []);
+    assert.equal(lifecycle.filter(item => item.includes(":rotated")).length, 1);
+
+    failRotatedEnd = false;
+    assert.equal(await controller.retryPersistence(), true);
+    assert.equal(lifecycle.filter(item => item.includes(":rotated")).length, 2);
+    assert.equal(rotatedEndKeys[0], rotatedEndKeys[1]);
+  } finally {
+    failRotatedEnd = false;
+    await controller.disconnect();
+  }
+});
+
+test("audio interruption persists only SDK-confirmed truncated history", async () => {
+  const fakeSession = new FakeSession();
+  const persisted: Array<{ status: string; text?: string }> = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-interruption",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async input => {
+        persisted.push(...input.events.map(event => ({ status: event.status, text: event.text })));
+      }
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000031",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    fakeSession.transport.emit("audio_transcript_delta", {
+      itemId: "assistant-item",
+      delta: "未确认的增量",
+      responseId: "response-1"
+    });
+    fakeSession.emit("audio_interrupted");
+    await Promise.resolve();
+    assert.equal(persisted.some(item => item.status === "interrupted"), false);
+
+    fakeSession.history = [{
+      itemId: "assistant-item",
+      type: "message",
+      role: "assistant",
+      status: "incomplete",
+      content: [{ type: "output_audio", transcript: "已确认的截断文本", audio: null }]
+    }];
+    fakeSession.emit("history_updated", fakeSession.history);
+    await controller.flushPendingPersistence();
+
+    assert.deepEqual(persisted, [{ status: "streaming", text: "未确认的增量" }, { status: "interrupted", text: "已确认的截断文本" }]);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("buffers multiple realtime events into one bounded ingest batch", async () => {
+  const fakeSession = new FakeSession();
+  const ingests: NormalizedRealtimeEvent[][] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-batch",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async input => {
+        ingests.push(input.events);
+      }
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000041",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    fakeSession.transport.emit("output_text_delta", { itemId: "item-1", delta: "一", responseId: "response-1" });
+    fakeSession.transport.emit("output_text_delta", { itemId: "item-1", delta: "二", responseId: "response-1" });
+
+    assert.equal(await controller.flushPendingPersistence(), true);
+    assert.equal(ingests.length, 1);
+    assert.equal(ingests[0]!.length, 2);
+    assert.notEqual(ingests[0]![0]!.eventId, ingests[0]![1]!.eventId);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("flush drains events queued while an ingest request is resolving", async () => {
+  const fakeSession = new FakeSession();
+  const ingests: NormalizedRealtimeEvent[][] = [];
+  let releaseFirstIngest: (() => void) | undefined;
+  let firstIngest = true;
+  const controller = new DesktopRealtimeController(
+    "conversation-flush-race",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async input => {
+        ingests.push(input.events);
+        if (firstIngest) {
+          firstIngest = false;
+          await new Promise<void>(resolve => {
+            releaseFirstIngest = resolve;
+          });
+        }
+      }
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000042",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    fakeSession.transport.emit("output_text_delta", { itemId: "item-1", delta: "一", responseId: "response-1" });
+    const flush = controller.flushPendingPersistence();
+    assert.ok(releaseFirstIngest);
+    releaseFirstIngest();
+    queueMicrotask(() => {
+      fakeSession.transport.emit("output_text_delta", { itemId: "item-2", delta: "二", responseId: "response-1" });
+    });
+
+    assert.equal(await flush, true);
+    assert.equal(ingests.length, 2);
+    assert.equal(ingests[0]![0]!.externalItemId, "item-1");
+    assert.equal(ingests[1]![0]!.externalItemId, "item-2");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("persistence failure blocks rotation until the same event batch retries", async () => {
+  const first = new FakeSession();
+  const second = new FakeSession();
+  const sessions = [first, second];
+  const lifecycle: string[] = [];
+  let sessionIndex = 0;
+  let now = 0;
+  let failPersistence = true;
+  let rotationRequests = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-persistence-failure",
+    {
+      markConnected: async input => lifecycle.push(`connected:${input.sessionId}`),
+      markEnded: async input => lifecycle.push(`ended:${input.sessionId}:${input.status}`),
+      ingest: async input => {
+        if (failPersistence) {
+          throw new Error("persistence unavailable");
+        }
+        lifecycle.push(`ingest:${input.events.length}:${input.events[0]!.eventId}`);
+      }
+    },
+    () => undefined,
+    () => now,
+    () => sessions[sessionIndex++] as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000051",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    first.transport.emit("output_text_delta", { itemId: "item-failure", delta: "待落库", responseId: "response-1" });
+    first.transport.emit("audio_done");
+    assert.equal(await controller.flushPendingPersistence(), false);
+
+    controller.setRotationProvider(async () => {
+      rotationRequests++;
+      return {
+        realtimeSessionId: "00000000-0000-0000-0000-000000000052",
+        clientSecret: "ek_scripted-2",
+        model: "model",
+        voice: "voice",
+        instructions: "server context"
+      };
+    });
+    now = 50 * 60 * 1000;
+    await controller.rotateIfIdle();
+    assert.equal(rotationRequests, 0);
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000051");
+    assert.equal(lifecycle.some(item => item.includes(":rotated")), false);
+
+    failPersistence = false;
+    await controller.rotateIfIdle();
+    assert.equal(rotationRequests, 1);
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000052");
+    assert.equal(lifecycle.some(item => item.includes(":rotated")), true);
+  } finally {
+    failPersistence = false;
+    await controller.disconnect();
+  }
+});

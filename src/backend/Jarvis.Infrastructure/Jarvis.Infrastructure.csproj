@@ -17,6 +17,7 @@
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
     <ProjectReference Include="../Jarvis.Application/Jarvis.Application.csproj" />
     <ProjectReference Include="../Jarvis.Domain/Jarvis.Domain.csproj" />

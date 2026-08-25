@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Security.Claims;
 using Jarvis.Api.Authentication;
 using Jarvis.Api.Conversations;
 using Jarvis.Api.Outbox;
@@ -8,7 +9,9 @@ using Jarvis.Application.Outbox;
 using Jarvis.Contracts;
 using Jarvis.Infrastructure;
 using Jarvis.Infrastructure.Data;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -29,7 +32,13 @@ builder.Services.AddOpenApi(options =>
     });
     options.AddOperationTransformer((operation, _, _) =>
     {
-        if (operation.OperationId is "CreateConversation" or "AddTypedConversationMessage")
+        if (operation.OperationId is "CreateConversation"
+            or "AddTypedConversationMessage"
+            or "GetDesktopRealtimeDevice"
+            or "CreateRealtimeClientSecret"
+            or "MarkRealtimeSessionConnected"
+            or "MarkRealtimeSessionEnded"
+            or "IngestRealtimeEvents")
         {
             operation.Parameters ??= [];
             operation.Parameters.Add(new OpenApiParameter
@@ -47,6 +56,9 @@ builder.Services.AddOpenApi(options =>
     {
         if (context.Description.RelativePath?.StartsWith(
                 "api/v1/conversations",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith(
+                "api/v1/realtime",
                 StringComparison.OrdinalIgnoreCase) == true)
         {
             operation.Security =
@@ -74,6 +86,36 @@ builder.Services
     .AddAuthentication("LocalBearer")
     .AddScheme<AuthenticationSchemeOptions, LocalBearerAuthenticationHandler>("LocalBearer", _ => { });
 builder.Services.AddAuthorization();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new ProblemDetails
+            {
+                Status = StatusCodes.Status429TooManyRequests,
+                Title = "Realtime client-secret rate limit exceeded",
+                Detail = "Too many realtime client-secret requests were made for this Desktop device."
+            },
+            options: null,
+            contentType: "application/problem+json",
+            cancellationToken);
+    };
+    options.AddPolicy("realtime-client-secret", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            // Phase 2 exposes one seeded Desktop device per local user; keep the
+            // device dimension explicit so Phase 4 can replace the suffix with
+            // a registered device identity without changing this policy.
+            $"{context.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? context.Connection.RemoteIpAddress?.ToString() ?? "anonymous"}:desktop",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+});
 builder.Services.AddSignalR();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -87,6 +129,7 @@ var app = builder.Build();
 app.UseExceptionHandler();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 app.MapOpenApi();
 
 app.MapGet("/api/v1/phase0/health", () =>
@@ -96,6 +139,7 @@ app.MapGet("/api/v1/phase0/health", () =>
         .Produces<Phase0HealthResponse>();
 
 app.MapConversationEndpoints();
+app.MapRealtimeEndpoints();
 app.MapHub<ClientHub>("/hubs/client").RequireAuthorization();
 
 await using (var scope = app.Services.CreateAsyncScope())

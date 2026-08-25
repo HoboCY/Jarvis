@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "lint": "../../../node_modules/.bin/eslint --config ../../../eslint.config.mjs src",
-    "test": "tsx --test src/security.test.ts",
+    "test": "tsx --test src/security.test.ts src/renderer/realtime.test.ts",
     "build": "tsc -p tsconfig.main.json && tsc -p tsconfig.preload.json && tsc -p tsconfig.renderer.json && node scripts/copy-assets.mjs"
   },
   "dependencies": {

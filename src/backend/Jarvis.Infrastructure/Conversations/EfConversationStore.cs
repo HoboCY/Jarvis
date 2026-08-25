@@ -268,6 +268,16 @@ public sealed class EfConversationStore(
             return new(ConversationStoreResultKind.NotFound);
         }
 
+        if (request.RealtimeSessionId is Guid realtimeSessionId
+            && !await db.RealtimeSessions.AnyAsync(
+                session => session.Id == realtimeSessionId
+                    && session.ConversationId == conversationId
+                    && session.Status == RealtimeSessionStatus.Connected,
+                cancellationToken))
+        {
+            return new(ConversationStoreResultKind.Conflict, ConflictDetail: "The realtimeSessionId is not the connected session for this conversation.");
+        }
+
         await DeleteExpiredIdempotencyRecordAsync(
             userId,
             scope,
@@ -312,7 +322,8 @@ public sealed class EfConversationStore(
             request.Text,
             request.ClientRequestId,
             sequence,
-            nowMs);
+            nowMs,
+            request.RealtimeSessionId);
         conversation.RecordActivity(nowMs);
         db.Messages.Add(messageEntity);
 
@@ -459,6 +470,7 @@ public sealed class EfConversationStore(
         return new(
             message.Id,
             message.ConversationId,
+            message.RealtimeSessionId,
             ToContractRole(message.Role),
             message.InputModality is { } inputModality ? ToContractInputModality(inputModality) : null,
             message.OutputModality is { } outputModality ? ToContractOutputModality(outputModality) : null,

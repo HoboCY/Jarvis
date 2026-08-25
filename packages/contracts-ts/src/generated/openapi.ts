@@ -89,6 +89,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/realtime/desktop-device": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Returns the authenticated local user's seeded Desktop device. */
+        post: operations["GetDesktopRealtimeDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/realtime/client-secrets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Creates a short-lived Realtime client secret for an owned conversation and Desktop device. */
+        post: operations["CreateRealtimeClientSecret"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/realtime/sessions/{sessionId}/connected": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Records that the Desktop connected its ephemeral Realtime session. */
+        post: operations["MarkRealtimeSessionConnected"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/realtime/sessions/{sessionId}/ended": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Records a Realtime session disconnect, rotation, or failure. */
+        post: operations["MarkRealtimeSessionEnded"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{conversationId}/realtime-events:ingest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Persists versioned normalized Realtime events into an owned conversation. */
+        post: operations["IngestRealtimeEvents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -111,6 +196,18 @@ export interface components {
         CreateConversationRequest: {
             title: null | string;
         };
+        DesktopDeviceBootstrapResponse: {
+            /** Format: uuid */
+            deviceId: string;
+            name: string;
+            deviceType: components["schemas"]["DeviceTypeValue"];
+            platform: string;
+            status: components["schemas"]["DeviceStatusValue"];
+        };
+        /** @enum {unknown} */
+        DeviceStatusValue: "online" | "offline" | "disabled";
+        /** @enum {unknown} */
+        DeviceTypeValue: "desktop" | "mobile" | "server";
         /** @enum {unknown} */
         MessageInputModalityValue: "voice" | "typedText" | "image" | "tool" | null;
         /** @enum {unknown} */
@@ -124,6 +221,8 @@ export interface components {
             id: string;
             /** Format: uuid */
             conversationId: string;
+            /** Format: uuid */
+            realtimeSessionId: null | string;
             role: components["schemas"]["MessageRoleValue"];
             inputModality: null | components["schemas"]["MessageInputModalityValue"];
             outputModality: null | components["schemas"]["MessageOutputModalityValue"];
@@ -156,11 +255,94 @@ export interface components {
             detail?: null | string;
             instance?: null | string;
         };
+        RealtimeClientSecretRequest: {
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: uuid */
+            deviceId: string;
+            preferredVoice?: null | string;
+        };
+        RealtimeClientSecretResponse: {
+            /** Format: uuid */
+            realtimeSessionId: string;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: uuid */
+            deviceId: string;
+            instructions: string;
+            clientSecret: string;
+            /** Format: int64 */
+            expiresAt: number | string;
+            model: string;
+            voice: string;
+            /** Format: int64 */
+            contextVersion: number | string;
+            /** Format: int64 */
+            sessionRotationAt: number | string;
+        };
+        RealtimeEventsIngestRequest: {
+            /** Format: int32 */
+            version: number | string;
+            events: components["schemas"]["RealtimeNormalizedEvent"][];
+        };
+        RealtimeEventsIngestResponse: {
+            /** Format: int32 */
+            version: number | string;
+            /** Format: int32 */
+            accepted: number | string;
+            /** Format: int32 */
+            deduplicated: number | string;
+            messageIds: string[];
+        };
+        /** @enum {unknown} */
+        RealtimeEventStatusValue: "partial" | "streaming" | "completed" | "interrupted" | "failed";
+        RealtimeNormalizedEvent: {
+            eventId: string;
+            externalItemId: null | string;
+            /** Format: uuid */
+            realtimeSessionId: string;
+            role: components["schemas"]["MessageRoleValue"];
+            modality: string;
+            status: components["schemas"]["RealtimeEventStatusValue"];
+            text: null | string;
+            /** Format: int64 */
+            occurredAtMs?: null | number | string;
+        };
+        RealtimeSessionConnectedRequest: {
+            externalSessionId: string;
+        };
+        RealtimeSessionEndedRequest: {
+            reason: string;
+            status?: components["schemas"]["RealtimeSessionStatusValue"];
+        };
+        RealtimeSessionResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: uuid */
+            deviceId: string;
+            externalSessionId: null | string;
+            model: string;
+            voice: string;
+            /** Format: int64 */
+            contextVersion: number | string;
+            status: components["schemas"]["RealtimeSessionStatusValue"];
+            /** Format: int64 */
+            startedAtMs: number | string;
+            /** Format: int64 */
+            endedAtMs: null | number | string;
+            endReason: null | string;
+        };
+        /** @enum {unknown} */
+        RealtimeSessionStatusValue: "created" | "connected" | "rotated" | "disconnected" | "failed";
         TypedMessageRequest: {
             clientRequestId: string;
             text: string;
             /** @default text */
             replyMode: string;
+            /** Format: uuid */
+            realtimeSessionId?: null | string;
         };
         TypedMessageResponse: {
             /** Format: uuid */
@@ -367,6 +549,309 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TypedMessageResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetDesktopRealtimeDevice: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DesktopDeviceBootstrapResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CreateRealtimeClientSecret: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RealtimeClientSecretRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealtimeClientSecretResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    MarkRealtimeSessionConnected: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RealtimeSessionConnectedRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealtimeSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    MarkRealtimeSessionEnded: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RealtimeSessionEndedRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealtimeSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    IngestRealtimeEvents: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                conversationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RealtimeEventsIngestRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealtimeEventsIngestResponse"];
                 };
             };
             /** @description Bad Request */

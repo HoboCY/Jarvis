@@ -46,6 +46,26 @@ public enum MessageStatusValue
     Failed
 }
 
+[JsonConverter(typeof(CamelCaseEnumConverter<RealtimeSessionStatusValue>))]
+public enum RealtimeSessionStatusValue
+{
+    Created,
+    Connected,
+    Rotated,
+    Disconnected,
+    Failed
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<RealtimeEventStatusValue>))]
+public enum RealtimeEventStatusValue
+{
+    Partial,
+    Streaming,
+    Completed,
+    Interrupted,
+    Failed
+}
+
 public sealed record CreateConversationRequest(string? Title);
 
 public sealed record ConversationResponse(
@@ -60,6 +80,7 @@ public sealed record ConversationResponse(
 public sealed record MessageResponse(
     Guid Id,
     Guid ConversationId,
+    Guid? RealtimeSessionId,
     MessageRoleValue Role,
     MessageInputModalityValue? InputModality,
     MessageOutputModalityValue? OutputModality,
@@ -78,12 +99,92 @@ public sealed record MessagePageResponse(
 public sealed record TypedMessageRequest(
     string ClientRequestId,
     string Text,
-    string ReplyMode = "text");
+    string ReplyMode = "text",
+    Guid? RealtimeSessionId = null);
 
 public sealed record TypedMessageResponse(
     Guid MessageId,
     long Sequence,
     bool Accepted);
+
+public sealed record RealtimeClientSecretRequest(
+    Guid ConversationId,
+    Guid DeviceId,
+    string? PreferredVoice = null);
+
+public sealed record RealtimeClientSecretResponse(
+    Guid RealtimeSessionId,
+    Guid ConversationId,
+    Guid DeviceId,
+    string Instructions,
+    string ClientSecret,
+    long ExpiresAt,
+    string Model,
+    string Voice,
+    long ContextVersion,
+    long SessionRotationAt);
+
+public sealed record RealtimeSessionConnectedRequest(string ExternalSessionId);
+
+public sealed record RealtimeSessionEndedRequest(
+    string Reason,
+    RealtimeSessionStatusValue Status = RealtimeSessionStatusValue.Disconnected);
+
+public sealed record RealtimeSessionResponse(
+    Guid Id,
+    Guid ConversationId,
+    Guid DeviceId,
+    string? ExternalSessionId,
+    string Model,
+    string Voice,
+    long ContextVersion,
+    RealtimeSessionStatusValue Status,
+    long StartedAtMs,
+    long? EndedAtMs,
+    string? EndReason);
+
+public sealed record RealtimeNormalizedEvent(
+    string EventId,
+    string? ExternalItemId,
+    Guid RealtimeSessionId,
+    MessageRoleValue Role,
+    string Modality,
+    RealtimeEventStatusValue Status,
+    string? Text,
+    long? OccurredAtMs = null);
+
+public sealed record RealtimeEventsIngestRequest(
+    int Version,
+    IReadOnlyList<RealtimeNormalizedEvent> Events);
+
+public sealed record RealtimeEventsIngestResponse(
+    int Version,
+    int Accepted,
+    int Deduplicated,
+    IReadOnlyList<Guid> MessageIds);
+
+public sealed record DesktopDeviceBootstrapResponse(
+    Guid DeviceId,
+    string Name,
+    DeviceTypeValue DeviceType,
+    string Platform,
+    DeviceStatusValue Status);
+
+[JsonConverter(typeof(CamelCaseEnumConverter<DeviceTypeValue>))]
+public enum DeviceTypeValue
+{
+    Desktop,
+    Mobile,
+    Server
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<DeviceStatusValue>))]
+public enum DeviceStatusValue
+{
+    Online,
+    Offline,
+    Disabled
+}
 
 public sealed record OutboxEventEnvelope(
     Guid EventId,

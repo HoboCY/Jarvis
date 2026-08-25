@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Jarvis.Application.Realtime;
 
 namespace Jarvis.Api.IntegrationTests;
 
@@ -14,6 +15,7 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
     private readonly bool _deleteDatabaseOnDispose;
     private readonly IOutboxPublisher? _outboxPublisher;
     private readonly TimeProvider? _timeProvider;
+    private readonly IRealtimeClientSecretProvider? _realtimeProvider;
 
     public TestApplicationFactory()
         : this(null, true, null)
@@ -25,7 +27,8 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         bool deleteDatabaseOnDispose,
         IOutboxPublisher? outboxPublisher,
         TimeProvider? timeProvider = null,
-        DbCommandInterceptor? dbCommandInterceptor = null)
+        DbCommandInterceptor? dbCommandInterceptor = null,
+        IRealtimeClientSecretProvider? realtimeProvider = null)
     {
         DatabasePath = databasePath ?? Path.Combine(
             Path.GetTempPath(),
@@ -34,6 +37,7 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         _outboxPublisher = outboxPublisher;
         _timeProvider = timeProvider;
         DbCommandInterceptor = dbCommandInterceptor;
+        _realtimeProvider = realtimeProvider;
     }
 
     public string DatabasePath { get; }
@@ -50,7 +54,14 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             {
                 ["Authentication:BearerToken"] = Token,
                 ["ConnectionStrings:Jarvis"] = $"Data Source={DatabasePath}",
-                ["Outbox:Enabled"] = "false"
+                ["Outbox:Enabled"] = "false",
+                ["OpenAI:ApiKey"] = "test-openai-key",
+                ["OpenAI:BaseUrl"] = "https://api.openai.com/",
+                ["OpenAI:RealtimeModel"] = "gpt-4o-realtime-preview",
+                ["OpenAI:RealtimeVoice"] = "alloy",
+                ["OpenAI:AllowedVoices:0"] = "alloy",
+                ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
+                ["OpenAI:ClientSecretLifetimeSeconds"] = "600"
             }));
         if (_outboxPublisher is not null)
         {
@@ -71,6 +82,14 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         if (DbCommandInterceptor is not null)
         {
             builder.ConfigureTestServices(services => services.AddSingleton(DbCommandInterceptor));
+        }
+        if (_realtimeProvider is not null)
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IRealtimeClientSecretProvider>();
+                services.AddSingleton(_realtimeProvider);
+            });
         }
     }
 

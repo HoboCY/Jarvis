@@ -349,6 +349,443 @@
           }
         ]
       }
+    },
+    "/api/v1/realtime/desktop-device": {
+      "post": {
+        "tags": [
+          "RealtimeEndpoints"
+        ],
+        "summary": "Returns the authenticated local user's seeded Desktop device.",
+        "operationId": "GetDesktopRealtimeDevice",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DesktopDeviceBootstrapResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/realtime/client-secrets": {
+      "post": {
+        "tags": [
+          "RealtimeEndpoints"
+        ],
+        "summary": "Creates a short-lived Realtime client secret for an owned conversation and Desktop device.",
+        "operationId": "CreateRealtimeClientSecret",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RealtimeClientSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeClientSecretResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/realtime/sessions/{sessionId}/connected": {
+      "post": {
+        "tags": [
+          "RealtimeEndpoints"
+        ],
+        "summary": "Records that the Desktop connected its ephemeral Realtime session.",
+        "operationId": "MarkRealtimeSessionConnected",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RealtimeSessionConnectedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/realtime/sessions/{sessionId}/ended": {
+      "post": {
+        "tags": [
+          "RealtimeEndpoints"
+        ],
+        "summary": "Records a Realtime session disconnect, rotation, or failure.",
+        "operationId": "MarkRealtimeSessionEnded",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RealtimeSessionEndedRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/conversations/{conversationId}/realtime-events:ingest": {
+      "post": {
+        "tags": [
+          "RealtimeEndpoints"
+        ],
+        "summary": "Persists versioned normalized Realtime events into an owned conversation.",
+        "operationId": "IngestRealtimeEvents",
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RealtimeEventsIngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeEventsIngestResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -427,6 +864,48 @@
           }
         }
       },
+      "DesktopDeviceBootstrapResponse": {
+        "required": [
+          "deviceId",
+          "name",
+          "deviceType",
+          "platform",
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "deviceType": {
+            "$ref": "#/components/schemas/DeviceTypeValue"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeviceStatusValue"
+          }
+        }
+      },
+      "DeviceStatusValue": {
+        "enum": [
+          "online",
+          "offline",
+          "disabled"
+        ]
+      },
+      "DeviceTypeValue": {
+        "enum": [
+          "desktop",
+          "mobile",
+          "server"
+        ]
+      },
       "MessageInputModalityValue": {
         "enum": [
           "voice",
@@ -469,6 +948,7 @@
         "required": [
           "id",
           "conversationId",
+          "realtimeSessionId",
           "role",
           "inputModality",
           "outputModality",
@@ -488,6 +968,13 @@
           },
           "conversationId": {
             "type": "string",
+            "format": "uuid"
+          },
+          "realtimeSessionId": {
+            "type": [
+              "null",
+              "string"
+            ],
             "format": "uuid"
           },
           "role": {
@@ -636,6 +1123,329 @@
           }
         }
       },
+      "RealtimeClientSecretRequest": {
+        "required": [
+          "conversationId",
+          "deviceId"
+        ],
+        "type": "object",
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preferredVoice": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "RealtimeClientSecretResponse": {
+        "required": [
+          "realtimeSessionId",
+          "conversationId",
+          "deviceId",
+          "instructions",
+          "clientSecret",
+          "expiresAt",
+          "model",
+          "voice",
+          "contextVersion",
+          "sessionRotationAt"
+        ],
+        "type": "object",
+        "properties": {
+          "realtimeSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "clientSecret": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string"
+          },
+          "contextVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "sessionRotationAt": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "RealtimeEventsIngestRequest": {
+        "required": [
+          "version",
+          "events"
+        ],
+        "type": "object",
+        "properties": {
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RealtimeNormalizedEvent"
+            }
+          }
+        }
+      },
+      "RealtimeEventsIngestResponse": {
+        "required": [
+          "version",
+          "accepted",
+          "deduplicated",
+          "messageIds"
+        ],
+        "type": "object",
+        "properties": {
+          "version": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "accepted": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "deduplicated": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "messageIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
+      "RealtimeEventStatusValue": {
+        "enum": [
+          "partial",
+          "streaming",
+          "completed",
+          "interrupted",
+          "failed"
+        ]
+      },
+      "RealtimeNormalizedEvent": {
+        "required": [
+          "eventId",
+          "externalItemId",
+          "realtimeSessionId",
+          "role",
+          "modality",
+          "status",
+          "text"
+        ],
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "externalItemId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "realtimeSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "$ref": "#/components/schemas/MessageRoleValue"
+          },
+          "modality": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RealtimeEventStatusValue"
+          },
+          "text": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "occurredAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "RealtimeSessionConnectedRequest": {
+        "required": [
+          "externalSessionId"
+        ],
+        "type": "object",
+        "properties": {
+          "externalSessionId": {
+            "type": "string"
+          }
+        }
+      },
+      "RealtimeSessionEndedRequest": {
+        "required": [
+          "reason"
+        ],
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RealtimeSessionStatusValue"
+          }
+        }
+      },
+      "RealtimeSessionResponse": {
+        "required": [
+          "id",
+          "conversationId",
+          "deviceId",
+          "externalSessionId",
+          "model",
+          "voice",
+          "contextVersion",
+          "status",
+          "startedAtMs",
+          "endedAtMs",
+          "endReason"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "externalSessionId": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string"
+          },
+          "contextVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RealtimeSessionStatusValue"
+          },
+          "startedAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "endedAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "endReason": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "RealtimeSessionStatusValue": {
+        "enum": [
+          "created",
+          "connected",
+          "rotated",
+          "disconnected",
+          "failed"
+        ]
+      },
       "TypedMessageRequest": {
         "required": [
           "clientRequestId",
@@ -652,6 +1462,13 @@
           "replyMode": {
             "type": "string",
             "default": "text"
+          },
+          "realtimeSessionId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -694,6 +1511,9 @@
     },
     {
       "name": "ConversationEndpoints"
+    },
+    {
+      "name": "RealtimeEndpoints"
     }
   ]
 }

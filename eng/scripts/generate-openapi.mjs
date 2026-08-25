@@ -32,7 +32,14 @@ const dotnet = spawn("dotnet", [
     ASPNETCORE_ENVIRONMENT: "Production",
     Authentication__BearerToken: temporaryBearerToken,
     ConnectionStrings__Jarvis: `Data Source=${temporaryDatabase}`,
-    Outbox__Enabled: "false"
+    Outbox__Enabled: "false",
+    OpenAI__ApiKey: "openapi-generation-placeholder",
+    OpenAI__BaseUrl: "https://api.openai.com/",
+    OpenAI__RealtimeModel: "gpt-4o-realtime-preview",
+    OpenAI__RealtimeVoice: "alloy",
+    OpenAI__AllowedVoices__0: "alloy",
+    OpenAI__SafetyIdentifierSalt: "openapi-generation-salt",
+    OpenAI__ClientSecretLifetimeSeconds: "600"
   }
 });
 

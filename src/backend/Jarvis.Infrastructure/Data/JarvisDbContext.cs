@@ -18,6 +18,8 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
 
     public DbSet<Message> Messages => Set<Message>();
 
+    public DbSet<RealtimeSession> RealtimeSessions => Set<RealtimeSession>();
+
     public DbSet<IdempotencyRecord> IdempotencyRecords => Set<IdempotencyRecord>();
 
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
@@ -77,6 +79,27 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
                 .HasForeignKey(message => message.ConversationId)
                 .OnDelete(DeleteBehavior.Cascade);
             ConfigureVersion(entity.Property(message => message.Version));
+        });
+
+        modelBuilder.Entity<RealtimeSession>(entity =>
+        {
+            entity.ToTable("RealtimeSessions");
+            entity.HasKey(session => session.Id);
+            entity.Property(session => session.Model).HasMaxLength(200).IsRequired();
+            entity.Property(session => session.Voice).HasMaxLength(100).IsRequired();
+            entity.Property(session => session.ExternalSessionId).HasMaxLength(200);
+            entity.Property(session => session.EndReason).HasMaxLength(500);
+            entity.HasIndex(session => new { session.ConversationId, session.StartedAtMs });
+            entity.HasIndex(session => session.ExternalSessionId).IsUnique();
+            entity.HasOne<Conversation>()
+                .WithMany()
+                .HasForeignKey(session => session.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Device>()
+                .WithMany()
+                .HasForeignKey(session => session.DeviceId)
+                .OnDelete(DeleteBehavior.Restrict);
+            ConfigureVersion(entity.Property(session => session.Version));
         });
 
         modelBuilder.Entity<IdempotencyRecord>(entity =>
