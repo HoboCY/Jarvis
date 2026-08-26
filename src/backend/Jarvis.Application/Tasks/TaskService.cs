@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Jarvis.Application.Devices;
 using Jarvis.Contracts;
 using Jarvis.Domain.Tasks;
 using DomainTaskStatus = Jarvis.Domain.Tasks.TaskStatus;
@@ -72,6 +73,7 @@ public sealed class TaskService(ITaskStore store)
         try
         {
             var workerKind = WorkerRouter.Route(capabilities);
+            var capabilityEnvelope = NormalizeCapabilityEnvelope(workerKind, capabilities, request.CapabilityEnvelope);
             var sourceMessageIds = (request.SourceMessageIds ?? Array.Empty<Guid>()).Distinct().ToArray();
             if (sourceMessageIds.Length > MaxSourceMessages || sourceMessageIds.Any(id => id == Guid.Empty))
             {
@@ -91,7 +93,8 @@ public sealed class TaskService(ITaskStore store)
                 ExpectedOutput = string.IsNullOrWhiteSpace(request.ExpectedOutput) ? null : request.ExpectedOutput.Trim(),
                 RequiredCapabilities = capabilities,
                 SourceMessageIds = sourceMessageIds,
-                AttachmentRefs = attachmentRefs
+                AttachmentRefs = attachmentRefs,
+                CapabilityEnvelope = capabilityEnvelope
             };
 
             var hash = RequestHash.Create(request);
@@ -223,6 +226,60 @@ public sealed class TaskService(ITaskStore store)
             : key.Trim().Length > MaxIdempotencyKeyLength
                 ? "The Idempotency-Key header is too long."
                 : null;
+    }
+
+    private static CapabilityEnvelopeContract? NormalizeCapabilityEnvelope(
+        DomainWorkerKind workerKind,
+        IReadOnlyList<string> requiredCapabilities,
+        CapabilityEnvelopeContract? envelope)
+    {
+        if (workerKind != DomainWorkerKind.Codex)
+        {
+            if (envelope is not null)
+            {
+                throw new ArgumentException("capabilityEnvelope is only valid for Codex tasks.");
+            }
+
+            return null;
+        }
+
+        if (envelope is null)
+        {
+            throw new ArgumentException("capabilityEnvelope is required for Codex tasks.");
+        }
+
+        var policy = CapabilityPolicy.Create(new CapabilityEnvelope(
+            envelope.ReadFiles,
+            envelope.WriteFiles,
+            envelope.RunCommands,
+            envelope.Network,
+            envelope.AllowedRoots));
+        if (!policy.ReadFiles
+            || policy.AllowedRoots.Count == 0
+            || policy.AllowedRoots.Any(root => !policy.IsAllowedPath(root, write: false))
+            || policy.WriteFiles && !policy.ReadFiles
+            || policy.RunCommands && !policy.ReadFiles)
+        {
+            throw new ArgumentException("Codex tasks require a readable, non-sensitive absolute allowed root.");
+        }
+
+        foreach (var capability in requiredCapabilities)
+        {
+            if (string.Equals(capability, "localFiles", StringComparison.Ordinal) && !policy.ReadFiles
+                || string.Equals(capability, "writeFiles", StringComparison.Ordinal) && !policy.WriteFiles
+                || string.Equals(capability, "runCommands", StringComparison.Ordinal) && !policy.RunCommands
+                || string.Equals(capability, "network", StringComparison.Ordinal) && !policy.Network)
+            {
+                throw new ArgumentException($"capabilityEnvelope does not permit required capability '{capability}'.");
+            }
+        }
+
+        return new CapabilityEnvelopeContract(
+            policy.ReadFiles,
+            policy.WriteFiles,
+            policy.RunCommands,
+            policy.Network,
+            policy.AllowedRoots);
     }
 
     private static TaskOperation<T> Invalid<T>(string detail) => new(TaskOperationStatus.Invalid, Detail: detail);

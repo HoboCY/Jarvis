@@ -16,6 +16,7 @@ const backendBearer = process.env.JARVIS_LOCAL_BEARER;
 const clientHubPath = "/hubs/client";
 const taskApiPath = "/api/v1/tasks";
 const notificationApiPath = "/api/v1/notifications";
+const approvalApiPath = "/api/v1/approvals";
 const nonTerminalTaskStatuses = new Set([
   "queued",
   "assigned",
@@ -120,6 +121,31 @@ function requiredUuidArray(value: unknown, name: string, maxItems = 100): string
   });
 }
 
+function optionalCapabilityEnvelope(value: unknown): JsonRecord | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const envelope = requiredBody(value);
+  for (const name of ["readFiles", "writeFiles", "runCommands", "network"] as const) {
+    if (typeof envelope[name] !== "boolean") {
+      throw new Error(`Invalid capabilityEnvelope.${name}.`);
+    }
+  }
+  if (!Array.isArray(envelope.allowedRoots) || envelope.allowedRoots.length > 20) {
+    throw new Error("Invalid capabilityEnvelope.allowedRoots.");
+  }
+
+  return {
+    readFiles: envelope.readFiles,
+    writeFiles: envelope.writeFiles,
+    runCommands: envelope.runCommands,
+    network: envelope.network,
+    allowedRoots: envelope.allowedRoots.map(root =>
+      requiredString(root, "capabilityEnvelope.allowedRoots", 4_000))
+  };
+}
+
 function createMainWindow(rendererEntryUrl: string): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
@@ -177,7 +203,9 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
     "task.updated",
     "task.eventAdded",
     "notification.created",
-    "notification.updated"
+    "notification.updated",
+    "approval.required",
+    "approval.resolved"
   ]) {
     connection.on(eventType, envelope => {
       if (!isSignalREnvelope(envelope)) {
@@ -297,7 +325,8 @@ if (!app.requestSingleInstanceLock()) {
           requiredCapabilities,
           preferredDeviceId,
           sourceMessageIds,
-          attachmentRefs: requiredStringArray(input.attachmentRefs, "attachmentRefs", 100)
+          attachmentRefs: requiredStringArray(input.attachmentRefs, "attachmentRefs", 100),
+          capabilityEnvelope: optionalCapabilityEnvelope(input.capabilityEnvelope)
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
@@ -355,6 +384,32 @@ if (!app.requestSingleInstanceLock()) {
           requiredString(input.idempotencyKey, "idempotencyKey"));
       });
     }
+    ipcMain.handle("backend:getApprovals", () =>
+      requestBackend(`${approvalApiPath}?status=pending`, "GET"));
+    ipcMain.handle("backend:decideApproval", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const approvalId = requiredString(input.approvalId, "approvalId");
+      if (!isUuid(approvalId)) {
+        throw new Error("Invalid approvalId.");
+      }
+      const decision = input.decision;
+      if (decision !== "approve" && decision !== "deny") {
+        throw new Error("Invalid approval decision.");
+      }
+      const scope = input.scope;
+      if (scope !== "once" && scope !== "taskSession") {
+        throw new Error("Invalid approval scope.");
+      }
+      return requestBackend(
+        `${approvalApiPath}/${encodeURIComponent(approvalId)}/decision`,
+        "POST",
+        {
+          decision,
+          scope,
+          clientRequestId: requiredString(input.clientRequestId, "clientRequestId")
+        },
+        requiredString(input.idempotencyKey, "idempotencyKey"));
+    });
     const rendererEntryUrl = getRendererEntryUrl(app.isPackaged, process.env.JARVIS_DEV_SERVER_URL);
     const window = createMainWindow(rendererEntryUrl);
     const signalRConnection = startSignalR(window);

@@ -219,7 +219,8 @@ public sealed record CreateTaskRequest(
     string? ExpectedOutput,
     IReadOnlyList<string>? RequiredCapabilities,
     Guid? PreferredDeviceId = null,
-    IReadOnlyList<string>? AttachmentRefs = null);
+    IReadOnlyList<string>? AttachmentRefs = null,
+    CapabilityEnvelopeContract? CapabilityEnvelope = null);
 
 public sealed record TaskResponse(
     Guid Id,
@@ -243,7 +244,45 @@ public sealed record TaskResponse(
     long EntityVersion,
     long CreatedAtMs,
     long? StartedAtMs,
-    long? CompletedAtMs);
+    long? CompletedAtMs,
+    TaskExecutionResponse? Execution = null,
+    IReadOnlyList<ArtifactManifestEntry>? Artifacts = null,
+    CapabilityEnvelopeContract? CapabilityEnvelope = null);
+
+[JsonConverter(typeof(CamelCaseEnumConverter<TaskExecutionStatusValue>))]
+public enum TaskExecutionStatusValue
+{
+    Assigned,
+    Running,
+    WaitingForApproval,
+    Recovering,
+    Succeeded,
+    Failed,
+    Cancelled
+}
+
+public sealed record TaskExecutionResponse(
+    Guid Id,
+    Guid TaskId,
+    Guid? DeviceId,
+    WorkerKindValue WorkerKind,
+    string? ExternalExecutionId,
+    string? CodexThreadId,
+    string? CodexTurnId,
+    TaskExecutionStatusValue Status,
+    string MetadataJson,
+    string? ResultPayloadJson,
+    IReadOnlyList<ArtifactManifestEntry> Artifacts,
+    long StartedAtMs,
+    long? EndedAtMs,
+    long EntityVersion,
+    long? CodexTurnStartRequestedAtMs = null);
+
+public sealed record ArtifactManifestEntry(
+    string Path,
+    long Size,
+    string Sha256,
+    string ContentType = "application/octet-stream");
 
 public sealed record TaskAcceptedResponse(
     bool Accepted,
@@ -261,6 +300,159 @@ public sealed record TaskCancelResponse(
     bool Accepted,
     TaskStatusValue Status);
 
+[JsonConverter(typeof(CamelCaseEnumConverter<ApprovalKindValue>))]
+public enum ApprovalKindValue
+{
+    Command,
+    FileWrite,
+    Permission,
+    ExternalWrite
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<ApprovalScopeValue>))]
+public enum ApprovalScopeValue
+{
+    Once,
+    TaskSession
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<ApprovalStatusValue>))]
+public enum ApprovalStatusValue
+{
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+    Cancelled
+}
+
+[JsonConverter(typeof(CamelCaseEnumConverter<ApprovalDecisionValue>))]
+public enum ApprovalDecisionValue
+{
+    Approve,
+    Deny
+}
+
+public sealed record ApprovalResponse(
+    Guid Id,
+    Guid TaskId,
+    Guid? ExecutionId,
+    Guid DeviceId,
+    ApprovalKindValue Kind,
+    string Reason,
+    ApprovalStatusValue Status,
+    ApprovalScopeValue? Scope,
+    string? RequestId,
+    Guid? DecidedByDeviceId,
+    long CreatedAtMs,
+    long? DecidedAtMs,
+    long? ExpiresAtMs,
+    long EntityVersion);
+
+public sealed record ApprovalListResponse(IReadOnlyList<ApprovalResponse> Items);
+
+public sealed record ApprovalDecisionRequest(
+    ApprovalDecisionValue Decision,
+    ApprovalScopeValue Scope,
+    string ClientRequestId);
+
+public sealed record DeviceApprovalRequest(
+    Guid ExecutionId,
+    ApprovalKindValue Kind,
+    string Reason,
+    string RequestedActionJson,
+    ApprovalScopeValue? Scope = null,
+    string? RequestId = null,
+    long? ExpiresAtMs = null);
+
+public sealed record DeviceApprovalResponse(Guid ApprovalId, ApprovalStatusValue Status);
+
+public sealed record DeviceRegistrationRequest(
+    string Name,
+    DeviceTypeValue DeviceType,
+    string Platform,
+    IReadOnlyList<string>? Capabilities,
+    IReadOnlyList<string>? AllowedRoots = null);
+
+public sealed record DeviceRegistrationResponse(
+    Guid DeviceId,
+    Guid UserId,
+    string Name,
+    DeviceTypeValue DeviceType,
+    string Platform,
+    IReadOnlyList<string> Capabilities,
+    DeviceStatusValue Status,
+    string DeviceCredential);
+
+public sealed record DeviceHeartbeatRequest(IReadOnlyList<string>? Capabilities, IReadOnlyList<string>? AllowedRoots = null);
+
+public sealed record DeviceHeartbeatResponse(
+    Guid DeviceId,
+    DeviceStatusValue Status,
+    long LastSeenAtMs,
+    IReadOnlyList<string> Capabilities,
+    long EntityVersion);
+
+public sealed record CapabilityEnvelopeContract(
+    bool ReadFiles = false,
+    bool WriteFiles = false,
+    bool RunCommands = false,
+    bool Network = false,
+    IReadOnlyList<string>? AllowedRoots = null);
+
+public sealed record DeviceTaskClaimRequest(
+    string? LeaseOwner = null,
+    CapabilityEnvelopeContract? CapabilityEnvelope = null);
+
+public sealed record DeviceTaskClaimResponse(
+    bool Claimed,
+    TaskResponse? Task,
+    TaskExecutionResponse? Execution,
+    string? LeaseOwner,
+    long? LeaseExpiresAtMs,
+    CapabilityEnvelopeContract? CapabilityEnvelope = null);
+
+public sealed record DeviceActiveTaskListResponse(IReadOnlyList<DeviceTaskClaimResponse> Items);
+
+public sealed record DeviceApprovalStatusResponse(
+    Guid ApprovalId,
+    Guid TaskId,
+    Guid ExecutionId,
+    Guid DeviceId,
+    ApprovalStatusValue Status,
+    ApprovalDecisionValue? Decision,
+    ApprovalScopeValue? Scope);
+
+public sealed record DeviceTaskEventRequest(
+    string ClientEventId,
+    Guid ExecutionId,
+    string EventType,
+    string? PayloadJson = null,
+    string? ProgressSummary = null,
+    string? ResultSummary = null,
+    string? ResultPayloadJson = null,
+    IReadOnlyList<ArtifactManifestEntry>? Artifacts = null,
+    string? CodexThreadId = null,
+    string? CodexTurnId = null,
+    string? ErrorCode = null,
+    string? ErrorMessage = null);
+
+public sealed record DeviceTaskEventResponse(
+    Guid TaskId,
+    Guid ExecutionId,
+    bool Accepted,
+    bool Deduplicated,
+    TaskStatusValue Status,
+    TaskExecutionStatusValue ExecutionStatus);
+
+public sealed record DeviceTaskLeaseRenewRequest(string LeaseOwner);
+
+public sealed record DeviceTaskLeaseRenewResponse(
+    Guid TaskId,
+    bool Renewed,
+    long? LeaseExpiresAtMs,
+    TaskStatusValue Status);
+
 public sealed record NotificationResponse(
     Guid Id,
     Guid? ConversationId,
@@ -276,7 +468,8 @@ public sealed record NotificationResponse(
     long CreatedAtMs,
     long? DeliveredAtMs,
     long? ReadAtMs,
-    long? ActionedAtMs);
+    long? ActionedAtMs,
+    Guid? ApprovalId = null);
 
 public sealed record NotificationListResponse(IReadOnlyList<NotificationResponse> Items);
 

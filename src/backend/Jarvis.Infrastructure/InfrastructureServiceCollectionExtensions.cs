@@ -1,4 +1,6 @@
 using Jarvis.Application.Conversations;
+using Jarvis.Application.Approvals;
+using Jarvis.Application.Devices;
 using Jarvis.Application.Identity;
 using Jarvis.Application.Notifications;
 using Jarvis.Application.Realtime;
@@ -10,6 +12,7 @@ using Jarvis.Infrastructure.Outbox;
 using Jarvis.Infrastructure.Notifications;
 using Jarvis.Infrastructure.Realtime;
 using Jarvis.Infrastructure.Tasks;
+using Jarvis.Infrastructure.Devices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -45,6 +48,13 @@ public static class InfrastructureServiceCollectionExtensions
             .ValidateOnStart();
         services.AddScoped<IConversationStore, EfConversationStore>();
         services.AddScoped<ConversationService>();
+        services.AddScoped<EfDeviceStore>();
+        services.AddScoped<IDeviceStore>(serviceProvider => serviceProvider.GetRequiredService<EfDeviceStore>());
+        services.AddScoped<IApprovalStore>(serviceProvider => serviceProvider.GetRequiredService<EfDeviceStore>());
+        services.AddScoped<DeviceCoordinationService>();
+        services.AddScoped<DeviceLeaseRecoveryService>();
+        services.AddHostedService<DeviceLeaseRecoveryHostedService>();
+        services.AddScoped<ApprovalService>();
         services.AddScoped<EfTaskStore>();
         services.AddScoped<ITaskStore>(serviceProvider => serviceProvider.GetRequiredService<EfTaskStore>());
         services.AddScoped<TaskService>();

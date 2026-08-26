@@ -1,4 +1,5 @@
 using Jarvis.Domain.Conversations;
+using Jarvis.Domain.Approvals;
 using Jarvis.Domain.Devices;
 using Jarvis.Domain.Idempotency;
 using Jarvis.Domain.Identity;
@@ -30,6 +31,10 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
 
     public DbSet<TaskEvent> TaskEvents => Set<TaskEvent>();
 
+    public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
+
+    public DbSet<Approval> Approvals => Set<Approval>();
+
     public DbSet<Notification> Notifications => Set<Notification>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -51,6 +56,8 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
             entity.Property(device => device.Name).HasMaxLength(200).IsRequired();
             entity.Property(device => device.Platform).HasMaxLength(64).IsRequired();
             entity.Property(device => device.CapabilitiesJson).IsRequired();
+            entity.Property(device => device.AllowedRootsJson).IsRequired();
+            entity.Property(device => device.CredentialHash).HasMaxLength(256);
             entity.HasIndex(device => new { device.UserId, device.Name }).IsUnique();
             entity.HasOne<User>()
                 .WithMany()
@@ -149,6 +156,7 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
             entity.Property(task => task.ExpectedOutput).HasMaxLength(100_000);
             entity.Property(task => task.RequiredCapabilitiesJson).IsRequired();
             entity.Property(task => task.AttachmentRefsJson).HasMaxLength(200_000).IsRequired();
+            entity.Property(task => task.CapabilityEnvelopeJson).HasMaxLength(100_000).HasDefaultValue("{}").IsRequired();
             entity.Property(task => task.LeaseOwner).HasMaxLength(200);
             entity.Property(task => task.ProgressSummary).HasMaxLength(2_000);
             entity.Property(task => task.ResultSummary).HasMaxLength(100_000);
@@ -182,12 +190,61 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
             entity.HasKey(taskEvent => taskEvent.Id);
             entity.Property(taskEvent => taskEvent.EventType).HasMaxLength(200).IsRequired();
             entity.Property(taskEvent => taskEvent.PayloadJson).IsRequired();
+            entity.Property(taskEvent => taskEvent.ClientEventId).HasMaxLength(200);
             entity.HasIndex(taskEvent => new { taskEvent.TaskId, taskEvent.Sequence }).IsUnique();
+            entity.HasIndex(taskEvent => new { taskEvent.TaskId, taskEvent.DeviceId, taskEvent.ClientEventId }).IsUnique();
             entity.HasOne<Jarvis.Domain.Tasks.Task>()
                 .WithMany()
                 .HasForeignKey(taskEvent => taskEvent.TaskId)
                 .OnDelete(DeleteBehavior.Cascade);
             ConfigureVersion(entity.Property(taskEvent => taskEvent.Version));
+        });
+
+        modelBuilder.Entity<TaskExecution>(entity =>
+        {
+            entity.ToTable("TaskExecutions");
+            entity.HasKey(execution => execution.Id);
+            entity.Property(execution => execution.ExternalExecutionId).HasMaxLength(500);
+            entity.Property(execution => execution.CodexThreadId).HasMaxLength(500);
+            entity.Property(execution => execution.CodexTurnId).HasMaxLength(500);
+            entity.Property(execution => execution.MetadataJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(execution => execution.ResultPayloadJson).HasMaxLength(1_000_000);
+            entity.Property(execution => execution.ArtifactManifestJson).HasMaxLength(1_000_000).IsRequired();
+            entity.HasIndex(execution => new { execution.TaskId, execution.Status });
+            entity.HasIndex(execution => execution.TaskId).IsUnique(false);
+            entity.HasOne<Jarvis.Domain.Tasks.Task>()
+                .WithMany()
+                .HasForeignKey(execution => execution.TaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Device>()
+                .WithMany()
+                .HasForeignKey(execution => execution.DeviceId)
+                .OnDelete(DeleteBehavior.Restrict);
+            ConfigureVersion(entity.Property(execution => execution.Version));
+        });
+
+        modelBuilder.Entity<Approval>(entity =>
+        {
+            entity.ToTable("Approvals");
+            entity.HasKey(approval => approval.Id);
+            entity.Property(approval => approval.Reason).HasMaxLength(4_000).IsRequired();
+            entity.Property(approval => approval.RequestedActionJson).HasMaxLength(1_000_000).IsRequired();
+            entity.Property(approval => approval.RequestId).HasMaxLength(200);
+            entity.HasIndex(approval => new { approval.TaskId, approval.Status, approval.CreatedAtMs });
+            entity.HasIndex(approval => new { approval.DeviceId, approval.RequestId }).IsUnique();
+            entity.HasOne<Jarvis.Domain.Tasks.Task>()
+                .WithMany()
+                .HasForeignKey(approval => approval.TaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<TaskExecution>()
+                .WithMany()
+                .HasForeignKey(approval => approval.ExecutionId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Device>()
+                .WithMany()
+                .HasForeignKey(approval => approval.DeviceId)
+                .OnDelete(DeleteBehavior.Restrict);
+            ConfigureVersion(entity.Property(approval => approval.Version));
         });
 
         modelBuilder.Entity<Notification>(entity =>
@@ -212,6 +269,10 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
             entity.HasOne<Jarvis.Domain.Tasks.Task>()
                 .WithMany()
                 .HasForeignKey(notification => notification.TaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Approval>()
+                .WithMany()
+                .HasForeignKey(notification => notification.ApprovalId)
                 .OnDelete(DeleteBehavior.Cascade);
             ConfigureVersion(entity.Property(notification => notification.Version));
         });

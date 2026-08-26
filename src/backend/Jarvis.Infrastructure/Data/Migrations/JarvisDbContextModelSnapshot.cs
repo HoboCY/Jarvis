@@ -17,6 +17,77 @@ namespace Jarvis.Infrastructure.Data.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
 
+            modelBuilder.Entity("Jarvis.Domain.Approvals.Approval", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DecidedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("DecidedByDeviceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Decision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ExecutionId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ExpiresAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestId")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RequestedActionJson")
+                        .IsRequired()
+                        .HasMaxLength(1000000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Scope")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExecutionId");
+
+                    b.HasIndex("DeviceId", "RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("TaskId", "Status", "CreatedAtMs");
+
+                    b.ToTable("Approvals", (string)null);
+                });
+
             modelBuilder.Entity("Jarvis.Domain.Conversations.Conversation", b =>
                 {
                     b.Property<Guid>("Id")
@@ -202,8 +273,16 @@ namespace Jarvis.Infrastructure.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("AllowedRootsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("CapabilitiesJson")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CredentialHash")
+                        .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
                     b.Property<int>("DeviceType")
@@ -396,6 +475,8 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ApprovalId");
+
                     b.HasIndex("ConversationId");
 
                     b.HasIndex("TaskId");
@@ -474,6 +555,13 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
                     b.Property<int>("Attempt")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("CapabilityEnvelopeJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(100000)
+                        .HasColumnType("TEXT")
+                        .HasDefaultValue("{}");
 
                     b.Property<long?>("CompletedAtMs")
                         .HasColumnType("INTEGER");
@@ -576,12 +664,22 @@ namespace Jarvis.Infrastructure.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ClientEventId")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("CreatedAtMs")
                         .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("DeviceId")
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("EventType")
                         .IsRequired()
                         .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ExecutionId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("PayloadJson")
@@ -605,7 +703,100 @@ namespace Jarvis.Infrastructure.Data.Migrations
                     b.HasIndex("TaskId", "Sequence")
                         .IsUnique();
 
+                    b.HasIndex("TaskId", "DeviceId", "ClientEventId")
+                        .IsUnique();
+
                     b.ToTable("TaskEvents", (string)null);
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Tasks.TaskExecution", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ArtifactManifestJson")
+                        .IsRequired()
+                        .HasMaxLength(1000000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CodexThreadId")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CodexTurnId")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CodexTurnStartRequestedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("DeviceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("EndedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ExternalExecutionId")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MetadataJson")
+                        .IsRequired()
+                        .HasMaxLength(100000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResultPayloadJson")
+                        .HasMaxLength(1000000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("StartedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("TaskId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0L);
+
+                    b.Property<int>("WorkerKind")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeviceId");
+
+                    b.HasIndex("TaskId");
+
+                    b.HasIndex("TaskId", "Status");
+
+                    b.ToTable("TaskExecutions", (string)null);
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Approvals.Approval", b =>
+                {
+                    b.HasOne("Jarvis.Domain.Devices.Device", null)
+                        .WithMany()
+                        .HasForeignKey("DeviceId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("Jarvis.Domain.Tasks.TaskExecution", null)
+                        .WithMany()
+                        .HasForeignKey("ExecutionId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("Jarvis.Domain.Tasks.Task", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Jarvis.Domain.Conversations.Conversation", b =>
@@ -661,6 +852,11 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
             modelBuilder.Entity("Jarvis.Domain.Notifications.Notification", b =>
                 {
+                    b.HasOne("Jarvis.Domain.Approvals.Approval", null)
+                        .WithMany()
+                        .HasForeignKey("ApprovalId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
                     b.HasOne("Jarvis.Domain.Conversations.Conversation", null)
                         .WithMany()
                         .HasForeignKey("ConversationId")
@@ -705,6 +901,20 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
             modelBuilder.Entity("Jarvis.Domain.Tasks.TaskEvent", b =>
                 {
+                    b.HasOne("Jarvis.Domain.Tasks.Task", null)
+                        .WithMany()
+                        .HasForeignKey("TaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Tasks.TaskExecution", b =>
+                {
+                    b.HasOne("Jarvis.Domain.Devices.Device", null)
+                        .WithMany()
+                        .HasForeignKey("DeviceId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Jarvis.Domain.Tasks.Task", null)
                         .WithMany()
                         .HasForeignKey("TaskId")

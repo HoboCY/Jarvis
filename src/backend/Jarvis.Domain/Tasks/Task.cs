@@ -36,6 +36,7 @@ public sealed class Task
         string? expectedOutput,
         string requiredCapabilitiesJson,
         string attachmentRefsJson,
+        string capabilityEnvelopeJson,
         Guid? preferredDeviceId,
         WorkerKind workerKind,
         int priority,
@@ -49,6 +50,7 @@ public sealed class Task
         ExpectedOutput = expectedOutput;
         RequiredCapabilitiesJson = requiredCapabilitiesJson;
         AttachmentRefsJson = attachmentRefsJson;
+        CapabilityEnvelopeJson = capabilityEnvelopeJson;
         PreferredDeviceId = preferredDeviceId;
         WorkerKind = workerKind;
         Status = TaskStatus.Queued;
@@ -72,6 +74,8 @@ public sealed class Task
     public string RequiredCapabilitiesJson { get; private set; } = "[]";
 
     public string AttachmentRefsJson { get; private set; } = "[]";
+
+    public string CapabilityEnvelopeJson { get; private set; } = "{}";
 
     public Guid? PreferredDeviceId { get; private set; }
 
@@ -123,11 +127,13 @@ public sealed class Task
         WorkerKind workerKind,
         int priority,
         long nowMs,
-        Guid? createdByMessageId = null)
+        Guid? createdByMessageId = null,
+        string capabilityEnvelopeJson = "{}")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(goal);
         ArgumentException.ThrowIfNullOrWhiteSpace(requiredCapabilitiesJson);
         ArgumentException.ThrowIfNullOrWhiteSpace(attachmentRefsJson);
+        ArgumentException.ThrowIfNullOrWhiteSpace(capabilityEnvelopeJson);
         ArgumentOutOfRangeException.ThrowIfNegative(priority);
         ArgumentOutOfRangeException.ThrowIfNegative(nowMs);
 
@@ -140,6 +146,7 @@ public sealed class Task
             string.IsNullOrWhiteSpace(expectedOutput) ? null : expectedOutput.Trim(),
             requiredCapabilitiesJson,
             attachmentRefsJson,
+            capabilityEnvelopeJson,
             preferredDeviceId,
             workerKind,
             priority,
@@ -215,7 +222,7 @@ public sealed class Task
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
         ArgumentOutOfRangeException.ThrowIfNegative(leaseExpiresAtMs);
         ArgumentOutOfRangeException.ThrowIfNegative(nowMs);
-        if (Status != TaskStatus.Running
+        if (Status is not (TaskStatus.Running or TaskStatus.WaitingForApproval)
             || !string.Equals(LeaseOwner, leaseOwner.Trim(), StringComparison.Ordinal)
             || LeaseExpiresAtMs is not long currentLeaseExpiresAtMs
             || currentLeaseExpiresAtMs <= nowMs)
@@ -311,21 +318,57 @@ public sealed class Task
         return true;
     }
 
-    public bool MarkRecovering(long nowMs)
+    public bool MarkApprovalFailed(string errorCode, string errorMessage, long nowMs)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(errorCode);
+        ArgumentException.ThrowIfNullOrWhiteSpace(errorMessage);
+        if (Status != TaskStatus.WaitingForApproval)
+        {
+            throw new InvalidOperationException($"A task in {Status} has no pending approval to fail.");
+        }
+
+        Status = TaskStatus.Failed;
+        ErrorCode = errorCode.Trim();
+        ErrorMessage = errorMessage.Trim();
+        CompletedAtMs = nowMs;
+        LeaseOwner = null;
+        LeaseExpiresAtMs = null;
+        HeartbeatAtMs = nowMs;
+        Touch();
+        return true;
+    }
+
+    public bool MarkRecovering(long nowMs, bool preserveLease = false)
     {
         if (Status == TaskStatus.Recovering)
         {
             return false;
         }
 
-        if (Status is not (TaskStatus.Assigned or TaskStatus.Running))
+        if (Status is not (TaskStatus.Assigned or TaskStatus.Running or TaskStatus.WaitingForApproval))
         {
             throw new InvalidOperationException($"A task in {Status} cannot recover.");
         }
 
         Status = TaskStatus.Recovering;
-        LeaseOwner = null;
-        LeaseExpiresAtMs = null;
+        if (!preserveLease)
+        {
+            LeaseOwner = null;
+            LeaseExpiresAtMs = null;
+        }
+        HeartbeatAtMs = nowMs;
+        Touch();
+        return true;
+    }
+
+    public bool ResumeFromRecovery(long nowMs)
+    {
+        if (Status != TaskStatus.Recovering)
+        {
+            throw new InvalidOperationException($"A task in {Status} cannot resume from recovery.");
+        }
+
+        Status = TaskStatus.Running;
         HeartbeatAtMs = nowMs;
         Touch();
         return true;

@@ -14,7 +14,7 @@
     "typescript-eslint": "8.42.0"
   },
   "scripts": {
-    "typecheck": "pnpm --filter @jarvis/contracts-ts build && pnpm --recursive --if-present run typecheck",
+    "typecheck": "pnpm --filter @jarvis/contracts-ts build && pnpm --filter @jarvis/realtime-agent build && pnpm --recursive --if-present run typecheck",
     "lint": "eslint .",
     "test": "pnpm --recursive --if-present run test",
     "build": "pnpm --recursive --if-present run build",

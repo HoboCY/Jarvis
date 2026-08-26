@@ -33,12 +33,14 @@ public sealed class Notification
         string title,
         string body,
         string dedupKey,
-        long nowMs)
+        long nowMs,
+        Guid? approvalId)
     {
         Id = id;
         UserId = userId;
         ConversationId = conversationId;
         TaskId = taskId;
+        ApprovalId = approvalId;
         Type = type;
         Severity = severity;
         Title = title;
@@ -95,7 +97,8 @@ public sealed class Notification
         string title,
         string body,
         string dedupKey,
-        long nowMs)
+        long nowMs,
+        Guid? approvalId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(type);
         ArgumentException.ThrowIfNullOrWhiteSpace(title);
@@ -111,7 +114,8 @@ public sealed class Notification
             title.Trim(),
             body.Trim(),
             dedupKey.Trim(),
-            nowMs);
+            nowMs,
+            approvalId);
     }
 
     public bool MarkDelivered(long nowMs)

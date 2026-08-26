@@ -284,6 +284,7 @@ public sealed class EfNotificationStore(
             notification.CreatedAtMs,
             notification.DeliveredAtMs,
             notification.ReadAtMs,
-            notification.ActionedAtMs);
+            notification.ActionedAtMs,
+            notification.ApprovalId);
     }
 }

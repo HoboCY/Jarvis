@@ -15,6 +15,9 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
     private static readonly string[] RequiredCapabilities = ["localFiles", "deepReasoning"];
     private static readonly string[] UnknownCapabilities = ["unknownCapability"];
     private static readonly string[] AttachmentRefs = ["file:///reports/source.csv", "artifact://result/1"];
+    private static readonly CapabilityEnvelopeContract TaskCapabilityEnvelope = new(
+        ReadFiles: true,
+        AllowedRoots: [Path.GetTempPath()]);
     private readonly TestApplicationFactory factory;
 
     public TaskApiTests(TestApplicationFactory factory)
@@ -39,7 +42,8 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
                 expectedOutput = "中文结论",
                 requiredCapabilities = RequiredCapabilities,
                 preferredDeviceId = (Guid?)null,
-                attachmentRefs = AttachmentRefs
+                attachmentRefs = AttachmentRefs,
+                capabilityEnvelope = TaskCapabilityEnvelope
             })
         };
         request.Headers.Add("Idempotency-Key", "task-create-one");
@@ -87,7 +91,8 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
                     goal = "并发幂等任务",
                     expectedOutput = "一次",
                     requiredCapabilities = RequiredCapabilities,
-                    preferredDeviceId = (Guid?)null
+                    preferredDeviceId = (Guid?)null,
+                    capabilityEnvelope = TaskCapabilityEnvelope
                 })
             };
             request.Headers.Add("Idempotency-Key", "task-concurrent-one");
@@ -140,7 +145,8 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
                     goal,
                     expectedOutput = "一次",
                     requiredCapabilities = RequiredCapabilities,
-                    preferredDeviceId = (Guid?)null
+                    preferredDeviceId = (Guid?)null,
+                    capabilityEnvelope = TaskCapabilityEnvelope
                 })
             };
             request.Headers.Add("Idempotency-Key", "task-conflict-one");
@@ -171,7 +177,8 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
                     goal = "same goal",
                     expectedOutput = "same output",
                     requiredCapabilities = RequiredCapabilities,
-                    attachmentRefs = new[] { attachmentRef }
+                    attachmentRefs = new[] { attachmentRef },
+                    capabilityEnvelope = TaskCapabilityEnvelope
                 })
             };
             request.Headers.Add("Idempotency-Key", "task-attachment-conflict");
@@ -302,7 +309,8 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
                 goal = "不可取消状态",
                 expectedOutput = "冲突",
                 requiredCapabilities = RequiredCapabilities,
-                preferredDeviceId = (Guid?)null
+                preferredDeviceId = (Guid?)null,
+                capabilityEnvelope = TaskCapabilityEnvelope
             })
         };
         request.Headers.Add("Idempotency-Key", $"cancel-state-task-{Guid.CreateVersion7():N}");
@@ -323,7 +331,8 @@ public sealed class TaskApiTests : IClassFixture<TestApplicationFactory>
                 goal,
                 expectedOutput = "分页",
                 requiredCapabilities = RequiredCapabilities,
-                preferredDeviceId = (Guid?)null
+                preferredDeviceId = (Guid?)null,
+                capabilityEnvelope = TaskCapabilityEnvelope
             })
         };
         request.Headers.Add("Idempotency-Key", $"pagination-task-{Guid.CreateVersion7():N}");

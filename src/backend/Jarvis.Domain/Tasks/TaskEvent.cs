@@ -6,7 +6,16 @@ public sealed class TaskEvent
     {
     }
 
-    private TaskEvent(Guid id, Guid taskId, long sequence, string eventType, string payloadJson, long nowMs)
+    private TaskEvent(
+        Guid id,
+        Guid taskId,
+        long sequence,
+        string eventType,
+        string payloadJson,
+        long nowMs,
+        Guid? deviceId,
+        Guid? executionId,
+        string? clientEventId)
     {
         Id = id;
         TaskId = taskId;
@@ -14,6 +23,9 @@ public sealed class TaskEvent
         EventType = eventType;
         PayloadJson = payloadJson;
         CreatedAtMs = nowMs;
+        DeviceId = deviceId;
+        ExecutionId = executionId;
+        ClientEventId = clientEventId;
     }
 
     public Guid Id { get; private set; }
@@ -28,6 +40,12 @@ public sealed class TaskEvent
 
     public long CreatedAtMs { get; private set; }
 
+    public Guid? DeviceId { get; private set; }
+
+    public Guid? ExecutionId { get; private set; }
+
+    public string? ClientEventId { get; private set; }
+
     public long Version { get; private set; }
 
     public static TaskEvent Create(
@@ -36,11 +54,19 @@ public sealed class TaskEvent
         long sequence,
         string eventType,
         string payloadJson,
-        long nowMs)
+        long nowMs,
+        Guid? deviceId = null,
+        Guid? executionId = null,
+        string? clientEventId = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(sequence);
         ArgumentException.ThrowIfNullOrWhiteSpace(eventType);
         ArgumentException.ThrowIfNullOrWhiteSpace(payloadJson);
-        return new TaskEvent(id, taskId, sequence, eventType.Trim(), payloadJson, nowMs);
+        if (clientEventId is { Length: > 200 })
+        {
+            throw new ArgumentException("Client event id is too long.", nameof(clientEventId));
+        }
+
+        return new TaskEvent(id, taskId, sequence, eventType.Trim(), payloadJson, nowMs, deviceId, executionId, clientEventId);
     }
 }

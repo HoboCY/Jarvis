@@ -41,6 +41,13 @@ interface Window {
       preferredDeviceId?: string | null;
       sourceMessageIds: string[];
       attachmentRefs: string[];
+      capabilityEnvelope: {
+        readFiles: boolean;
+        writeFiles: boolean;
+        runCommands: boolean;
+        network: boolean;
+        allowedRoots: string[];
+      } | null;
       idempotencyKey: string;
     }) => Promise<unknown>;
     getTaskStatus: (taskId: string) => Promise<unknown>;
@@ -54,6 +61,14 @@ interface Window {
     markNotificationDelivered: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
     markNotificationRead: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
     dismissNotification: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
+    getApprovals: () => Promise<unknown>;
+    decideApproval: (input: {
+      approvalId: string;
+      decision: "approve" | "deny";
+      scope: "once" | "taskSession";
+      clientRequestId: string;
+      idempotencyKey: string;
+    }) => Promise<unknown>;
     onBackendEvent: (listener: (event: unknown) => void) => () => void;
     onBackendConnectionState: (listener: (event: unknown) => void) => () => void;
   };

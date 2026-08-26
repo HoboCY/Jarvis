@@ -120,7 +120,8 @@ test("routes a real SDK function call through the injected backend with a stable
           requiredCapabilities: ["deepReasoning"],
           preferredDeviceId: null,
           sourceMessageIds: [],
-          attachmentRefs: []
+          attachmentRefs: [],
+          capabilityEnvelope: null
         }),
         responseId: "response-123"
       });
@@ -173,7 +174,8 @@ test("routes delegate, status, and cancel through the real SDK function-call pip
         requiredCapabilities: ["deepReasoning"],
         preferredDeviceId: null,
         sourceMessageIds: [],
-        attachmentRefs: []
+        attachmentRefs: [],
+        capabilityEnvelope: null
       },
       output: { accepted: true, taskId, status: "queued" }
     },
@@ -253,7 +255,8 @@ test("replaying a function call uses one backend write and returns the cached ou
     requiredCapabilities: ["deepReasoning"],
     preferredDeviceId: null,
     sourceMessageIds: [],
-    attachmentRefs: []
+    attachmentRefs: [],
+    capabilityEnvelope: null
   };
 
   await transport.runScenario({

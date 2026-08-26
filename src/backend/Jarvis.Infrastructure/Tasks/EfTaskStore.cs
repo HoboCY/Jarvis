@@ -12,6 +12,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using DomainTask = Jarvis.Domain.Tasks.Task;
+using DomainTaskExecution = Jarvis.Domain.Tasks.TaskExecution;
 using DomainTaskStatus = Jarvis.Domain.Tasks.TaskStatus;
 using DomainTaskEvent = Jarvis.Domain.Tasks.TaskEvent;
 using DomainWorkerKind = Jarvis.Domain.Tasks.WorkerKind;
@@ -133,7 +134,8 @@ public sealed class EfTaskStore(
             workerKind,
             priority: 0,
             nowMs,
-            sourceMessageIds.Count > 0 ? sourceMessageIds[0] : null);
+            sourceMessageIds.Count > 0 ? sourceMessageIds[0] : null,
+            capabilityEnvelopeJson: JsonSerializer.Serialize(request.CapabilityEnvelope, JsonOptions));
         db.Tasks.Add(task);
 
         var accepted = new TaskAcceptedResponse(
@@ -142,6 +144,18 @@ public sealed class EfTaskStore(
             ToContractStatus(task.Status),
             ToContractWorkerKind(task.WorkerKind));
         AddTaskEventAndOutbox(task, "task.created", nowMs);
+        if (workerKind == DomainWorkerKind.Codex)
+        {
+            AddOutbox("task.available", new
+            {
+                userId = task.UserId,
+                deviceId = task.PreferredDeviceId,
+                taskId = task.Id,
+                requiredCapabilities = capabilities,
+                occurredAt = nowMs,
+                entityVersion = task.Version
+            }, nowMs);
+        }
         db.IdempotencyRecords.Add(CreateIdempotencyRecord(
             userId,
             scope,
@@ -164,7 +178,16 @@ public sealed class EfTaskStore(
         var task = await db.Tasks.AsNoTracking().SingleOrDefaultAsync(
             item => item.Id == taskId && item.UserId == userId,
             cancellationToken);
-        return task is null ? null : ToResponse(task);
+        if (task is null)
+        {
+            return null;
+        }
+
+        var execution = await db.TaskExecutions.AsNoTracking()
+            .Where(item => item.TaskId == taskId)
+            .OrderByDescending(item => item.StartedAtMs)
+            .FirstOrDefaultAsync(cancellationToken);
+        return ToResponse(task, execution);
     }
 
     public async Task<TaskListResponse?> ListAsync(
@@ -207,7 +230,17 @@ public sealed class EfTaskStore(
         var nextCursor = hasMore
             ? new TaskListCursor(tasks[^1].CreatedAtMs, tasks[^1].Id).Encode()
             : null;
-        return new TaskListResponse(tasks.Select(ToResponse).ToArray(), nextCursor);
+        var taskIds = tasks.Select(task => task.Id).ToArray();
+        var executions = await db.TaskExecutions.AsNoTracking()
+            .Where(item => taskIds.Contains(item.TaskId))
+            .OrderByDescending(item => item.StartedAtMs)
+            .ToListAsync(cancellationToken);
+        var latestExecutionByTask = executions
+            .GroupBy(item => item.TaskId)
+            .ToDictionary(group => group.Key, group => group.First());
+        return new TaskListResponse(
+            tasks.Select(task => ToResponse(task, latestExecutionByTask.GetValueOrDefault(task.Id))).ToArray(),
+            nextCursor);
     }
 
     public async Task<TaskCancelStoreResult> CancelAsync(
@@ -378,6 +411,7 @@ public sealed class EfTaskStore(
         var payload = new
         {
             userId = task.UserId,
+            deviceId = task.AssignedDeviceId,
             conversationId = task.ConversationId,
             taskId = task.Id,
             status = JsonNamingPolicy.CamelCase.ConvertName(task.Status.ToString()),
@@ -539,7 +573,7 @@ public sealed class EfTaskStore(
         return false;
     }
 
-    private static TaskResponse ToResponse(DomainTask task)
+    private static TaskResponse ToResponse(DomainTask task, DomainTaskExecution? execution = null)
     {
         var capabilities = JsonSerializer.Deserialize<string[]>(task.RequiredCapabilitiesJson, JsonOptions)
             ?? Array.Empty<string>();
@@ -567,7 +601,51 @@ public sealed class EfTaskStore(
             task.Version,
             task.CreatedAtMs,
             task.StartedAtMs,
-            task.CompletedAtMs);
+            task.CompletedAtMs,
+            execution is null ? null : ToExecutionResponse(execution),
+            execution is null ? Array.Empty<ArtifactManifestEntry>() : DeserializeArtifacts(execution.ArtifactManifestJson),
+            DeserializeCapabilityEnvelope(task.CapabilityEnvelopeJson));
+    }
+
+    private static TaskExecutionResponse ToExecutionResponse(DomainTaskExecution execution) => new(
+        execution.Id,
+        execution.TaskId,
+        execution.DeviceId,
+        ToContractWorkerKind(execution.WorkerKind),
+        execution.ExternalExecutionId,
+        execution.CodexThreadId,
+        execution.CodexTurnId,
+        (TaskExecutionStatusValue)execution.Status,
+        execution.MetadataJson,
+        execution.ResultPayloadJson,
+        DeserializeArtifacts(execution.ArtifactManifestJson),
+        execution.StartedAtMs,
+        execution.EndedAtMs,
+        execution.Version,
+        execution.CodexTurnStartRequestedAtMs);
+
+    private static ArtifactManifestEntry[] DeserializeArtifacts(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<ArtifactManifestEntry[]>(json, JsonOptions) ?? Array.Empty<ArtifactManifestEntry>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<ArtifactManifestEntry>();
+        }
+    }
+
+    private static CapabilityEnvelopeContract? DeserializeCapabilityEnvelope(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<CapabilityEnvelopeContract>(json, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static TaskStatusValue ToContractStatus(DomainTaskStatus status) => status switch

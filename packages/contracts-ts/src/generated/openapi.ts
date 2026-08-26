@@ -21,6 +21,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["RegisterDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations": {
         parameters: {
             query?: never;
@@ -287,10 +303,230 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["ListPendingApprovals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{approvalId}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["DecideApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/devices/{deviceId}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["HeartbeatDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["ClaimDeviceTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["ListActiveDeviceTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["AppendDeviceTaskEvent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/lease:renew": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["RenewDeviceTaskLease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CreateDeviceApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["GetDeviceTask"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/approvals/{approvalId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["GetDeviceApproval"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ApprovalDecisionRequest: {
+            decision: components["schemas"]["ApprovalDecisionValue"];
+            scope: components["schemas"]["ApprovalScopeValue"];
+            clientRequestId: string;
+        };
+        /** @enum {unknown} */
+        ApprovalDecisionValue: "approve" | "deny";
+        /** @enum {unknown} */
+        ApprovalKindValue: "command" | "fileWrite" | "permission" | "externalWrite";
+        ApprovalListResponse: {
+            items: components["schemas"]["ApprovalResponse"][];
+        };
+        ApprovalResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            executionId: null | string;
+            /** Format: uuid */
+            deviceId: string;
+            kind: components["schemas"]["ApprovalKindValue"];
+            reason: string;
+            status: components["schemas"]["ApprovalStatusValue"];
+            scope: null | components["schemas"]["ApprovalScopeValue"];
+            requestId: null | string;
+            /** Format: uuid */
+            decidedByDeviceId: null | string;
+            /** Format: int64 */
+            createdAtMs: number | string;
+            /** Format: int64 */
+            decidedAtMs: null | number | string;
+            /** Format: int64 */
+            expiresAtMs: null | number | string;
+            /** Format: int64 */
+            entityVersion: number | string;
+        };
+        /** @enum {unknown} */
+        ApprovalScopeValue: "once" | "taskSession" | null;
+        /** @enum {unknown} */
+        ApprovalStatusValue: "pending" | "approved" | "denied" | "expired" | "cancelled";
+        ArtifactManifestEntry: {
+            path: string;
+            /** Format: int64 */
+            size: number | string;
+            sha256: string;
+            /** @default application/octet-stream */
+            contentType: string;
+        };
+        CapabilityEnvelopeContract: {
+            /** @default false */
+            readFiles: boolean;
+            /** @default false */
+            writeFiles: boolean;
+            /** @default false */
+            runCommands: boolean;
+            /** @default false */
+            network: boolean;
+            allowedRoots?: null | string[];
+        };
         ConversationResponse: {
             /** Format: uuid */
             id: string;
@@ -319,6 +555,7 @@ export interface components {
             /** Format: uuid */
             preferredDeviceId?: null | string;
             attachmentRefs?: null | string[];
+            capabilityEnvelope?: null | components["schemas"]["CapabilityEnvelopeContract"];
         };
         DesktopDeviceBootstrapResponse: {
             /** Format: uuid */
@@ -328,8 +565,122 @@ export interface components {
             platform: string;
             status: components["schemas"]["DeviceStatusValue"];
         };
+        DeviceActiveTaskListResponse: {
+            items: components["schemas"]["DeviceTaskClaimResponse"][];
+        };
+        DeviceApprovalRequest: {
+            /** Format: uuid */
+            executionId: string;
+            kind: components["schemas"]["ApprovalKindValue"];
+            reason: string;
+            requestedActionJson: string;
+            scope?: null | components["schemas"]["ApprovalScopeValue"];
+            requestId?: null | string;
+            /** Format: int64 */
+            expiresAtMs?: null | number | string;
+        };
+        DeviceApprovalResponse: {
+            /** Format: uuid */
+            approvalId: string;
+            status: components["schemas"]["ApprovalStatusValue"];
+        };
+        DeviceApprovalStatusResponse: {
+            /** Format: uuid */
+            approvalId: string;
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            executionId: string;
+            /** Format: uuid */
+            deviceId: string;
+            status: components["schemas"]["ApprovalStatusValue"];
+            decision: null | components["schemas"]["ApprovalDecisionValue"];
+            scope: null | components["schemas"]["ApprovalScopeValue"];
+        };
+        DeviceHeartbeatRequest: {
+            capabilities: null | string[];
+            allowedRoots?: null | string[];
+        };
+        DeviceHeartbeatResponse: {
+            /** Format: uuid */
+            deviceId: string;
+            status: components["schemas"]["DeviceStatusValue"];
+            /** Format: int64 */
+            lastSeenAtMs: number | string;
+            capabilities: string[];
+            /** Format: int64 */
+            entityVersion: number | string;
+        };
+        DeviceRegistrationRequest: {
+            name: string;
+            deviceType: components["schemas"]["DeviceTypeValue"];
+            platform: string;
+            capabilities: null | string[];
+            allowedRoots?: null | string[];
+        };
+        DeviceRegistrationResponse: {
+            /** Format: uuid */
+            deviceId: string;
+            /** Format: uuid */
+            userId: string;
+            name: string;
+            deviceType: components["schemas"]["DeviceTypeValue"];
+            platform: string;
+            capabilities: string[];
+            status: components["schemas"]["DeviceStatusValue"];
+            deviceCredential: string;
+        };
         /** @enum {unknown} */
         DeviceStatusValue: "online" | "offline" | "disabled";
+        DeviceTaskClaimRequest: {
+            leaseOwner?: null | string;
+            capabilityEnvelope?: null | components["schemas"]["CapabilityEnvelopeContract"];
+        };
+        DeviceTaskClaimResponse: {
+            claimed: boolean;
+            task: null | components["schemas"]["TaskResponse"];
+            execution: null | components["schemas"]["TaskExecutionResponse"];
+            leaseOwner: null | string;
+            /** Format: int64 */
+            leaseExpiresAtMs: null | number | string;
+            capabilityEnvelope?: null | components["schemas"]["CapabilityEnvelopeContract"];
+        };
+        DeviceTaskEventRequest: {
+            clientEventId: string;
+            /** Format: uuid */
+            executionId: string;
+            eventType: string;
+            payloadJson?: null | string;
+            progressSummary?: null | string;
+            resultSummary?: null | string;
+            resultPayloadJson?: null | string;
+            artifacts?: null | components["schemas"]["ArtifactManifestEntry"][];
+            codexThreadId?: null | string;
+            codexTurnId?: null | string;
+            errorCode?: null | string;
+            errorMessage?: null | string;
+        };
+        DeviceTaskEventResponse: {
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            executionId: string;
+            accepted: boolean;
+            deduplicated: boolean;
+            status: components["schemas"]["TaskStatusValue"];
+            executionStatus: components["schemas"]["TaskExecutionStatusValue"];
+        };
+        DeviceTaskLeaseRenewRequest: {
+            leaseOwner: string;
+        };
+        DeviceTaskLeaseRenewResponse: {
+            /** Format: uuid */
+            taskId: string;
+            renewed: boolean;
+            /** Format: int64 */
+            leaseExpiresAtMs: null | number | string;
+            status: components["schemas"]["TaskStatusValue"];
+        };
         /** @enum {unknown} */
         DeviceTypeValue: "desktop" | "mobile" | "server";
         /** @enum {unknown} */
@@ -392,6 +743,8 @@ export interface components {
             readAtMs: null | number | string;
             /** Format: int64 */
             actionedAtMs: null | number | string;
+            /** Format: uuid */
+            approvalId?: null | string;
         };
         /** @enum {unknown} */
         NotificationSeverityValue: "info" | "success" | "warning" | "error";
@@ -507,6 +860,32 @@ export interface components {
             accepted: boolean;
             status: components["schemas"]["TaskStatusValue"];
         };
+        TaskExecutionResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            deviceId: null | string;
+            workerKind: components["schemas"]["WorkerKindValue"];
+            externalExecutionId: null | string;
+            codexThreadId: null | string;
+            codexTurnId: null | string;
+            status: components["schemas"]["TaskExecutionStatusValue"];
+            metadataJson: string;
+            resultPayloadJson: null | string;
+            artifacts: components["schemas"]["ArtifactManifestEntry"][];
+            /** Format: int64 */
+            startedAtMs: number | string;
+            /** Format: int64 */
+            endedAtMs: null | number | string;
+            /** Format: int64 */
+            entityVersion: number | string;
+            /** Format: int64 */
+            codexTurnStartRequestedAtMs?: null | number | string;
+        };
+        /** @enum {unknown} */
+        TaskExecutionStatusValue: "assigned" | "running" | "waitingForApproval" | "recovering" | "succeeded" | "failed" | "cancelled";
         TaskListResponse: {
             items: components["schemas"]["TaskResponse"][];
             nextCursor?: null | string;
@@ -545,6 +924,9 @@ export interface components {
             startedAtMs: null | number | string;
             /** Format: int64 */
             completedAtMs: null | number | string;
+            execution?: null | components["schemas"]["TaskExecutionResponse"];
+            artifacts?: null | components["schemas"]["ArtifactManifestEntry"][];
+            capabilityEnvelope?: null | components["schemas"]["CapabilityEnvelopeContract"];
         };
         /** @enum {unknown} */
         TaskStatusValue: "queued" | "assigned" | "running" | "waitingForApproval" | "waitingForUserInput" | "cancellationRequested" | "recovering" | "succeeded" | "failed" | "cancelled";
@@ -590,6 +972,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Phase0HealthResponse"];
+                };
+            };
+        };
+    };
+    RegisterDevice: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceRegistrationRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceRegistrationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
                 };
             };
         };
@@ -1523,6 +1958,502 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    ListPendingApprovals: {
+        parameters: {
+            query?: {
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    DecideApproval: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                approvalId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["ApprovalDecisionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    HeartbeatDevice: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                deviceId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceHeartbeatRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceHeartbeatResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    ClaimDeviceTask: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceTaskClaimRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceTaskClaimResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    ListActiveDeviceTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceActiveTaskListResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    AppendDeviceTaskEvent: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceTaskEventRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceTaskEventResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    RenewDeviceTaskLease: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceTaskLeaseRenewRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceTaskLeaseRenewResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CreateDeviceApproval: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceApprovalResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetDeviceTask: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetDeviceApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                taskId: string;
+                approvalId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceApprovalStatusResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

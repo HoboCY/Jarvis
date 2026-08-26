@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using DomainTask = Jarvis.Domain.Tasks.Task;
 using DomainTaskStatus = Jarvis.Domain.Tasks.TaskStatus;
+using DomainWorkerKind = Jarvis.Domain.Tasks.WorkerKind;
 
 namespace Jarvis.Infrastructure.Tasks;
 
@@ -134,6 +135,7 @@ public sealed class FakeDelayWorker(
             .ToListAsync(cancellationToken);
 
         return candidates.FirstOrDefault(task => IsDeviceEligible(task)
+            && task.WorkerKind != DomainWorkerKind.Codex
             && (task.Status is DomainTaskStatus.Queued or DomainTaskStatus.Recovering
                 || task.LeaseOwner == WorkerId
                 || !IsLeaseValid(task, nowMs)));
@@ -150,6 +152,13 @@ public sealed class FakeDelayWorker(
         }
 
         if (!IsDeviceEligible(task))
+        {
+            return PrepareResult.NotHandled;
+        }
+
+        // The fake adapter covers the existing Internal and Responses workers.
+        // Codex tasks must be claimed only by an authenticated Device Node.
+        if (task.WorkerKind == DomainWorkerKind.Codex)
         {
             return PrepareResult.NotHandled;
         }

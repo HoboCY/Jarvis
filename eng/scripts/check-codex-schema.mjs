@@ -54,6 +54,10 @@ const requiredRequests = {
     params: "ThreadStartParams",
     requiredParams: []
   },
+  "thread/resume": {
+    params: "ThreadResumeParams",
+    requiredParams: ["threadId"]
+  },
   "turn/start": {
     params: "TurnStartParams",
     requiredParams: ["input", "threadId"]
@@ -117,7 +121,62 @@ const turnInterruptProperties = clientRequest.definitions.TurnInterruptParams.pr
 assert.equal(turnInterruptProperties.threadId.type, "string", "turn/interrupt.threadId must be a string.");
 assert.equal(turnInterruptProperties.turnId.type, "string", "turn/interrupt.turnId must be a string.");
 
+function unionMethods(schema, name) {
+  assert(Array.isArray(schema.oneOf), `${name} schema must expose a oneOf union.`);
+  return new Map(schema.oneOf.map(variant => {
+    const methods = variant.properties?.method?.enum;
+    assert(Array.isArray(methods) && methods.length === 1, `${name} union members need one method enum.`);
+    return [methods[0], variant];
+  }));
+}
+
+const serverNotification = JSON.parse(await readFile(resolve(schemaRoot, "ServerNotification.json"), "utf8"));
+const serverRequest = JSON.parse(await readFile(resolve(schemaRoot, "ServerRequest.json"), "utf8"));
+const notificationMethods = unionMethods(serverNotification, "ServerNotification");
+const serverRequestMethods = unionMethods(serverRequest, "ServerRequest");
+for (const method of [
+  "thread/started",
+  "turn/started",
+  "item/started",
+  "item/completed",
+  "turn/completed",
+  "serverRequest/resolved"
+]) {
+  assert(notificationMethods.has(method), `ServerNotification is missing ${method}.`);
+}
+for (const method of [
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/permissions/requestApproval"
+]) {
+  const variant = serverRequestMethods.get(method);
+  assert(variant, `ServerRequest is missing ${method}.`);
+  assert.deepEqual(variant.required, ["id", "method", "params"], `${method} request shape changed.`);
+}
+
+for (const [file, definition] of [
+  ["CommandExecutionRequestApprovalResponse.json", "CommandExecutionApprovalDecision"],
+  ["FileChangeRequestApprovalResponse.json", "FileChangeApprovalDecision"]
+]) {
+  const response = JSON.parse(await readFile(resolve(schemaRoot, file), "utf8"));
+  assert.deepEqual(response.required, ["decision"], `${file} required fields changed.`);
+  const decisions = response.definitions?.[definition]?.oneOf
+    ?.flatMap(variant => variant.enum ?? []);
+  assert.deepEqual(decisions, ["accept", "acceptForSession", "decline", "cancel"], `${definition} enum changed.`);
+}
+
+const permissionsResponse = JSON.parse(await readFile(
+  resolve(schemaRoot, "PermissionsRequestApprovalResponse.json"),
+  "utf8"));
+assert.deepEqual(permissionsResponse.required, ["permissions"], "Permission approval response fields changed.");
+assert.deepEqual(
+  permissionsResponse.definitions?.PermissionGrantScope?.enum,
+  ["turn", "session"],
+  "Permission approval scope enum changed."
+);
+
 console.log(
   `Codex schema contract passed for ${files.length} JSON file(s); ` +
-  `${requestVariants.size} ClientRequest method union members checked.`
+  `${requestVariants.size} ClientRequest, ${notificationMethods.size} ServerNotification, and ` +
+  `${serverRequestMethods.size} ServerRequest union members checked.`
 );

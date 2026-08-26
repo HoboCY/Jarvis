@@ -15,6 +15,10 @@ import {
   type DesktopNotification,
   type DesktopTask
 } from "./task-feed.js";
+import {
+  DesktopApprovalFeed,
+  type DesktopApproval
+} from "./approval-feed.js";
 
 type Message = {
   id: string;
@@ -65,6 +69,27 @@ function notificationFrom(value: unknown): DesktopNotification {
   };
 }
 
+function approvalFrom(value: unknown): DesktopApproval {
+  const item = asRecord(value);
+  const kind = String(item.kind);
+  const status = String(item.status);
+  if (!["command", "fileWrite", "permission", "externalWrite"].includes(kind)
+    || !["pending", "approved", "denied", "expired", "cancelled"].includes(status)) {
+    throw new Error("Backend returned an invalid approval.");
+  }
+  return {
+    id: String(item.id),
+    taskId: String(item.taskId),
+    executionId: item.executionId === null || item.executionId === undefined ? null : String(item.executionId),
+    deviceId: String(item.deviceId),
+    kind: kind as DesktopApproval["kind"],
+    reason: String(item.reason),
+    status: status as DesktopApproval["status"],
+    scope: item.scope === "once" || item.scope === "taskSession" ? item.scope : null,
+    expiresAtMs: typeof item.expiresAtMs === "number" ? item.expiresAtMs : null
+  };
+}
+
 function listItems(value: unknown): unknown[] {
   const item = asRecord(value);
   return Array.isArray(item.items) ? item.items : [];
@@ -97,6 +122,14 @@ function createTaskFeed(): DesktopTaskNotificationFeed {
       notificationId,
       idempotencyKey
     })
+  });
+}
+
+function createApprovalFeed(): DesktopApprovalFeed {
+  return new DesktopApprovalFeed({
+    getPendingApprovals: async () =>
+      listItems(await window.jarvis.getApprovals()).map(approvalFrom),
+    decideApproval: async input => approvalFrom(await window.jarvis.decideApproval(input))
   });
 }
 
@@ -162,13 +195,17 @@ export function App() {
   const [conversationIdInput, setConversationIdInput] = useState("");
   const [tasks, setTasks] = useState<readonly DesktopTask[]>([]);
   const [notifications, setNotifications] = useState<readonly DesktopNotification[]>([]);
+  const [approvals, setApprovals] = useState<readonly DesktopApproval[]>([]);
+  const [resolvingApprovalId, setResolvingApprovalId] = useState<string | undefined>();
   const [backendConnectionState, setBackendConnectionState] = useState("connecting");
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
   const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
+  const approvalFeed = useRef<DesktopApprovalFeed | undefined>(undefined);
   const activeConversationId = useRef<string | undefined>(undefined);
   activeConversationId.current = conversation?.id;
 
   feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
+  approvalFeed.current ??= createApprovalFeed();
 
   async function refreshFeed(conversationId?: string): Promise<void> {
     const currentFeed = feed.current;
@@ -186,6 +223,17 @@ export function App() {
       conversationId);
   }
 
+  async function refreshApprovals(): Promise<void> {
+    const current = approvalFeed.current;
+    if (!current) {
+      return;
+    }
+    await current.refresh();
+    if (approvalFeed.current === current) {
+      setApprovals(current.approvals);
+    }
+  }
+
   useEffect(() => {
     feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
     let effectActive = true;
@@ -201,13 +249,18 @@ export function App() {
           return;
         }
 
-        void currentFeed.applyEvent(decodeSignalREventEnvelope(value))
+        const decoded = decodeSignalREventEnvelope(value);
+        void Promise.all([
+          currentFeed.applyEvent(decoded),
+          approvalFeed.current?.applyEvent({ eventId: decoded.eventId, type: decoded.type })
+        ])
           .then(() => {
             if (!effectActive) {
               return;
             }
             setTasks(currentFeed.tasks);
             setNotifications(currentFeed.notifications);
+            setApprovals(approvalFeed.current?.approvals ?? []);
           })
           .catch(reason => {
             if (effectActive) {
@@ -228,18 +281,28 @@ export function App() {
           setError(reason instanceof Error ? reason.message : "Task feed refresh failed.");
         }
       });
+      if (state === "connected") {
+        void refreshApprovals().catch(reason => {
+          if (effectActive) {
+            setError(reason instanceof Error ? reason.message : "Approval refresh failed.");
+          }
+        });
+      }
     });
     return () => {
       effectActive = false;
       removeEventListener();
       removeConnectionListener();
       feed.current?.dispose();
+      approvalFeed.current?.dispose();
     };
   }, []);
 
   useEffect(() => {
     void refreshFeed(conversation?.id).catch(reason =>
       setError(reason instanceof Error ? reason.message : "Task feed refresh failed."));
+    void refreshApprovals().catch(reason =>
+      setError(reason instanceof Error ? reason.message : "Approval refresh failed."));
   }, [conversation?.id]);
 
   useEffect(() => () => {
@@ -414,6 +477,28 @@ export function App() {
     }
   }
 
+  async function resolveApproval(approvalId: string, decision: "approve" | "deny"): Promise<void> {
+    const current = approvalFeed.current;
+    if (!current || resolvingApprovalId) {
+      return;
+    }
+    setResolvingApprovalId(approvalId);
+    setError(undefined);
+    try {
+      if (decision === "approve") {
+        await current.approveOnce(approvalId);
+      } else {
+        await current.deny(approvalId);
+      }
+      setApprovals(current.approvals);
+      await refreshFeed(conversation?.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Approval decision failed.");
+    } finally {
+      setResolvingApprovalId(undefined);
+    }
+  }
+
   const popupNotification = notifications[0];
 
   return (
@@ -503,6 +588,34 @@ export function App() {
           </ol>
         </section>
       ) : <p>尚未选择 Conversation。</p>}
+      <section aria-label="Approval Requests">
+        <h2>待审批 ({approvals.length})</h2>
+        {approvals.length > 0 ? (
+          <ul>
+            {approvals.map(approval => (
+              <li key={approval.id}>
+                <strong>{approval.kind}</strong>
+                <p>{approval.reason}</p>
+                <p><small>Task {approval.taskId} · Device {approval.deviceId}</small></p>
+                <button
+                  type="button"
+                  disabled={resolvingApprovalId !== undefined}
+                  onClick={() => void resolveApproval(approval.id, "approve")}
+                >
+                  仅批准本次
+                </button>
+                <button
+                  type="button"
+                  disabled={resolvingApprovalId !== undefined}
+                  onClick={() => void resolveApproval(approval.id, "deny")}
+                >
+                  拒绝并停止
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : <p>当前没有待审批操作。</p>}
+      </section>
       <section aria-label="Task Center">
         <h2>Task Center</h2>
         <p>Control Plane：{backendConnectionState} · {tasks.length} 个任务</p>

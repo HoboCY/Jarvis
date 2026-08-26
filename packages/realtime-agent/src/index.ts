@@ -56,13 +56,21 @@ export function createTextOnlyResponseEvent(): {
 }
 
 const taskIdInput = z.object({ taskId: z.string().uuid() });
+const capabilityEnvelopeInput = z.object({
+  readFiles: z.boolean(),
+  writeFiles: z.boolean(),
+  runCommands: z.boolean(),
+  network: z.boolean(),
+  allowedRoots: z.array(z.string().min(1).max(4_000)).max(20)
+});
 const delegateTaskInput = z.object({
   goal: z.string().min(1),
   expectedOutput: z.string().nullable(),
   requiredCapabilities: z.array(z.string()),
   preferredDeviceId: z.string().uuid().nullable(),
   sourceMessageIds: z.array(z.string().uuid()),
-  attachmentRefs: z.array(z.string())
+  attachmentRefs: z.array(z.string()),
+  capabilityEnvelope: capabilityEnvelopeInput.nullable()
 });
 const rememberFactInput = z.object({
   key: z.string().min(1),

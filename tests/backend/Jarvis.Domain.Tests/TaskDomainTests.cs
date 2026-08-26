@@ -110,6 +110,13 @@ public sealed class TaskDomainTests
         Assert.True(runningRecovery.Start(600));
         Assert.Equal(DomainTaskStatus.Running, runningRecovery.Status);
 
+        var approvalRecovery = CreateRunningTask();
+        approvalRecovery.WaitForApproval(350);
+        Assert.True(approvalRecovery.RenewLease("worker", 700, 400));
+        Assert.True(approvalRecovery.MarkRecovering(701));
+        Assert.Equal(DomainTaskStatus.Recovering, approvalRecovery.Status);
+        Assert.Null(approvalRecovery.LeaseOwner);
+
         var recoveryFailure = CreateRunningTask();
         recoveryFailure.MarkRecovering(400);
         Assert.True(recoveryFailure.MarkFailed("recovery_error", "recovery failed", 500));
@@ -224,7 +231,6 @@ public sealed class TaskDomainTests
         foreach (var status in new[]
         {
             DomainTaskStatus.Queued,
-            DomainTaskStatus.WaitingForApproval,
             DomainTaskStatus.WaitingForUserInput,
             DomainTaskStatus.CancellationRequested,
             DomainTaskStatus.Succeeded,
@@ -294,7 +300,6 @@ public sealed class TaskDomainTests
         foreach (var status in new[]
         {
             DomainTaskStatus.Queued,
-            DomainTaskStatus.WaitingForApproval,
             DomainTaskStatus.WaitingForUserInput,
             DomainTaskStatus.CancellationRequested,
             DomainTaskStatus.Succeeded,

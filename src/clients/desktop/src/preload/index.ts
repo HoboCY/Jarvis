@@ -44,6 +44,13 @@ const jarvisApi = {
     preferredDeviceId?: string | null;
     sourceMessageIds: string[];
     attachmentRefs: string[];
+    capabilityEnvelope: {
+      readFiles: boolean;
+      writeFiles: boolean;
+      runCommands: boolean;
+      network: boolean;
+      allowedRoots: string[];
+    } | null;
     idempotencyKey: string;
   }): Promise<unknown> => ipcRenderer.invoke("backend:delegateTask", input) as Promise<unknown>,
   getTaskStatus: (taskId: string): Promise<unknown> =>
@@ -64,6 +71,15 @@ const jarvisApi = {
     ipcRenderer.invoke("backend:readNotification", input) as Promise<unknown>,
   dismissNotification: (input: { notificationId: string; idempotencyKey: string }): Promise<unknown> =>
     ipcRenderer.invoke("backend:dismissNotification", input) as Promise<unknown>,
+  getApprovals: (): Promise<unknown> =>
+    ipcRenderer.invoke("backend:getApprovals") as Promise<unknown>,
+  decideApproval: (input: {
+    approvalId: string;
+    decision: "approve" | "deny";
+    scope: "once" | "taskSession";
+    clientRequestId: string;
+    idempotencyKey: string;
+  }): Promise<unknown> => ipcRenderer.invoke("backend:decideApproval", input) as Promise<unknown>,
   onBackendEvent: (listener: (event: unknown) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => listener(value);
     ipcRenderer.on("backend:event", handler);

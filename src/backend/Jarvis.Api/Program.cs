@@ -3,6 +3,8 @@ using System.Text.Json.Serialization;
 using System.Security.Claims;
 using Jarvis.Api.Authentication;
 using Jarvis.Api.Conversations;
+using Jarvis.Api.Approvals;
+using Jarvis.Api.Devices;
 using Jarvis.Api.Outbox;
 using Jarvis.Api.Realtime;
 using Jarvis.Api.Tasks;
@@ -26,6 +28,11 @@ builder.Services.AddOpenApi(options =>
         document.Components ??= new OpenApiComponents();
         document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
         document.Components.SecuritySchemes["LocalBearer"] = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer"
+        };
+        document.Components.SecuritySchemes["DeviceBearer"] = new OpenApiSecurityScheme
         {
             Type = SecuritySchemeType.Http,
             Scheme = "bearer"
@@ -57,6 +64,24 @@ builder.Services.AddOpenApi(options =>
             });
         }
 
+        if (operation.OperationId is "RegisterDevice"
+            or "HeartbeatDevice"
+            or "ClaimDeviceTask"
+            or "AppendDeviceTaskEvent"
+            or "RenewDeviceTaskLease"
+            or "CreateDeviceApproval"
+            or "DecideApproval")
+        {
+            operation.Parameters ??= [];
+            operation.Parameters.Add(new OpenApiParameter
+            {
+                Name = "Idempotency-Key",
+                In = ParameterLocation.Header,
+                Required = true,
+                Schema = new OpenApiSchema { Type = JsonSchemaType.String }
+            });
+        }
+
         return Task.CompletedTask;
     });
     options.AddOperationTransformer((operation, context, _) =>
@@ -72,6 +97,9 @@ builder.Services.AddOpenApi(options =>
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.StartsWith(
                 "api/v1/notifications",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith(
+                "api/v1/devices/register",
                 StringComparison.OrdinalIgnoreCase) == true)
         {
             operation.Security =
@@ -79,6 +107,29 @@ builder.Services.AddOpenApi(options =>
                 new OpenApiSecurityRequirement
                 {
                     [new OpenApiSecuritySchemeReference("LocalBearer", context.Document, null)] = []
+                }
+            ];
+        }
+
+        if (context.Description.RelativePath?.StartsWith("api/v1/approvals", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            operation.Security =
+            [
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("LocalBearer", context.Document, null)] = []
+                }
+            ];
+        }
+
+        if (context.Description.RelativePath?.StartsWith("api/v1/devices/{deviceId", StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith("api/v1/device-tasks", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            operation.Security =
+            [
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("DeviceBearer", context.Document, null)] = []
                 }
             ];
         }
@@ -98,7 +149,17 @@ builder.Services
 builder.Services
     .AddAuthentication("LocalBearer")
     .AddScheme<AuthenticationSchemeOptions, LocalBearerAuthenticationHandler>("LocalBearer", _ => { });
-builder.Services.AddAuthorization();
+builder.Services
+    .AddAuthentication()
+    .AddScheme<AuthenticationSchemeOptions, DeviceCredentialAuthenticationHandler>(AuthenticationConstants.DeviceScheme, _ => { });
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AuthenticationConstants.DevicePolicy, policy =>
+    {
+        policy.AddAuthenticationSchemes(AuthenticationConstants.DeviceScheme);
+        policy.RequireAuthenticatedUser();
+    });
+});
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -155,7 +216,10 @@ app.MapConversationEndpoints();
 app.MapRealtimeEndpoints();
 app.MapTaskEndpoints();
 app.MapNotificationEndpoints();
+app.MapApprovalEndpoints();
+app.MapDeviceEndpoints();
 app.MapHub<ClientHub>("/hubs/client").RequireAuthorization();
+app.MapHub<DeviceHub>("/hubs/device").RequireAuthorization(AuthenticationConstants.DevicePolicy);
 
 await using (var scope = app.Services.CreateAsyncScope())
 {
