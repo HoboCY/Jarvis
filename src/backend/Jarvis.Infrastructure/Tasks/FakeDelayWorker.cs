@@ -135,7 +135,7 @@ public sealed class FakeDelayWorker(
             .ToListAsync(cancellationToken);
 
         return candidates.FirstOrDefault(task => IsDeviceEligible(task)
-            && task.WorkerKind != DomainWorkerKind.Codex
+            && task.WorkerKind == DomainWorkerKind.Internal
             && (task.Status is DomainTaskStatus.Queued or DomainTaskStatus.Recovering
                 || task.LeaseOwner == WorkerId
                 || !IsLeaseValid(task, nowMs)));
@@ -156,9 +156,10 @@ public sealed class FakeDelayWorker(
             return PrepareResult.NotHandled;
         }
 
-        // The fake adapter covers the existing Internal and Responses workers.
-        // Codex tasks must be claimed only by an authenticated Device Node.
-        if (task.WorkerKind == DomainWorkerKind.Codex)
+        // Responses tasks are handled by ResponsesWorker and Codex tasks by an
+        // authenticated Device Node. The fake adapter is intentionally limited
+        // to the durable Internal worker seam.
+        if (task.WorkerKind != DomainWorkerKind.Internal)
         {
             return PrepareResult.NotHandled;
         }

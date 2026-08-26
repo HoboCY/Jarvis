@@ -16,7 +16,7 @@ namespace Jarvis.Api.IntegrationTests;
 
 public sealed class FakeWorkerTests : IClassFixture<TestApplicationFactory>
 {
-    private static readonly string[] RequiredCapabilities = ["deepReasoning"];
+    private static readonly string[] RequiredCapabilities = [];
     private static readonly string[] CancelRaceStatuses = ["succeeded", "cancellationRequested", "cancelled"];
     private readonly TestApplicationFactory factory;
 

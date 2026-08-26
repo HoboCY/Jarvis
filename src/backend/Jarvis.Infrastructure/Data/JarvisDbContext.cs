@@ -5,6 +5,7 @@ using Jarvis.Domain.Idempotency;
 using Jarvis.Domain.Identity;
 using Jarvis.Domain.Outbox;
 using Jarvis.Domain.Notifications;
+using Jarvis.Domain.Memory;
 using Jarvis.Domain.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
@@ -36,6 +37,10 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
     public DbSet<Approval> Approvals => Set<Approval>();
 
     public DbSet<Notification> Notifications => Set<Notification>();
+
+    public DbSet<ConversationSummary> ConversationSummaries => Set<ConversationSummary>();
+
+    public DbSet<MemoryFact> MemoryFacts => Set<MemoryFact>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -76,7 +81,51 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
                 .WithMany()
                 .HasForeignKey(conversation => conversation.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<ConversationSummary>()
+                .WithMany()
+                .HasForeignKey(conversation => conversation.CurrentSummaryId)
+                .OnDelete(DeleteBehavior.SetNull);
             ConfigureVersion(entity.Property(conversation => conversation.Version));
+        });
+
+        modelBuilder.Entity<ConversationSummary>(entity =>
+        {
+            entity.ToTable("ConversationSummaries");
+            entity.HasKey(summary => summary.Id);
+            entity.Property(summary => summary.Summary).HasMaxLength(200_000).IsRequired();
+            entity.Property(summary => summary.Model).HasMaxLength(200).IsRequired();
+            entity.HasIndex(summary => new { summary.ConversationId, summary.ToSequence });
+            entity.HasOne<Conversation>()
+                .WithMany()
+                .HasForeignKey(summary => summary.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+            ConfigureVersion(entity.Property(summary => summary.Version));
+        });
+
+        modelBuilder.Entity<MemoryFact>(entity =>
+        {
+            entity.ToTable("MemoryFacts");
+            entity.HasKey(fact => fact.Id);
+            entity.Property(fact => fact.Key).HasMaxLength(200).IsRequired();
+            entity.Property(fact => fact.ValueJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(fact => fact.Confidence).IsRequired();
+            entity.HasIndex(fact => new { fact.UserId, fact.Key })
+                .HasFilter("Status = 0")
+                .IsUnique();
+            entity.HasIndex(fact => new { fact.UserId, fact.Status, fact.UpdatedAtMs });
+            entity.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(fact => fact.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Message>()
+                .WithMany()
+                .HasForeignKey(fact => fact.SourceMessageId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne<MemoryFact>()
+                .WithMany()
+                .HasForeignKey(fact => fact.SupersedesMemoryId)
+                .OnDelete(DeleteBehavior.Restrict);
+            ConfigureVersion(entity.Property(fact => fact.Version));
         });
 
         modelBuilder.Entity<Message>(entity =>

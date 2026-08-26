@@ -11,7 +11,7 @@ namespace Jarvis.Api.IntegrationTests;
 
 public sealed class NotificationApiTests : IClassFixture<TestApplicationFactory>
 {
-    private static readonly string[] RequiredCapabilities = ["deepReasoning"];
+    private static readonly string[] RequiredCapabilities = [];
     private readonly TestApplicationFactory factory;
 
     public NotificationApiTests(TestApplicationFactory factory)

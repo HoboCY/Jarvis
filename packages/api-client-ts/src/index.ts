@@ -48,6 +48,12 @@ export type NotificationListResponse =
   paths["/api/v1/notifications"]["get"]["responses"][200]["content"]["application/json"];
 export type NotificationResponse =
   paths["/api/v1/notifications/{notificationId}/read"]["post"]["responses"][200]["content"]["application/json"];
+export type CreateMemoryFactRequest =
+  paths["/api/v1/memory-facts"]["post"]["requestBody"]["content"]["application/json"];
+export type MemoryFactSaveResponse =
+  paths["/api/v1/memory-facts"]["post"]["responses"][200]["content"]["application/json"];
+export type MemoryFactRetractResponse =
+  paths["/api/v1/memory-facts/{memoryId}/retract"]["post"]["responses"][200]["content"]["application/json"];
 
 export async function getDesktopDevice(
   baseUrl: string,
@@ -153,6 +159,34 @@ export async function dismissNotification(
   options: ApiRequestOptions = {}
 ): Promise<NotificationResponse> {
   return updateNotification(baseUrl, notificationId, "dismiss", idempotencyKey, options);
+}
+
+export async function createMemoryFact(
+  baseUrl: string,
+  request: CreateMemoryFactRequest,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<MemoryFactSaveResponse> {
+  return requestJson(
+    new URL("/api/v1/memory-facts", baseUrl),
+    request,
+    idempotencyKey,
+    options
+  ) as Promise<MemoryFactSaveResponse>;
+}
+
+export async function retractMemoryFact(
+  baseUrl: string,
+  memoryId: string,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<MemoryFactRetractResponse> {
+  return requestJson(
+    new URL(`/api/v1/memory-facts/${encodeURIComponent(memoryId)}/retract`, baseUrl),
+    {},
+    idempotencyKey,
+    options
+  ) as Promise<MemoryFactRetractResponse>;
 }
 
 export interface ApiRequestOptions {

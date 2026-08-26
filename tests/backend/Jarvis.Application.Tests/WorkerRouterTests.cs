@@ -11,6 +11,8 @@ public sealed class WorkerRouterTests
     [InlineData("writeFiles", "networkResearch", WorkerKind.Codex)]
     [InlineData("deepReasoning", WorkerKind.Responses)]
     [InlineData("networkResearch", WorkerKind.Responses)]
+    [InlineData("summary", WorkerKind.Responses)]
+    [InlineData("structuredOutput", WorkerKind.Responses)]
     [InlineData("", WorkerKind.Internal)]
     public void RoutesDeterministicallyWithLocalCapabilitiesTakingPriority(params object[] values)
     {

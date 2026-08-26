@@ -236,6 +236,25 @@ public sealed class Task
         return true;
     }
 
+    public bool RenewCancellationLease(string leaseOwner, long leaseExpiresAtMs, long nowMs)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
+        ArgumentOutOfRangeException.ThrowIfNegative(leaseExpiresAtMs);
+        ArgumentOutOfRangeException.ThrowIfNegative(nowMs);
+        if (Status != TaskStatus.CancellationRequested
+            || !string.Equals(LeaseOwner, leaseOwner.Trim(), StringComparison.Ordinal)
+            || LeaseExpiresAtMs is not long currentLeaseExpiresAtMs
+            || currentLeaseExpiresAtMs <= nowMs)
+        {
+            return false;
+        }
+
+        LeaseExpiresAtMs = leaseExpiresAtMs;
+        HeartbeatAtMs = nowMs;
+        Touch();
+        return true;
+    }
+
     public bool RequestCancellation(long nowMs)
     {
         if (Status is TaskStatus.Succeeded or TaskStatus.Failed or TaskStatus.Cancelled)

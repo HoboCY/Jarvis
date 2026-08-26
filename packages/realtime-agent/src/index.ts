@@ -15,6 +15,7 @@ export type RealtimeTaskBackend = {
   delegateTask: (input: DelegateTaskInput, idempotencyKey: string) => Promise<unknown>;
   getTaskStatus: (input: TaskStatusInput, idempotencyKey: string) => Promise<unknown>;
   cancelTask: (input: TaskStatusInput, idempotencyKey: string) => Promise<unknown>;
+  rememberFact: (input: RememberFactInput, idempotencyKey: string) => Promise<unknown>;
 };
 
 export type NormalizedRealtimeEvent = {
@@ -81,6 +82,7 @@ const rememberFactInput = z.object({
 
 export type TaskStatusInput = z.infer<typeof taskIdInput>;
 export type DelegateTaskInput = z.infer<typeof delegateTaskInput>;
+export type RememberFactInput = z.infer<typeof rememberFactInput>;
 
 export type RealtimeToolResult = {
   available: false;
@@ -104,7 +106,7 @@ export type RealtimeToolOptions = {
 
 export function createRealtimeToolIdempotencyKey(
   sessionScope: string,
-  toolName: Exclude<RealtimeToolName, "remember_fact">,
+  toolName: RealtimeToolName,
   callId: string | undefined
 ): string {
   const scope = sessionScope.trim() || "realtime-session";
@@ -152,7 +154,7 @@ export function createRealtimeTools(options: RealtimeToolOptions = {}) {
   const responseCache = new Map<string, string>();
 
   const executeBackend = async <TInput>(
-    toolName: Exclude<RealtimeToolName, "remember_fact">,
+    toolName: RealtimeToolName,
     input: TInput,
     callId: string | undefined,
     execute: (idempotencyKey: string) => Promise<unknown>
@@ -209,9 +211,13 @@ export function createRealtimeTools(options: RealtimeToolOptions = {}) {
     }),
     tool({
       name: "remember_fact",
-      description: "Store a durable fact. Phase 5 memory storage is unavailable.",
+      description: "Store an explicitly confirmed durable fact through the authenticated backend.",
       parameters: rememberFactInput,
-      execute: async () => unavailable("remember_fact")
+      execute: async (input, _context, details) => executeBackend(
+        "remember_fact",
+        input,
+        details?.toolCall?.callId,
+        idempotencyKey => backend!.rememberFact(input, idempotencyKey))
     })
   ] as const;
 }

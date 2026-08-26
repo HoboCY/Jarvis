@@ -2,8 +2,10 @@ using Jarvis.Application.Conversations;
 using Jarvis.Application.Approvals;
 using Jarvis.Application.Devices;
 using Jarvis.Application.Identity;
+using Jarvis.Application.Memory;
 using Jarvis.Application.Notifications;
 using Jarvis.Application.Realtime;
+using Jarvis.Application.Responses;
 using Jarvis.Application.Tasks;
 using Jarvis.Infrastructure.Conversations;
 using Jarvis.Infrastructure.Data;
@@ -13,6 +15,9 @@ using Jarvis.Infrastructure.Notifications;
 using Jarvis.Infrastructure.Realtime;
 using Jarvis.Infrastructure.Tasks;
 using Jarvis.Infrastructure.Devices;
+using Jarvis.Infrastructure.Memory;
+using Jarvis.Infrastructure.Responses;
+using Jarvis.Infrastructure.Summaries;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -69,6 +74,14 @@ public static class InfrastructureServiceCollectionExtensions
             .Validate(options => options.LeaseRenewalIntervalMs is >= 1 and <= 60_000, "FakeWorker:LeaseRenewalIntervalMs must be between 1 and 60000.")
             .Validate(options => FakeDelayOptions.IsValidWorkerDeviceId(options.WorkerDeviceId), "FakeWorker:WorkerDeviceId must be empty or a non-empty GUID.")
             .ValidateOnStart();
+        services.AddOptions<ResponsesWorkerOptions>()
+            .Bind(configuration.GetSection(ResponsesWorkerOptions.SectionName))
+            .Validate(options => options.PollingIntervalMs is >= 25 and <= 60_000, "ResponsesWorker:PollingIntervalMs must be between 25 and 60000.")
+            .Validate(options => options.LeaseDurationMs > 0, "ResponsesWorker:LeaseDurationMs must be positive.")
+            .ValidateOnStart();
+        services.AddSingleton<ResponsesWorkerIdentity>();
+        services.AddScoped<ResponsesWorker>();
+        services.AddHostedService<ResponsesWorkerHostedService>();
         services.AddHostedService<FakeDelayWorkerHostedService>();
         services.AddSingleton<ContextAssembler>();
         services.AddSingleton<EphemeralSecretReplayCache>();
@@ -83,7 +96,12 @@ public static class InfrastructureServiceCollectionExtensions
             .Validate(options => options.AllowedVoices.Length > 0, "OpenAI:AllowedVoices must contain at least one server-approved voice.")
             .Validate(options => options.AllowedVoices.Contains(options.RealtimeVoice, StringComparer.OrdinalIgnoreCase), "OpenAI:RealtimeVoice must be in OpenAI:AllowedVoices.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.SafetyIdentifierSalt), "OpenAI:SafetyIdentifierSalt is required.")
+            .Validate(options => !string.IsNullOrWhiteSpace(options.ResponsesModel), "OpenAI:ResponsesModel is required.")
+            .Validate(options => !string.IsNullOrWhiteSpace(options.SummarizerModel), "OpenAI:SummarizerModel is required.")
             .Validate(options => options.ClientSecretLifetimeSeconds is >= 60 and <= 3600, "OpenAI:ClientSecretLifetimeSeconds must be between 60 and 3600.")
+            .Validate(options => options.ResponsesTimeoutSeconds is >= 1 and <= 600, "OpenAI:ResponsesTimeoutSeconds must be between 1 and 600.")
+            .Validate(options => options.ResponsesMaxTransientRetries is >= 0 and <= 3, "OpenAI:ResponsesMaxTransientRetries must be between 0 and 3.")
+            .Validate(options => options.ResponsesPollingIntervalMs is >= 25 and <= 5_000, "OpenAI:ResponsesPollingIntervalMs must be between 25 and 5000.")
             .ValidateOnStart();
         services.AddHttpClient<IRealtimeClientSecretProvider, OpenAiRealtimeClientSecretProvider>((serviceProvider, client) =>
         {
@@ -94,6 +112,22 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IRealtimeSafetyIdentifierProvider, ConfiguredRealtimeSafetyIdentifierProvider>();
         services.AddScoped<IRealtimeStore, EfRealtimeStore>();
         services.AddScoped<RealtimeService>();
+        services.AddSingleton<IResponsesClientFactory, OpenAiResponsesClientFactory>();
+        services.AddScoped<IResponsesRuntime, OpenAiResponsesRuntime>();
+        services.AddScoped<ISummaryProvider, OpenAiSummaryProvider>();
+        services.AddOptions<SummaryWorkerOptions>()
+            .Bind(configuration.GetSection(SummaryWorkerOptions.SectionName))
+            .Validate(options => options.PollingIntervalMs is >= 100 and <= 60_000, "SummaryWorker:PollingIntervalMs must be between 100 and 60000.")
+            .Validate(options => options.MinimumMessageCount is >= 1 and <= 500, "SummaryWorker:MinimumMessageCount must be between 1 and 500.")
+            .ValidateOnStart();
+        services.AddScoped<SummaryWorker>();
+        services.AddHostedService<SummaryWorkerHostedService>();
+        services.AddOptions<MemoryOptions>()
+            .Bind(configuration.GetSection(MemoryOptions.SectionName))
+            .ValidateOnStart();
+        services.AddScoped<MemoryService>();
+        services.AddScoped<EfMemoryStore>();
+        services.AddScoped<IMemoryStore>(serviceProvider => serviceProvider.GetRequiredService<EfMemoryStore>());
         services.AddOptions<OutboxOptions>()
             .Bind(configuration.GetSection(OutboxOptions.SectionName))
             .Validate(options => options.PollingIntervalMs >= 100, "Outbox:PollingIntervalMs must be at least 100ms.")

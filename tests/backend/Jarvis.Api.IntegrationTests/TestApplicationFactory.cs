@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Jarvis.Application.Realtime;
 using Jarvis.Application.Tasks;
+using Jarvis.Application.Responses;
 
 namespace Jarvis.Api.IntegrationTests;
 
@@ -19,6 +20,8 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
     private readonly IRealtimeClientSecretProvider? _realtimeProvider;
     private readonly IFakeDelayAdapter? _fakeDelayAdapter;
     private readonly string? _workerDeviceId;
+    private readonly IResponsesRuntime? _responsesRuntime;
+    private readonly ISummaryProvider? _summaryProvider;
 
     public TestApplicationFactory()
         : this(null, true, null)
@@ -33,7 +36,9 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         DbCommandInterceptor? dbCommandInterceptor = null,
         IRealtimeClientSecretProvider? realtimeProvider = null,
         IFakeDelayAdapter? fakeDelayAdapter = null,
-        string? workerDeviceId = null)
+        string? workerDeviceId = null,
+        IResponsesRuntime? responsesRuntime = null,
+        ISummaryProvider? summaryProvider = null)
     {
         DatabasePath = databasePath ?? Path.Combine(
             Path.GetTempPath(),
@@ -45,6 +50,8 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         _realtimeProvider = realtimeProvider;
         _fakeDelayAdapter = fakeDelayAdapter;
         _workerDeviceId = workerDeviceId;
+        _responsesRuntime = responsesRuntime;
+        _summaryProvider = summaryProvider;
     }
 
     public string DatabasePath { get; }
@@ -62,12 +69,17 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             ["ConnectionStrings:Jarvis"] = $"Data Source={DatabasePath}",
             ["Outbox:Enabled"] = "false",
             ["FakeWorker:Enabled"] = "false",
+            ["ResponsesWorker:Enabled"] = "false",
+            ["SummaryWorker:Enabled"] = "false",
+            ["SummaryWorker:MinimumMessageCount"] = "1",
             ["FakeWorker:DelayMs"] = "0",
             ["FakeWorker:LeaseRenewalIntervalMs"] = "10",
             ["OpenAI:ApiKey"] = "test-openai-key",
             ["OpenAI:BaseUrl"] = "https://api.openai.com/",
             ["OpenAI:RealtimeModel"] = "gpt-4o-realtime-preview",
             ["OpenAI:RealtimeVoice"] = "alloy",
+            ["OpenAI:ResponsesModel"] = "gpt-4.1-mini",
+            ["OpenAI:SummarizerModel"] = "gpt-4.1-mini",
             ["OpenAI:AllowedVoices:0"] = "alloy",
             ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
             ["OpenAI:ClientSecretLifetimeSeconds"] = "600"
@@ -112,6 +124,22 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             {
                 services.RemoveAll<IFakeDelayAdapter>();
                 services.AddSingleton(_fakeDelayAdapter);
+            });
+        }
+        if (_responsesRuntime is not null)
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IResponsesRuntime>();
+                services.AddSingleton(_responsesRuntime);
+            });
+        }
+        if (_summaryProvider is not null)
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<ISummaryProvider>();
+                services.AddSingleton(_summaryProvider);
             });
         }
     }

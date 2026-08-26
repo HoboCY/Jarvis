@@ -385,7 +385,11 @@ export function App() {
             await window.jarvis.cancelTask({
               taskId: input.taskId,
               idempotencyKey
-            }))
+            })),
+          rememberFact: async (input, idempotencyKey) => window.jarvis.rememberFact({
+            ...input,
+            idempotencyKey
+          })
         },
         (nextStatus, nextError) => {
           setStatus(nextStatus);

@@ -1,22 +1,29 @@
 using System.Text.Json;
+using Jarvis.Application.Memory;
 using Jarvis.Application.Realtime;
 using Jarvis.Contracts;
 using Jarvis.Domain.Conversations;
 using Jarvis.Domain.Devices;
 using Jarvis.Domain.Idempotency;
+using Jarvis.Domain.Memory;
+using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Outbox;
+using Jarvis.Domain.Tasks;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
+using Task = System.Threading.Tasks.Task;
+using DomainTaskStatus = Jarvis.Domain.Tasks.TaskStatus;
 
 namespace Jarvis.Infrastructure.Realtime;
 
 public sealed class EfRealtimeStore(
     JarvisDbContext db,
     TimeProvider timeProvider,
-    IOptions<IdempotencyOptions> idempotencyOptions) : IRealtimeStore
+    IOptions<IdempotencyOptions> idempotencyOptions,
+    IMemoryStore memoryStore) : IRealtimeStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -46,26 +53,92 @@ public sealed class EfRealtimeStore(
         }
 
         var user = await db.Users.AsNoTracking().SingleAsync(item => item.Id == userId, cancellationToken);
+        var conversation = await db.Conversations.AsNoTracking().SingleAsync(
+            item => item.Id == request.ConversationId,
+            cancellationToken);
+        var currentSummary = conversation.CurrentSummaryId is Guid summaryId
+            ? await db.ConversationSummaries.AsNoTracking().SingleOrDefaultAsync(
+                item => item.Id == summaryId && item.ConversationId == request.ConversationId,
+                cancellationToken)
+            : null;
+        var summaryToSequence = currentSummary?.ToSequence ?? 0L;
         var messages = await db.Messages.AsNoTracking()
-            .Where(message => message.ConversationId == request.ConversationId && message.Text != null)
+            .Where(message => message.ConversationId == request.ConversationId
+                && message.Sequence > summaryToSequence
+                && message.Status == MessageStatus.Completed
+                && message.Text != null)
+            .OrderByDescending(message => message.Sequence)
+            .Take(100)
             .OrderBy(message => message.Sequence)
             .Select(message => new ContextMessage(message.Role.ToString(), message.Text!))
             .ToListAsync(cancellationToken);
-        var messageVersions = await db.Messages
-            .Where(message => message.ConversationId == request.ConversationId)
-            .Select(message => new { message.Sequence, message.Version })
+        var activeTasks = await db.Tasks.AsNoTracking()
+            .Where(task => task.UserId == userId
+                && task.ConversationId == request.ConversationId
+                && task.Status != DomainTaskStatus.Succeeded
+                && task.Status != DomainTaskStatus.Failed
+                && task.Status != DomainTaskStatus.Cancelled)
+            .OrderBy(task => task.Priority)
+            .ThenBy(task => task.CreatedAtMs)
+            .Take(50)
+            .Select(task => $"{task.Status}: {task.Goal}; progress={task.ProgressSummary ?? "none"}")
             .ToListAsync(cancellationToken);
-        var contextVersion = messageVersions.Count == 0
-            ? 0L
-            : checked(messageVersions.Max(message => message.Sequence) + messageVersions.Sum(message => message.Version));
+        var unreadResults = await (
+            from notification in db.Notifications.AsNoTracking()
+            join task in db.Tasks.AsNoTracking() on notification.TaskId equals task.Id
+            where notification.UserId == userId
+                && task.UserId == userId
+                && notification.ConversationId == request.ConversationId
+                && (notification.Status == NotificationStatus.Pending
+                    || notification.Status == NotificationStatus.Delivered)
+                && (task.Status == DomainTaskStatus.Succeeded
+                    || task.Status == DomainTaskStatus.Failed
+                    || task.Status == DomainTaskStatus.Cancelled)
+            orderby notification.CreatedAtMs descending
+            select $"{notification.Title}: {notification.Body}")
+            .Take(50)
+            .ToListAsync(cancellationToken);
+        var memoryFacts = await memoryStore.GetActiveForContextAsync(userId, cancellationToken, 100);
+        var memoryText = memoryFacts
+            .Select(fact => $"{fact.Key}={fact.Value}")
+            .ToList();
+        var taskText = activeTasks
+            .Concat(unreadResults.Select(result => $"terminal result: {result}"))
+            .ToList();
+        var messageVersionSum = await db.Messages
+            .Where(message => message.ConversationId == request.ConversationId)
+            .Select(message => (long?)(message.Version + 1L))
+            .SumAsync(cancellationToken) ?? 0L;
+        var taskVersionSum = await db.Tasks
+            .Where(task => task.UserId == userId && task.ConversationId == request.ConversationId)
+            .Select(task => (long?)(task.Version + 1L))
+            .SumAsync(cancellationToken) ?? 0L;
+        var notificationVersionSum = await db.Notifications
+            .Where(notification => notification.UserId == userId
+                && notification.ConversationId == request.ConversationId)
+            .Select(notification => (long?)(notification.Version + 1L))
+            .SumAsync(cancellationToken) ?? 0L;
+        var memoryVersionSum = await db.MemoryFacts
+            .Where(fact => fact.UserId == userId)
+            .Select(fact => (long?)(fact.Version + 1L))
+            .SumAsync(cancellationToken) ?? 0L;
+        var contextVersion = checked(
+            user.Version + 1L
+            + conversation.Version + 1L
+            + (currentSummary?.Version ?? 0L)
+            + (currentSummary is null ? 0L : 1L)
+            + messageVersionSum
+            + taskVersionSum
+            + notificationVersionSum
+            + memoryVersionSum);
         var context = assembler.Assemble(new ContextAssemblyInput(
             contextVersion,
             ContextAssembler.FixedInstructions,
             $"locale={user.Locale}; timezone={user.TimeZone}",
-            string.Empty,
+            currentSummary?.Summary ?? string.Empty,
             messages,
-            string.Empty,
-            string.Empty));
+            string.Join("\n", taskText),
+            string.Join("\n", memoryText)));
         return new(userId, request.ConversationId, request.DeviceId, context, request.PreferredVoice);
     }
 

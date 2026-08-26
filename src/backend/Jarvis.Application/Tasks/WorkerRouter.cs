@@ -10,7 +10,9 @@ public sealed class WorkerRouter
         "writeFiles",
         "runCommands",
         "networkResearch",
-        "deepReasoning"
+        "deepReasoning",
+        "summary",
+        "structuredOutput"
     };
 
     public static WorkerKind Route(IEnumerable<string>? capabilities)
@@ -32,7 +34,7 @@ public sealed class WorkerRouter
             return WorkerKind.Codex;
         }
 
-        if (normalized.Any(capability => capability is "networkResearch" or "deepReasoning"))
+        if (normalized.Any(capability => capability is "networkResearch" or "deepReasoning" or "summary" or "structuredOutput"))
         {
             return WorkerKind.Responses;
         }

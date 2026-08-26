@@ -15,6 +15,7 @@ const backendBaseUrl = process.env.JARVIS_API_BASE_URL ?? "http://127.0.0.1:5000
 const backendBearer = process.env.JARVIS_LOCAL_BEARER;
 const clientHubPath = "/hubs/client";
 const taskApiPath = "/api/v1/tasks";
+const memoryFactApiPath = "/api/v1/memory-facts";
 const notificationApiPath = "/api/v1/notifications";
 const approvalApiPath = "/api/v1/approvals";
 const nonTerminalTaskStatuses = new Set([
@@ -342,6 +343,26 @@ if (!app.requestSingleInstanceLock()) {
         `${taskApiPath}/${encodeURIComponent(requiredString(input.taskId, "taskId"))}/cancel`,
         "POST",
         {},
+        requiredString(input.idempotencyKey, "idempotencyKey"));
+    });
+    ipcMain.handle("backend:rememberFact", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const sourceMessageId = requiredString(input.sourceMessageId, "sourceMessageId");
+      if (!isUuid(sourceMessageId)) {
+        throw new Error("Invalid sourceMessageId.");
+      }
+      if (typeof input.sensitive !== "boolean") {
+        throw new Error("Invalid sensitive.");
+      }
+      return requestBackend(
+        memoryFactApiPath,
+        "POST",
+        {
+          key: requiredString(input.key, "key"),
+          value: requiredString(input.value, "value", 20_000),
+          sourceMessageId,
+          sensitive: input.sensitive
+        },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
     ipcMain.handle("backend:getTasks", (_event, value: unknown) => {

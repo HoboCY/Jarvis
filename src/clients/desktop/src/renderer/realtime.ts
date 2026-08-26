@@ -29,6 +29,7 @@ export interface DesktopRealtimeBackend {
   delegateTask?: RealtimeTaskBackend["delegateTask"];
   getTaskStatus?: RealtimeTaskBackend["getTaskStatus"];
   cancelTask?: RealtimeTaskBackend["cancelTask"];
+  rememberFact?: RealtimeTaskBackend["rememberFact"];
 }
 
 export type RealtimeTaskStatusResponse = {
@@ -229,11 +230,15 @@ export class DesktopRealtimeController {
 
   private async prepareSession(input: DesktopRealtimeConnectionInput): Promise<PreparedRealtimeSession> {
     const generation = ++this.nextConnectionGeneration;
-    const taskBackend = this.backend.delegateTask && this.backend.getTaskStatus && this.backend.cancelTask
+    const taskBackend = this.backend.delegateTask
+      && this.backend.getTaskStatus
+      && this.backend.cancelTask
+      && this.backend.rememberFact
       ? {
           delegateTask: this.backend.delegateTask,
           getTaskStatus: this.backend.getTaskStatus,
-          cancelTask: this.backend.cancelTask
+          cancelTask: this.backend.cancelTask,
+          rememberFact: this.backend.rememberFact
         }
       : undefined;
     const session = this.createSession(createRealtimeAgent(input.instructions, input.voice, {

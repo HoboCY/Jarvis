@@ -9,6 +9,7 @@ using Jarvis.Api.Outbox;
 using Jarvis.Api.Realtime;
 using Jarvis.Api.Tasks;
 using Jarvis.Api.Notifications;
+using Jarvis.Api.Memory;
 using Jarvis.Application.Outbox;
 using Jarvis.Contracts;
 using Jarvis.Infrastructure;
@@ -52,7 +53,9 @@ builder.Services.AddOpenApi(options =>
             or "CancelTask"
             or "MarkNotificationDelivered"
             or "MarkNotificationRead"
-            or "DismissNotification")
+            or "DismissNotification"
+            or "CreateMemoryFact"
+            or "RetractMemoryFact")
         {
             operation.Parameters ??= [];
             operation.Parameters.Add(new OpenApiParameter
@@ -97,6 +100,9 @@ builder.Services.AddOpenApi(options =>
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.StartsWith(
                 "api/v1/notifications",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith(
+                "api/v1/memory-facts",
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.StartsWith(
                 "api/v1/devices/register",
@@ -216,6 +222,7 @@ app.MapConversationEndpoints();
 app.MapRealtimeEndpoints();
 app.MapTaskEndpoints();
 app.MapNotificationEndpoints();
+app.MapMemoryEndpoints();
 app.MapApprovalEndpoints();
 app.MapDeviceEndpoints();
 app.MapHub<ClientHub>("/hubs/client").RequireAuthorization();

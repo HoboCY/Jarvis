@@ -17,7 +17,7 @@ public sealed class TaskExecution
     {
     }
 
-    private TaskExecution(Guid id, Guid taskId, Guid deviceId, WorkerKind workerKind, long startedAtMs)
+    private TaskExecution(Guid id, Guid taskId, Guid? deviceId, WorkerKind workerKind, long startedAtMs)
     {
         Id = id;
         TaskId = taskId;
@@ -60,16 +60,36 @@ public sealed class TaskExecution
     public static TaskExecution Create(
         Guid id,
         Guid taskId,
-        Guid deviceId,
+        Guid? deviceId,
         WorkerKind workerKind,
         long startedAtMs)
     {
         ArgumentOutOfRangeException.ThrowIfEqual(id, Guid.Empty);
         ArgumentOutOfRangeException.ThrowIfEqual(taskId, Guid.Empty);
-        ArgumentOutOfRangeException.ThrowIfEqual(deviceId, Guid.Empty);
+        if (deviceId is Guid emptyDeviceId && emptyDeviceId == Guid.Empty)
+        {
+            throw new ArgumentOutOfRangeException(nameof(deviceId));
+        }
+
+        if (workerKind == WorkerKind.Codex && deviceId is null)
+        {
+            throw new InvalidOperationException("Codex executions require a device.");
+        }
+
+        if (workerKind == WorkerKind.Responses && deviceId is not null)
+        {
+            throw new InvalidOperationException("Responses executions cannot be assigned to a device.");
+        }
+
         ArgumentOutOfRangeException.ThrowIfNegative(startedAtMs);
         return new TaskExecution(id, taskId, deviceId, workerKind, startedAtMs);
     }
+
+    public static TaskExecution Create(
+        Guid id,
+        Guid taskId,
+        WorkerKind workerKind,
+        long startedAtMs) => Create(id, taskId, null, workerKind, startedAtMs);
 
     public bool Start(long nowMs)
     {
@@ -142,6 +162,27 @@ public sealed class TaskExecution
         }
 
         MetadataJson = metadataJson;
+        Version++;
+        return true;
+    }
+
+    public bool SetExternalExecutionId(string externalExecutionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(externalExecutionId);
+        EnsureActive();
+        var normalized = externalExecutionId.Trim();
+        if (ExternalExecutionId is not null
+            && !string.Equals(ExternalExecutionId, normalized, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("An execution cannot switch to a different external execution.");
+        }
+
+        if (ExternalExecutionId is not null)
+        {
+            return false;
+        }
+
+        ExternalExecutionId = normalized;
         Version++;
         return true;
     }

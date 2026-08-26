@@ -86,7 +86,8 @@ test("routes a real SDK function call through the injected backend with a stable
       return { accepted: true, taskId: "00000000-0000-0000-0000-000000000099", status: "queued" };
     },
     getTaskStatus: async () => ({ status: "queued" }),
-    cancelTask: async () => ({ accepted: true, status: "cancellationRequested" })
+    cancelTask: async () => ({ accepted: true, status: "cancellationRequested" }),
+    rememberFact: async () => ({ saved: true, memoryId: "memory-1" })
   };
   const session = new RealtimeSession(
     createRealtimeAgent("test instructions", undefined, {
@@ -154,6 +155,11 @@ test("routes delegate, status, and cancel through the real SDK function-call pip
       calls.push(`cancel:${idempotencyKey}`);
       assert.equal(input.taskId, taskId);
       return { accepted: true, status: "cancellationRequested" };
+    },
+    rememberFact: async (input, idempotencyKey) => {
+      calls.push(`remember:${idempotencyKey}`);
+      assert.equal(input.key, "communication.responseLength");
+      return { saved: true, memoryId: "memory-1" };
     }
   };
   const session = new RealtimeSession(
@@ -243,7 +249,8 @@ test("replaying a function call uses one backend write and returns the cached ou
           return result;
         },
         getTaskStatus: async () => ({ status: "queued" }),
-        cancelTask: async () => ({ accepted: true, status: "cancellationRequested" })
+        cancelTask: async () => ({ accepted: true, status: "cancellationRequested" }),
+        rememberFact: async () => ({ saved: true, memoryId: "memory-1" })
       },
       sessionScope: "0198b0a1-0000-7000-8000-000000000002"
     }),
@@ -294,10 +301,24 @@ test("replaying a function call uses one backend write and returns the cached ou
   transport.assertComplete();
 });
 
-test("valid remember_fact calls keep the complete contract while remaining Phase 5 unavailable", async () => {
+test("routes remember_fact through the authenticated backend and replays by call id", async () => {
   const transport = new ScriptedRealtimeTransport();
+  let backendCalls = 0;
   const session = new RealtimeSession(
-    createRealtimeAgent("test instructions"),
+    createRealtimeAgent("test instructions", undefined, {
+      backend: {
+        delegateTask: async () => ({ accepted: true }),
+        getTaskStatus: async () => ({ status: "queued" }),
+        cancelTask: async () => ({ accepted: true, status: "cancelled" }),
+        rememberFact: async (input, idempotencyKey) => {
+          backendCalls++;
+          assert.match(idempotencyKey, /remember_fact:call-remember-fact/);
+          assert.equal(input.key, "communication.responseLength");
+          return { saved: true, memoryId: "memory-remember-1" };
+        }
+      },
+      sessionScope: "remember-session"
+    }),
     { transport, model: "gpt-4o-realtime-preview" }
   );
 
@@ -305,13 +326,13 @@ test("valid remember_fact calls keep the complete contract while remaining Phase
     scenario: async ({ expectCall }) => {
       await expectCall("connect");
       const output = expectCall("sendFunctionCallOutput", call => {
-        assert.deepEqual(JSON.parse(call.output), {
-          available: false,
-          code: "phase3-unavailable",
-          tool: "remember_fact"
-        });
+        assert.deepEqual(JSON.parse(call.output), { saved: true, memoryId: "memory-remember-1" });
       });
       await output;
+      const replay = expectCall("sendFunctionCallOutput", call => {
+        assert.deepEqual(JSON.parse(call.output), { saved: true, memoryId: "memory-remember-1" });
+      });
+      await replay;
     },
     exercise: async () => {
       await session.connect({ apiKey: "ek_scripted", model: "gpt-4o-realtime-preview" });
@@ -331,10 +352,23 @@ test("valid remember_fact calls keep the complete contract while remaining Phase
         }),
         responseId: "response-remember-fact"
       });
+      transport.emit("function_call", {
+        type: "function_call",
+        name: "remember_fact",
+        callId: "call-remember-fact",
+        arguments: JSON.stringify({
+          key: "communication.responseLength",
+          value: "prefer concise answers",
+          sourceMessageId: "00000000-0000-7000-8000-000000000099",
+          sensitive: false
+        }),
+        responseId: "response-remember-fact"
+      });
       await new Promise(resolve => setImmediate(resolve));
     }
   });
 
+  assert.equal(backendCalls, 1);
   transport.assertComplete();
 });
 
@@ -347,7 +381,8 @@ test("returns a safe backend-error output when a Realtime backend fails", async 
         getTaskStatus: async () => {
           throw new Error("database credentials must not escape");
         },
-        cancelTask: async () => ({ accepted: true, status: "cancelled" })
+        cancelTask: async () => ({ accepted: true, status: "cancelled" }),
+        rememberFact: async () => ({ saved: true, memoryId: "memory-1" })
       },
       sessionScope: "0198b0a1-0000-7000-8000-000000000003"
     }),

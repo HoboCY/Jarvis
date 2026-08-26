@@ -47,4 +47,17 @@ public sealed class Conversation
     {
         LastActivityAtMs = nowMs;
     }
+
+    public bool SetCurrentSummary(Guid summaryId)
+    {
+        ArgumentOutOfRangeException.ThrowIfEqual(summaryId, Guid.Empty);
+        if (CurrentSummaryId == summaryId)
+        {
+            return false;
+        }
+
+        CurrentSummaryId = summaryId;
+        Version++;
+        return true;
+    }
 }

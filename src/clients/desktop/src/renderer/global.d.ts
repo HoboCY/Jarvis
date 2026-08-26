@@ -52,6 +52,13 @@ interface Window {
     }) => Promise<unknown>;
     getTaskStatus: (taskId: string) => Promise<unknown>;
     cancelTask: (input: { taskId: string; idempotencyKey: string }) => Promise<unknown>;
+    rememberFact: (input: {
+      key: string;
+      value: string;
+      sourceMessageId: string;
+      sensitive: boolean;
+      idempotencyKey: string;
+    }) => Promise<unknown>;
     getTasks: (input?: {
       conversationId?: string;
       cursor?: string;

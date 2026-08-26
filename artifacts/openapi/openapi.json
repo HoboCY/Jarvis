@@ -1487,6 +1487,177 @@
         ]
       }
     },
+    "/api/v1/memory-facts": {
+      "post": {
+        "tags": [
+          "MemoryEndpoints"
+        ],
+        "summary": "Persist an explicit user memory fact after source-message validation.",
+        "operationId": "CreateMemoryFact",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMemoryFactRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryFactSaveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/memory-facts/{memoryId}/retract": {
+      "post": {
+        "tags": [
+          "MemoryEndpoints"
+        ],
+        "summary": "Retract an owned memory fact.",
+        "operationId": "RetractMemoryFact",
+        "parameters": [
+          {
+            "name": "memoryId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryFactRetractResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/approvals": {
       "get": {
         "tags": [
@@ -2552,6 +2723,30 @@
           }
         }
       },
+      "CreateMemoryFactRequest": {
+        "required": [
+          "key",
+          "value",
+          "sourceMessageId"
+        ],
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "sourceMessageId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sensitive": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
       "CreateTaskRequest": {
         "required": [
           "conversationId",
@@ -3175,6 +3370,48 @@
           "desktop",
           "mobile",
           "server"
+        ]
+      },
+      "MemoryFactRetractResponse": {
+        "required": [
+          "memoryId",
+          "retracted",
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "memoryId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retracted": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MemoryFactStatusValue"
+          }
+        }
+      },
+      "MemoryFactSaveResponse": {
+        "required": [
+          "saved",
+          "memoryId"
+        ],
+        "type": "object",
+        "properties": {
+          "saved": {
+            "type": "boolean"
+          },
+          "memoryId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "MemoryFactStatusValue": {
+        "enum": [
+          "active",
+          "retracted"
         ]
       },
       "MessageInputModalityValue": {
@@ -4343,6 +4580,9 @@
     },
     {
       "name": "NotificationEndpoints"
+    },
+    {
+      "name": "MemoryEndpoints"
     },
     {
       "name": "ApprovalEndpoints"

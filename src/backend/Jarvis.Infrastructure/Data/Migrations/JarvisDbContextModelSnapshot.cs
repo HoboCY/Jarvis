@@ -122,9 +122,52 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("CurrentSummaryId");
+
                     b.HasIndex("UserId", "LastActivityAtMs");
 
                     b.ToTable("Conversations", (string)null);
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Conversations.ConversationSummary", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ConversationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("FromSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Model")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasMaxLength(200000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ToSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConversationId", "ToSequence");
+
+                    b.ToTable("ConversationSummaries", (string)null);
                 });
 
             modelBuilder.Entity("Jarvis.Domain.Conversations.Message", b =>
@@ -402,6 +445,70 @@ namespace Jarvis.Infrastructure.Data.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Users", (string)null);
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Memory.MemoryFact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("Confidence")
+                        .HasColumnType("REAL");
+
+                    b.Property<long>("CreatedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastConfirmedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Sensitive")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("SourceMessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("SupersedesMemoryId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ValueJson")
+                        .IsRequired()
+                        .HasMaxLength(100000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceMessageId");
+
+                    b.HasIndex("SupersedesMemoryId");
+
+                    b.HasIndex("UserId", "Key")
+                        .IsUnique()
+                        .HasFilter("Status = 0");
+
+                    b.HasIndex("UserId", "Status", "UpdatedAtMs");
+
+                    b.ToTable("MemoryFacts", (string)null);
                 });
 
             modelBuilder.Entity("Jarvis.Domain.Notifications.Notification", b =>
@@ -801,9 +908,23 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
             modelBuilder.Entity("Jarvis.Domain.Conversations.Conversation", b =>
                 {
+                    b.HasOne("Jarvis.Domain.Conversations.ConversationSummary", null)
+                        .WithMany()
+                        .HasForeignKey("CurrentSummaryId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("Jarvis.Domain.Identity.User", null)
                         .WithMany()
                         .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Conversations.ConversationSummary", b =>
+                {
+                    b.HasOne("Jarvis.Domain.Conversations.Conversation", null)
+                        .WithMany()
+                        .HasForeignKey("ConversationId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -843,6 +964,25 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
             modelBuilder.Entity("Jarvis.Domain.Idempotency.IdempotencyRecord", b =>
                 {
+                    b.HasOne("Jarvis.Domain.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Memory.MemoryFact", b =>
+                {
+                    b.HasOne("Jarvis.Domain.Conversations.Message", null)
+                        .WithMany()
+                        .HasForeignKey("SourceMessageId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Jarvis.Domain.Memory.MemoryFact", null)
+                        .WithMany()
+                        .HasForeignKey("SupersedesMemoryId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("Jarvis.Domain.Identity.User", null)
                         .WithMany()
                         .HasForeignKey("UserId")

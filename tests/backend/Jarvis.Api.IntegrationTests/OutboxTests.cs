@@ -14,7 +14,7 @@ namespace Jarvis.Api.IntegrationTests;
 
 public sealed class OutboxTests
 {
-    private static readonly string[] TaskCapabilities = ["deepReasoning"];
+    private static readonly string[] TaskCapabilities = [];
 
     [Fact]
     public async Task SignalRPublisherDeliversCommittedOutboxEventToAuthenticatedClient()

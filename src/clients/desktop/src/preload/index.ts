@@ -57,6 +57,13 @@ const jarvisApi = {
     ipcRenderer.invoke("backend:getTaskStatus", { taskId }) as Promise<unknown>,
   cancelTask: (input: { taskId: string; idempotencyKey: string }): Promise<unknown> =>
     ipcRenderer.invoke("backend:cancelTask", input) as Promise<unknown>,
+  rememberFact: (input: {
+    key: string;
+    value: string;
+    sourceMessageId: string;
+    sensitive: boolean;
+    idempotencyKey: string;
+  }): Promise<unknown> => ipcRenderer.invoke("backend:rememberFact", input) as Promise<unknown>,
   getTasks: (input?: {
     conversationId?: string;
     cursor?: string;

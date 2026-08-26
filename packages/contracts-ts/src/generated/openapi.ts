@@ -303,6 +303,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/memory-facts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Persist an explicit user memory fact after source-message validation. */
+        post: operations["CreateMemoryFact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory-facts/{memoryId}/retract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retract an owned memory fact. */
+        post: operations["RetractMemoryFact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/approvals": {
         parameters: {
             query?: never;
@@ -545,6 +579,14 @@ export interface components {
         CreateConversationRequest: {
             title: null | string;
         };
+        CreateMemoryFactRequest: {
+            key: string;
+            value: string;
+            /** Format: uuid */
+            sourceMessageId: string;
+            /** @default false */
+            sensitive: boolean;
+        };
         CreateTaskRequest: {
             /** Format: uuid */
             conversationId: string;
@@ -683,6 +725,19 @@ export interface components {
         };
         /** @enum {unknown} */
         DeviceTypeValue: "desktop" | "mobile" | "server";
+        MemoryFactRetractResponse: {
+            /** Format: uuid */
+            memoryId: string;
+            retracted: boolean;
+            status: components["schemas"]["MemoryFactStatusValue"];
+        };
+        MemoryFactSaveResponse: {
+            saved: boolean;
+            /** Format: uuid */
+            memoryId: string;
+        };
+        /** @enum {unknown} */
+        MemoryFactStatusValue: "active" | "retracted";
         /** @enum {unknown} */
         MessageInputModalityValue: "voice" | "typedText" | "image" | "tool" | null;
         /** @enum {unknown} */
@@ -1927,6 +1982,128 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NotificationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CreateMemoryFact: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateMemoryFactRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryFactSaveResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    RetractMemoryFact: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                memoryId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryFactRetractResponse"];
                 };
             };
             /** @description Bad Request */
