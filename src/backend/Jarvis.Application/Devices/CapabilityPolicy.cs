@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace Jarvis.Application.Devices;
 
 public sealed record CapabilityEnvelope(
@@ -9,6 +11,7 @@ public sealed record CapabilityEnvelope(
 
 public sealed class CapabilityPolicy
 {
+    private static readonly SearchValues<char> GlobMetaCharacters = SearchValues.Create("*?[]{}");
     private static readonly HashSet<string> SensitiveNames = new(StringComparer.OrdinalIgnoreCase)
     {
         ".env",
@@ -132,6 +135,14 @@ public sealed class CapabilityPolicy
         if (!Path.IsPathFullyQualified(path))
         {
             throw new ArgumentException("A capability path must be absolute.", parameterName);
+        }
+
+        // Codex permission roots are emitted as filesystem glob keys. Reject
+        // metacharacters at the capability boundary instead of attempting an
+        // unverified escape that could change the native glob semantics.
+        if (path.AsSpan().IndexOfAny(GlobMetaCharacters) >= 0)
+        {
+            throw new ArgumentException("A capability path must not contain filesystem glob metacharacters.", parameterName);
         }
 
         var fullPath = Path.GetFullPath(path);

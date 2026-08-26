@@ -41,6 +41,17 @@ public sealed class Phase4CapabilityTests
     }
 
     [Fact]
+    public void CapabilityPolicyRejectsFilesystemGlobMetacharactersInAllowedRoots()
+    {
+        foreach (var marker in new[] { "*", "?", "[", "]", "{", "}" })
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"jarvis-phase4-glob-{marker}-{Guid.NewGuid():N}");
+            Assert.Throws<ArgumentException>(() => CapabilityPolicy.Create(
+                new CapabilityEnvelope(ReadFiles: true, AllowedRoots: [root])));
+        }
+    }
+
+    [Fact]
     public void CapabilityPolicyResolvesDirectoryAndFileSymlinksBeforeBoundaryCheck()
     {
         if (OperatingSystem.IsWindows())

@@ -144,20 +144,41 @@ public sealed partial class DeviceNodeWorker(
         var task = claim.Task;
         var execution = claim.Execution;
         var leaseOwner = claim.LeaseOwner;
-        var effectivePolicy = policy;
-        if (claim.CapabilityEnvelope is { } envelope)
+        if (claim.CapabilityEnvelope is null)
         {
-            var requestedRoots = envelope.AllowedRoots ?? Array.Empty<string>();
-            var roots = requestedRoots
-                .Where(root => policy.IsAllowedPath(root, write: false))
-                .ToArray();
-            effectivePolicy = CapabilityPolicy.Create(new CapabilityEnvelope(
-                ReadFiles: policy.ReadFiles && envelope.ReadFiles,
-                WriteFiles: policy.WriteFiles && envelope.WriteFiles,
-                RunCommands: policy.RunCommands && envelope.RunCommands,
-                Network: policy.Network && envelope.Network,
-                AllowedRoots: roots));
+            await AppendEventSafeAsync(
+                task.Id,
+                new DeviceTaskEventRequest(
+                    ClientEventId: $"device-capability-envelope-missing:{execution.Id:D}",
+                    ExecutionId: execution.Id,
+                    EventType: "task.failed",
+                    PayloadJson: "{\"reason\":\"capability_envelope_missing\"}",
+                    ErrorCode: "capability_envelope_missing",
+                    ErrorMessage: "The Codex task claim did not include a capability envelope."),
+                leaseOwner,
+                $"device-capability-envelope-missing:{execution.Id:D}",
+                cancellationToken).ConfigureAwait(false);
+            return;
         }
+
+        var envelope = claim.CapabilityEnvelope;
+        var effectivePolicy = policy;
+        var requestedRoots = envelope.AllowedRoots ?? Array.Empty<string>();
+        var canWriteRoots = policy.WriteFiles && envelope.WriteFiles;
+        var canReadRoots = policy.ReadFiles && envelope.ReadFiles;
+        var roots = requestedRoots
+            .Where(root => canWriteRoots
+                ? policy.IsAllowedPath(root, write: true)
+                : canReadRoots && policy.IsAllowedPath(root, write: false))
+            .ToArray();
+        effectivePolicy = CapabilityPolicy.Create(new CapabilityEnvelope(
+            ReadFiles: policy.ReadFiles && envelope.ReadFiles,
+            WriteFiles: policy.WriteFiles && envelope.WriteFiles,
+            RunCommands: policy.RunCommands && envelope.RunCommands,
+            Network: policy.Network && envelope.Network,
+            AllowedRoots: roots));
+        CodexHomeValidator.Validate(nodeOptions.CodexHome);
+        var permissionProfile = CodexTaskPermissionProfile.Create(task.Id, effectivePolicy);
         var effectiveWorkingDirectory = ResolveWorkingDirectory(nodeOptions.WorkingDirectory, effectivePolicy);
         var turnState = new ActiveTurnState(
             execution.CodexThreadId,
@@ -169,8 +190,13 @@ public sealed partial class DeviceNodeWorker(
                 var runtimeOptions = new CodexRuntimeOptions(nodeOptions.CodexBinaryPath, nodeOptions.CodexArguments)
                 {
                     Policy = effectivePolicy,
+                    CodexHome = nodeOptions.CodexHome,
+                    PermissionProfile = permissionProfile,
                     WorkingDirectory = effectiveWorkingDirectory,
-                    Environment = effectivePolicy.BuildMinimalEnvironment()
+                    Environment = effectivePolicy.BuildMinimalEnvironment(new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["CODEX_HOME"] = nodeOptions.CodexHome
+                    })
                 };
                 return Task.FromResult<ICodexRuntime>(new CodexAppServerClient(runtimeOptions));
             },

@@ -29,12 +29,236 @@ public sealed class DeviceNodeOptions
     public string KeychainAccount { get; set; } = Environment.UserName;
     public CapabilityEnvelopeOptions Capabilities { get; set; } = new();
     public string? WorkingDirectory { get; set; }
+    public string CodexHome { get; set; } = string.Empty;
     public string CodexBinaryPath { get; set; } = "codex";
     public string[] CodexArguments { get; set; } = ["app-server"];
     public int PollingIntervalMs { get; set; } = 1_000;
     public int HeartbeatIntervalMs { get; set; } = 10_000;
     public int MaxRestartAttempts { get; set; } = 3;
     public int RestartDelayMs { get; set; } = 250;
+}
+
+public static class CodexHomeValidator
+{
+    public static bool IsValid(string? path) => TryValidate(
+        path,
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        out _);
+
+    internal static bool IsValid(string? path, string? userHome) => TryValidate(path, userHome, out _);
+
+    public static void Validate(string? path)
+    {
+        if (!TryValidate(path, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), out var error))
+        {
+            throw new InvalidOperationException(error);
+        }
+    }
+
+    private static bool TryValidate(string? path, string? userHome, out string error)
+    {
+        error = "DeviceNode:CodexHome must be an existing absolute directory other than the filesystem root.";
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        {
+            return false;
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+
+        var root = Path.GetPathRoot(fullPath);
+        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (root is null || string.Equals(fullPath, root, comparison))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(userHome) || !Path.IsPathFullyQualified(userHome))
+            {
+                return false;
+            }
+
+            var userHomePath = Path.GetFullPath(userHome);
+            var userCodexHome = Path.Combine(userHomePath, ".codex");
+            if (IsSameOrDescendant(fullPath, userCodexHome, comparison))
+            {
+                error = "DeviceNode:CodexHome must be an independent directory, not the user's ~/.codex.";
+                return false;
+            }
+
+            if (ContainsExistingSymlink(fullPath))
+            {
+                error = "DeviceNode:CodexHome must not contain a symbolic-link ancestor.";
+                return false;
+            }
+
+            if (!Directory.Exists(fullPath))
+            {
+                return false;
+            }
+
+            var physicalUserHome = ResolveExistingPath(userHomePath);
+            var physicalCandidate = ResolveExistingPath(fullPath);
+            var physicalUserCodexHome = ResolveExistingPath(Path.Combine(physicalUserHome, ".codex"));
+            if (IsSameOrDescendant(physicalCandidate, physicalUserCodexHome, comparison))
+            {
+                error = "DeviceNode:CodexHome must not alias the user's ~/.codex.";
+                return false;
+            }
+
+            if (!OperatingSystem.IsWindows())
+            {
+                const UnixFileMode groupOrOther = UnixFileMode.GroupRead
+                    | UnixFileMode.GroupWrite
+                    | UnixFileMode.GroupExecute
+                    | UnixFileMode.OtherRead
+                    | UnixFileMode.OtherWrite
+                    | UnixFileMode.OtherExecute;
+                const UnixFileMode ownerAccess = UnixFileMode.UserRead
+                    | UnixFileMode.UserWrite
+                    | UnixFileMode.UserExecute;
+                var mode = File.GetUnixFileMode(fullPath);
+                if ((mode & groupOrOther) != 0)
+                {
+                    error = "DeviceNode:CodexHome must reject group/other permissions on Unix (use mode 0700).";
+                    return false;
+                }
+
+                if ((mode & ownerAccess) != ownerAccess)
+                {
+                    error = "DeviceNode:CodexHome must be owner-readable, writable, and executable on Unix.";
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool ContainsExistingSymlink(string fullPath)
+    {
+        var root = Path.GetPathRoot(fullPath)
+            ?? throw new ArgumentException("CodexHome must have a filesystem root.", nameof(fullPath));
+        var segments = fullPath[root.Length..]
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        var current = root;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            current = Path.Combine(current, segments[index]);
+            try
+            {
+                var attributes = File.GetAttributes(current);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                break;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                break;
+            }
+
+            FileSystemInfo info = Directory.Exists(current)
+                ? new DirectoryInfo(current)
+                : new FileInfo(current);
+            if (info.ResolveLinkTarget(returnFinalTarget: true) is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string ResolveExistingPath(string fullPath)
+    {
+        var root = Path.GetPathRoot(fullPath)
+            ?? throw new ArgumentException("CodexHome must have a filesystem root.", nameof(fullPath));
+        var current = root;
+        var segments = fullPath[root.Length..]
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var candidate = Path.Combine(current, segments[index]);
+            if (!Directory.Exists(candidate) && !File.Exists(candidate))
+            {
+                current = Path.Combine(current, string.Join(Path.DirectorySeparatorChar, segments[index..]));
+                break;
+            }
+
+            FileSystemInfo info = Directory.Exists(candidate)
+                ? new DirectoryInfo(candidate)
+                : new FileInfo(candidate);
+            current = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? candidate;
+        }
+
+        return TrimTrailingSeparators(Path.GetFullPath(current));
+    }
+
+    private static bool IsSameOrDescendant(string path, string basePath, StringComparison comparison)
+    {
+        var normalizedPath = TrimTrailingSeparators(Path.GetFullPath(path));
+        var normalizedBase = TrimTrailingSeparators(Path.GetFullPath(basePath));
+        if (comparison == StringComparison.OrdinalIgnoreCase)
+        {
+            normalizedPath = normalizedPath.ToUpperInvariant();
+            normalizedBase = normalizedBase.ToUpperInvariant();
+        }
+
+        if (string.Equals(normalizedPath, normalizedBase, comparison))
+        {
+            return true;
+        }
+
+        return normalizedPath.StartsWith(
+            normalizedBase + Path.DirectorySeparatorChar,
+            comparison);
+    }
+
+    private static string TrimTrailingSeparators(string path)
+    {
+        var root = Path.GetPathRoot(path);
+        return string.Equals(path, root, OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal)
+            ? path
+            : path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
 }
 
 public sealed class CapabilityEnvelopeOptions

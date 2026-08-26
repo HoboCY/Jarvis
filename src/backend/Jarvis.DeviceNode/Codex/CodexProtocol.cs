@@ -32,11 +32,31 @@ public sealed record CodexRuntimeOptions(
     int RequestTimeoutMs = 60_000,
     int MaxRestartAttempts = 3)
 {
-    public IReadOnlyList<string> EffectiveArguments => Arguments ?? ["app-server"];
+    public IReadOnlyList<string> EffectiveArguments
+    {
+        get
+        {
+            var result = (Arguments ?? ["app-server"]).ToList();
+            if (PermissionProfile is not null)
+            {
+                foreach (var overrideValue in PermissionProfile.CliConfigOverrides)
+                {
+                    result.Add("-c");
+                    result.Add(overrideValue);
+                }
+            }
+
+            return result;
+        }
+    }
 
     public string? WorkingDirectory { get; init; }
 
     public CapabilityPolicy? Policy { get; init; }
+
+    public string? CodexHome { get; init; }
+
+    public CodexTaskPermissionProfile? PermissionProfile { get; init; }
 
     public IReadOnlyDictionary<string, string>? Environment { get; init; }
 }
@@ -98,7 +118,6 @@ public sealed class CodexAppServerClient : ICodexRuntime
     private bool initialized;
     private int exitObserved;
     private bool stopping;
-    private CapabilityPolicy? activePolicy;
 
     public event EventHandler<CodexProcessExitedEventArgs>? ProcessExited;
 
@@ -141,6 +160,16 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 throw new InvalidOperationException("Codex app-server is already starting.");
             }
 
+            if (options.PermissionProfile is not null)
+            {
+                if (options.Policy is null)
+                {
+                    throw new InvalidOperationException("A Codex task permission profile requires a capability policy.");
+                }
+
+                CodexHomeValidator.Validate(options.CodexHome);
+            }
+
             stopping = false;
             exitObserved = 0;
 
@@ -167,7 +196,7 @@ public sealed class CodexAppServerClient : ICodexRuntime
 
                 startInfo.WorkingDirectory = options.WorkingDirectory;
             }
-            var environment = options.Policy?.BuildMinimalEnvironment(options.Environment) ?? options.Environment;
+            var environment = BuildProcessEnvironment();
             if (environment is not null)
             {
                 startInfo.Environment.Clear();
@@ -207,20 +236,32 @@ public sealed class CodexAppServerClient : ICodexRuntime
         initialized = true;
     }
 
+    private IReadOnlyDictionary<string, string>? BuildProcessEnvironment()
+    {
+        if (options.PermissionProfile is not null)
+        {
+            return options.Policy!.BuildMinimalEnvironment(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["CODEX_HOME"] = options.CodexHome!
+            });
+        }
+
+        return options.Policy?.BuildMinimalEnvironment(options.Environment) ?? options.Environment;
+    }
+
     public async Task<CodexThreadHandle> StartThreadAsync(CapabilityPolicy policy, string? cwd, CancellationToken cancellationToken = default)
     {
+        var profile = RequirePermissionProfile();
         await EnsureInitializedAsync(cancellationToken);
         ValidateCwd(policy, cwd);
-        activePolicy = policy;
         var parameters = new JsonObject
         {
             ["cwd"] = cwd,
             ["approvalPolicy"] = "on-request",
-            ["sandbox"] = policy.WriteFiles ? "workspace-write" : "read-only",
             ["developerInstructions"] = BuildCapabilityInstructions(policy)
         };
         var response = await SendRequestAsync(CodexProtocolMethods.ThreadStart, parameters, cancellationToken);
-        return ParseThreadResponse(response);
+        return ParseThreadResponse(response, profile.Id);
     }
 
     public async Task<CodexThreadHandle> ResumeThreadAsync(string threadId, CapabilityPolicy policy, string? cwd, CancellationToken cancellationToken = default)
@@ -231,19 +272,18 @@ public sealed class CodexAppServerClient : ICodexRuntime
             JarvisTelemetry.BoundedTags(("operation", "resume")).ToArray());
         try
         {
+            var profile = RequirePermissionProfile();
             await EnsureInitializedAsync(cancellationToken);
             ValidateCwd(policy, cwd);
-            activePolicy = policy;
             var parameters = new JsonObject
             {
                 ["threadId"] = threadId,
                 ["cwd"] = cwd,
                 ["approvalPolicy"] = "on-request",
-                ["sandbox"] = policy.WriteFiles ? "workspace-write" : "read-only",
                 ["developerInstructions"] = BuildCapabilityInstructions(policy)
             };
             var response = await SendRequestAsync(CodexProtocolMethods.ThreadResume, parameters, cancellationToken);
-            return ParseThreadResponse(response);
+            return ParseThreadResponse(response, profile.Id);
         }
         catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -262,17 +302,10 @@ public sealed class CodexAppServerClient : ICodexRuntime
         try
         {
             await EnsureInitializedAsync(cancellationToken);
-            // SandboxPolicy is the app-server's typed capability projection. The
-            // legacy sandbox mode on thread/start/resume remains for compatibility.
             var parameters = new JsonObject
             {
                 ["threadId"] = threadId,
-                ["input"] = JsonSerializer.SerializeToNode(new[] { new { type = "text", text = input } }),
-                ["sandboxPolicy"] = activePolicy is { } policy
-                    ? policy.WriteFiles
-                        ? JsonSerializer.SerializeToNode(new { type = "workspaceWrite", networkAccess = policy.Network, writableRoots = policy.AllowedRoots })
-                        : JsonSerializer.SerializeToNode(new { type = "readOnly", networkAccess = policy.Network })
-                    : null
+                ["input"] = JsonSerializer.SerializeToNode(new[] { new { type = "text", text = input } })
             };
             var response = await SendRequestAsync(CodexProtocolMethods.TurnStart, parameters, cancellationToken);
             var responseObject = response.ValueKind == JsonValueKind.Object && response.TryGetProperty("turn", out var turn)
@@ -533,8 +566,22 @@ public sealed class CodexAppServerClient : ICodexRuntime
         }
     }
 
-    private static CodexThreadHandle ParseThreadResponse(JsonElement response)
+    private CodexTaskPermissionProfile RequirePermissionProfile() => options.PermissionProfile
+        ?? throw new InvalidOperationException("Every Codex task requires a native permission profile.");
+
+    private static CodexThreadHandle ParseThreadResponse(JsonElement response, string expectedProfileId)
     {
+        if (response.ValueKind != JsonValueKind.Object
+            || !response.TryGetProperty("activePermissionProfile", out var activeProfile)
+            || activeProfile.ValueKind != JsonValueKind.Object
+            || !activeProfile.TryGetProperty("id", out var activeProfileId)
+            || activeProfileId.ValueKind != JsonValueKind.String
+            || !string.Equals(activeProfileId.GetString(), expectedProfileId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Codex thread response did not confirm activePermissionProfile.id '{expectedProfileId}'.");
+        }
+
         var thread = response.ValueKind == JsonValueKind.Object && response.TryGetProperty("thread", out var threadElement)
             ? threadElement
             : response;

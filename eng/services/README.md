@@ -21,6 +21,13 @@ interactive Keychain ACL consent on unsigned CI binaries. The file seam is
 owner-only protection, not equivalent to a hardware-backed or Keychain-backed
 secret, and must not be used as a production credential store.
 
+Every Device Node also requires an independent `DeviceNode:CodexHome`. The
+runtime configuration writer creates it with mode `0700`; it must not be the
+user's `~/.codex`, and no existing user Codex files are copied into it. Before
+a production service is started, log in to the isolated home explicitly with
+`CODEX_HOME=<path> codex login`, where `<path>` is the configured
+`DeviceNode:CodexHome`.
+
 Use `eng/scripts/publish-macos-arm64.sh` to create self-contained darwin-arm64
 API and Device Node `tar.gz` bundles (the service manifest hashes these
 bundles, including their apphost, .NET runtime, DLLs, runtime configuration,

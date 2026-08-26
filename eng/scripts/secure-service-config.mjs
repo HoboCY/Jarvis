@@ -1,5 +1,6 @@
-import { mkdir, chmod, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 
 export async function writeApiConfiguration({
@@ -52,6 +53,7 @@ export async function writeDeviceRuntimeConfiguration({
   directory,
   apiBaseUrl,
   deviceId,
+  codexHome,
   credentialFilePath,
   keychainService,
   keychainAccount
@@ -59,6 +61,7 @@ export async function writeDeviceRuntimeConfiguration({
   assertDirectory(directory);
   assertUrl(apiBaseUrl, "apiBaseUrl");
   assertUuid(deviceId, "deviceId");
+  const resolvedCodexHome = await ensureSecureCodexHome(codexHome);
   if (credentialFilePath !== undefined) {
     assertPath(credentialFilePath, "credentialFilePath");
   } else {
@@ -68,6 +71,7 @@ export async function writeDeviceRuntimeConfiguration({
   const deviceNode = {
     ApiBaseUrl: apiBaseUrl,
     DeviceId: "00000000-0000-0000-0000-000000000000",
+    CodexHome: resolvedCodexHome,
     PollingIntervalMs: 100,
     HeartbeatIntervalMs: 100,
     MaxRestartAttempts: 1,
@@ -101,9 +105,129 @@ function assertDirectory(value) {
 }
 
 function assertPath(value, name) {
-  if (typeof value !== "string" || !isAbsolute(value) || resolve(value) === "/") {
+  if (typeof value !== "string" || !isAbsolute(value)) {
     throw new Error(`${name} must be an explicit absolute path other than '/'.`);
   }
+
+  const resolved = resolve(value);
+  if (resolved === parse(resolved).root) {
+    throw new Error(`${name} must be an explicit absolute path other than '/'.`);
+  }
+
+  return resolved;
+}
+
+/**
+ * Validates an isolated Codex home without creating, chmod'ing, or writing anything.
+ * The optional userHome is a test/verification seam and is never accepted by the
+ * runtime configuration writer.
+ */
+export async function validateIndependentCodexHomePath(value, configuredUserHome = userInfo().homedir) {
+  const resolvedPath = assertPath(value, "codexHome");
+  const resolvedUserHome = assertPath(configuredUserHome, "userHome");
+  const comparison = process.platform === "win32" || process.platform === "darwin"
+    ? "insensitive"
+    : "sensitive";
+  const userCodexHome = resolve(join(resolvedUserHome, ".codex"));
+  if (isSameOrDescendant(resolvedPath, userCodexHome, comparison)) {
+    throw new Error("codexHome must be an independent directory, not the user's ~/.codex.");
+  }
+
+  const userHomeInspection = await inspectExistingPath(resolvedUserHome, "userHome");
+  if (!userHomeInspection.exists || !userHomeInspection.metadata.isDirectory()) {
+    throw new Error("userHome must be an existing directory.");
+  }
+  const candidateInspection = await inspectExistingPath(resolvedPath, "codexHome");
+  await rejectPhysicalUserCodexAlias(
+    resolvedPath,
+    candidateInspection,
+    resolvedUserHome,
+    userHomeInspection,
+    comparison);
+
+  return resolvedPath;
+}
+
+async function ensureSecureCodexHome(value) {
+  const trustedUserHome = userInfo().homedir;
+  const resolvedPath = await validateIndependentCodexHomePath(value, trustedUserHome);
+
+  await mkdir(resolvedPath, { recursive: true, mode: 0o700 });
+  await validateIndependentCodexHomePath(resolvedPath, trustedUserHome);
+
+  await chmod(resolvedPath, 0o700);
+  return resolvedPath;
+}
+
+async function inspectExistingPath(path, name) {
+  const root = parse(path).root;
+  const segments = path.slice(root.length).split(/[\\/]+/).filter(Boolean);
+  let current = root;
+  let lastExisting = root;
+  let metadata = await lstat(root);
+  for (const [index, segment] of segments.entries()) {
+    current = join(current, segment);
+    try {
+      metadata = await lstat(current);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+        return { exists: false, lastExisting, metadata };
+      }
+
+      throw error;
+    }
+
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`${name} must not contain a symbolic-link ancestor.`);
+    }
+    if (!metadata.isDirectory() && index < segments.length - 1) {
+      throw new Error(`${name} must have directory ancestors.`);
+    }
+    lastExisting = current;
+  }
+
+  return { exists: true, lastExisting, metadata };
+}
+
+async function rejectPhysicalUserCodexAlias(
+  candidatePath,
+  candidateInspection,
+  userHomePath,
+  userHomeInspection,
+  comparison) {
+  const physicalUserHome = await physicalPath(userHomePath, userHomeInspection);
+  let physicalUserCodexHome = resolve(physicalUserHome, ".codex");
+  try {
+    physicalUserCodexHome = await realpath(physicalUserCodexHome);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") {
+      throw error;
+    }
+  }
+
+  const physicalCandidate = await physicalPath(candidatePath, candidateInspection);
+  if (isSameOrDescendant(physicalCandidate, physicalUserCodexHome, comparison)) {
+    throw new Error("codexHome must not alias the user's ~/.codex.");
+  }
+}
+
+async function physicalPath(path, inspection) {
+  const physicalExisting = await realpath(inspection.lastExisting);
+  const suffix = relative(inspection.lastExisting, path);
+  return resolve(physicalExisting, suffix);
+}
+
+function isSameOrDescendant(path, basePath, comparison) {
+  const normalizedPath = normalizeForComparison(path, comparison);
+  const normalizedBase = normalizeForComparison(basePath, comparison);
+  const separator = process.platform === "win32" ? "\\" : "/";
+  return normalizedPath === normalizedBase
+    || normalizedPath.startsWith(`${normalizedBase}${separator}`);
+}
+
+function normalizeForComparison(path, comparison) {
+  const resolved = resolve(path);
+  return comparison === "insensitive" ? resolved.toLocaleLowerCase("en-US") : resolved;
 }
 
 function assertSecret(value, name, minimumLength) {

@@ -26,6 +26,7 @@ builder.Services
     .AddOptions<DeviceNodeOptions>()
     .Bind(builder.Configuration.GetSection(DeviceNodeOptions.SectionName))
     .Validate(options => Uri.TryCreate(options.ApiBaseUrl, UriKind.Absolute, out _), "DeviceNode:ApiBaseUrl must be an absolute URI.")
+    .Validate(options => CodexHomeValidator.IsValid(options.CodexHome), "DeviceNode:CodexHome must be an existing owner-only absolute directory other than the filesystem root.")
     .Validate(options => options.PollingIntervalMs >= 25, "DeviceNode:PollingIntervalMs must be at least 25ms.")
     .ValidateOnStart();
 builder.Services.AddHttpClient<DeviceNodeHttpClient>((serviceProvider, client) =>

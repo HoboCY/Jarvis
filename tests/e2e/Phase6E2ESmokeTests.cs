@@ -386,7 +386,23 @@ public sealed class Phase6E2ESmokeTests
     {
         var root = Directory.CreateTempSubdirectory("jarvis-e2e-approval-");
         var script = Path.Combine(root.FullName, "fake-codex.sh");
-        await File.WriteAllTextAsync(script, "#!/bin/sh\nwhile IFS= read -r line; do\n  if echo \"$line\" | grep -q '\"method\":\"initialize\"'; then echo '{\"id\":1,\"result\":{}}'; fi\n  if echo \"$line\" | grep -q '\"method\":\"thread/start\"'; then echo '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-e2e-approval\"}}}'; fi\n  if echo \"$line\" | grep -q '\"method\":\"turn/start\"'; then echo '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-e2e-approval\"}}}'; echo '{\"id\":99,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"command\":\"pwd\",\"reason\":\"e2e approval\"}}'; fi\n  if echo \"$line\" | grep -q '\"result\"' && echo \"$line\" | grep -q '\"decision\"'; then echo '{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"turn-e2e-approval\",\"status\":\"completed\"},\"summary\":\"approved completion\",\"artifacts\":[]}}'; fi\ndone\n");
+        var scriptContents = """
+#!/bin/sh
+set -eu
+profile_id=""
+for argument in "$@"; do
+  case "$argument" in
+    default_permissions=*) profile_id=$(printf '%s\n' "$argument" | sed 's/^default_permissions="//; s/"$//');;
+  esac
+done
+while IFS= read -r line; do
+  if echo "$line" | grep -q '"method":"initialize"'; then echo '{"id":1,"result":{}}'; fi
+  if echo "$line" | grep -q '"method":"thread/start"'; then printf '{"id":2,"result":{"thread":{"id":"thread-e2e-approval"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id"; fi
+  if echo "$line" | grep -q '"method":"turn/start"'; then echo '{"id":3,"result":{"turn":{"id":"turn-e2e-approval"}}}'; echo '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"pwd","reason":"e2e approval"}}'; fi
+  if echo "$line" | grep -q '"result"' && echo "$line" | grep -q '"decision"'; then echo '{"method":"turn/completed","params":{"turn":{"id":"turn-e2e-approval","status":"completed"},"summary":"approved completion","artifacts":[]}}'; fi
+done
+""";
+        await File.WriteAllTextAsync(script, scriptContents);
         if (!OperatingSystem.IsWindows())
         {
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -399,11 +415,13 @@ public sealed class Phase6E2ESmokeTests
             var conversation = await CreateConversationAsync(ui, "e2e approval");
             var taskId = await CreateTaskAsync(ui, conversation.Id, "write approved report", codex: true);
             var device = await RegisterDeviceAsync(ui, "e2e approval node");
+            var codexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home"));
             using var node = factory.CreateClient();
             var nodeOptions = new DeviceNodeOptions
             {
                 DeviceId = device.DeviceId,
                 DeviceCredential = device.DeviceCredential,
+                CodexHome = codexHome,
                 CodexBinaryPath = script,
                 CodexArguments = [],
                 PollingIntervalMs = 25,
@@ -485,9 +503,26 @@ public sealed class Phase6E2ESmokeTests
         var databasePath = Path.Combine(root.FullName, "control-plane.db");
         var markerPath = Path.Combine(root.FullName, "codex-requests.log");
         var codexPath = Path.Combine(root.FullName, "fake-codex.sh");
-        await File.WriteAllTextAsync(
-            codexPath,
-            $"#!/bin/sh\nset -eu\nmarker='{markerPath.Replace("'", "'\\''", StringComparison.Ordinal)}'\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"method\":\"initialize\"'*) printf '%s\\n' '{{\"id\":1,\"result\":{{}}}}';;\n    *'\"method\":\"thread/start\"'*) printf '%s\\n' '{{\"id\":2,\"result\":{{\"thread\":{{\"id\":\"thread-e2e-crash\"}}}}}}';;\n    *'\"method\":\"turn/start\"'*) printf '%s\\n' turn-start >> \"$marker\"; exit 42;;\n  esac\ndone\n");
+        var escapedMarkerPath = markerPath.Replace("'", "'\\''", StringComparison.Ordinal);
+        var scriptContents = """
+#!/bin/sh
+set -eu
+marker='__MARKER__'
+profile_id=""
+for argument in "$@"; do
+  case "$argument" in
+    default_permissions=*) profile_id=$(printf '%s\n' "$argument" | sed 's/^default_permissions="//; s/"$//');;
+  esac
+done
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}';;
+    *'"method":"thread/start"'*) printf '{"id":2,"result":{"thread":{"id":"thread-e2e-crash"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id";;
+    *'"method":"turn/start"'*) printf '%s\n' turn-start >> "$marker"; exit 42;;
+  esac
+done
+""".Replace("__MARKER__", escapedMarkerPath, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(codexPath, scriptContents);
         if (!OperatingSystem.IsWindows())
         {
             File.SetUnixFileMode(codexPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -503,11 +538,13 @@ public sealed class Phase6E2ESmokeTests
             var conversation = await CreateConversationAsync(ui, "e2e codex crash");
             var taskId = await CreateTaskAsync(ui, conversation.Id, "crash during turn start", codex: true);
             var device = await RegisterDeviceAsync(ui, "e2e crashing codex node");
+            var codexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home"));
             using var node = factory.CreateClient();
             var nodeOptions = new DeviceNodeOptions
             {
                 DeviceId = device.DeviceId,
                 DeviceCredential = device.DeviceCredential,
+                CodexHome = codexHome,
                 WorkingDirectory = root.FullName,
                 CodexBinaryPath = codexPath,
                 CodexArguments = [],
@@ -860,6 +897,44 @@ public sealed class Phase6E2ESmokeTests
     }
 
     private static CapabilityPolicy EmptyPolicy() => CapabilityPolicy.Create(new CapabilityEnvelope());
+
+    private static string CreateSecureDirectory(string path)
+    {
+        var directory = ResolvePhysicalPath(path);
+        Directory.CreateDirectory(directory);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                directory,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        return directory;
+    }
+
+    private static string ResolvePhysicalPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)!;
+        var current = root;
+        foreach (var segment in fullPath[root.Length..]
+                     .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(current, segment);
+            if (!Directory.Exists(candidate) && !File.Exists(candidate))
+            {
+                current = candidate;
+                continue;
+            }
+
+            FileSystemInfo info = Directory.Exists(candidate)
+                ? new DirectoryInfo(candidate)
+                : new FileInfo(candidate);
+            current = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? candidate;
+        }
+
+        return Path.GetFullPath(current);
+    }
 
     private static void DeleteDatabase(string databasePath)
     {

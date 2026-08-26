@@ -26,6 +26,7 @@ api_bundle="$repo_root/artifacts/services/Jarvis.Api-darwin-arm64.tar.gz"
 device_bundle="$repo_root/artifacts/services/Jarvis.DeviceNode-darwin-arm64.tar.gz"
 api_database="$service_root/data/${api_label}/jarvis.db"
 credential_file="$device_runtime/device-identity.json"
+device_codex_home="$device_runtime/codex-home"
 api_installed=0
 device_installed=0
 device_id=""
@@ -71,6 +72,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$api_runtime" "$device_runtime"
+device_runtime="$(cd "$device_runtime" && pwd -P)"
+device_codex_home="$device_runtime/codex-home"
 
 stage="publish"
 echo "Publishing darwin-arm64 service binaries..."
@@ -197,16 +200,21 @@ await writeSecureJsonFile(process.argv[2], {
 });
 NODE
 
-node --input-type=module - "$device_runtime" "$api_url" "$device_id" "$credential_file" <<'NODE'
+node --input-type=module - "$device_runtime" "$api_url" "$device_id" "$credential_file" "$device_codex_home" <<'NODE'
 import { writeDeviceRuntimeConfiguration } from "./eng/scripts/secure-service-config.mjs";
 
 await writeDeviceRuntimeConfiguration({
   directory: process.argv[2],
   apiBaseUrl: process.argv[3],
   deviceId: process.argv[4],
-  credentialFilePath: process.argv[5]
+  credentialFilePath: process.argv[5],
+  codexHome: process.argv[6]
 });
 NODE
+if [[ "$(stat -f '%Lp' "$device_codex_home")" != "700" ]]; then
+  echo "Device Node Codex home is not owner-only (expected mode 0700)." >&2
+  exit 1
+fi
 
 stage="install Device Node"
 echo "Installing isolated Device Node launchd service ($device_label)..."
