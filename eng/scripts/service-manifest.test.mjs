@@ -90,6 +90,14 @@ test("macOS service publish is self-contained and lockfile-repeatable", async ()
   assert.match(script, /deterministic-archive\.mjs/);
   const desktopScript = await readFile(join(process.cwd(), "eng/scripts/package-desktop-macos.sh"), "utf8");
   assert.match(desktopScript, /deterministic-archive\.mjs/);
+  assert.match(desktopScript, /node "\$desktop_root\/scripts\/assert-package\.mjs" "\$app_source\/Contents\/Resources\/app\.asar"/);
+  const userDataAssignment = desktopScript.indexOf('user_data_root="$install_root/user-data"');
+  const userDataMkdir = desktopScript.indexOf('mkdir -m 700 "$user_data_root"');
+  const userDataArgument = desktopScript.indexOf('--user-data-dir="$user_data_root"');
+  assert.ok(userDataAssignment >= 0, "Smoke userData must be rooted in its temporary install directory.");
+  assert.ok(userDataMkdir > userDataAssignment, "Smoke userData must be created after install_root.");
+  assert.ok(userDataArgument > userDataMkdir, "Smoke must pass the owner-only userData to the installed app.");
+  assert.doesNotMatch(desktopScript, /--user-data-dir="\$install_root(?:"|[^/])/);
 });
 
 test("only the exact launchd service-not-found error is idempotently ignorable", () => {

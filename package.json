@@ -29,7 +29,7 @@
     "check:mobile-native-config": "node eng/scripts/check-mobile-native-config.mjs",
     "test:secret-scan": "node --test eng/scripts/secret-scan.test.mjs",
     "test:service-manifest": "node --test eng/scripts/service-manifest.test.mjs eng/scripts/secure-service-config.test.mjs eng/scripts/deterministic-archive.test.mjs",
-    "package:desktop:mac": "pnpm --filter @jarvis/desktop make:mac",
+    "package:desktop:mac": "bash eng/scripts/package-desktop-macos.sh",
     "publish:services:mac": "eng/scripts/publish-macos-arm64.sh"
   }
 }

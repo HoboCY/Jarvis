@@ -7,7 +7,6 @@ release_root="$repo_root/artifacts/releases"
 install_root=""
 archive_root=""
 app_pid=""
-workspace_backups=()
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "package-desktop-macos.sh requires macOS; no unsigned macOS artifact was produced." >&2
@@ -36,86 +35,16 @@ cleanup() {
   if [[ -n "$archive_root" ]]; then
     rm -rf "$archive_root"
   fi
-  restore_workspace_packages
   exit "$result_code"
 }
 trap cleanup EXIT INT TERM
-
-prepare_workspace_packages() {
-  local link target source backup copy
-  while IFS= read -r link; do
-    [[ -n "$link" ]] || continue
-    if [[ ! -d "$link" ]]; then
-      continue
-    fi
-    target="$(readlink "$link")"
-    source="$repo_root/node_modules/${link#"$desktop_root/node_modules/"}"
-    if [[ ! -d "$source" ]]; then
-      source="$(cd "$(dirname "$link")" && cd "$(dirname "$target")" && pwd)/$(basename "$target")"
-    fi
-    if [[ ! -d "$source" ]]; then
-      continue
-    fi
-    backup="${link}.phase6-original.$$"
-    copy="${link}.phase6-copy.$$"
-    mv "$link" "$backup"
-    mkdir "$copy"
-    cp -R "$source/." "$copy/"
-    rm -rf "$copy/node_modules"
-    mv "$copy" "$link"
-    workspace_backups+=("$link|$backup")
-  done < <(node --input-type=module - "$desktop_root" <<'NODE'
-import { lstatSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const desktopRoot = process.argv[2];
-const nodeModules = join(desktopRoot, "node_modules");
-const desktopPackage = JSON.parse(readFileSync(join(desktopRoot, "package.json"), "utf8"));
-const queue = [...Object.keys(desktopPackage.dependencies ?? {}), "electron"];
-const seen = new Set();
-
-while (queue.length > 0) {
-  const packageName = queue.shift();
-  if (seen.has(packageName)) {
-    continue;
-  }
-  seen.add(packageName);
-  const packagePath = join(nodeModules, packageName);
-  try {
-    if (lstatSync(packagePath).isSymbolicLink()) {
-      process.stdout.write(`${packagePath}\n`);
-    }
-    const packageJson = JSON.parse(readFileSync(join(packagePath, "package.json"), "utf8"));
-    queue.push(...Object.keys(packageJson.dependencies ?? {}));
-    queue.push(...Object.keys(packageJson.optionalDependencies ?? {}));
-  } catch {
-    // A dependency may be resolved by a nested package or be platform-only.
-  }
-}
-NODE
-  )
-}
-
-restore_workspace_packages() {
-  local entry link backup
-  for entry in "${workspace_backups[@]-}"; do
-    [[ -n "$entry" ]] || continue
-    link="${entry%%|*}"
-    backup="${entry#*|}"
-    rm -rf "$link"
-    mv "$backup" "$link"
-  done
-  workspace_backups=()
-}
-
-prepare_workspace_packages
 pnpm --filter @jarvis/desktop make:mac
-restore_workspace_packages
 app_source="$(find "$desktop_root/out" -maxdepth 3 -type d -name '*.app' -print | sort | head -n 1)"
 if [[ -z "$app_source" || ! -x "$app_source/Contents/MacOS/Jarvis" ]]; then
   echo "Electron Forge did not produce an executable macOS arm64 .app." >&2
   exit 1
 fi
+node "$desktop_root/scripts/assert-package.mjs" "$app_source/Contents/Resources/app.asar"
 
 forge_artifact="$(find "$desktop_root/out/make" -type f \( -name '*.zip' -o -name '*.dmg' \) -print | sort | tail -n 1)"
 if [[ -z "$forge_artifact" ]]; then
@@ -132,12 +61,15 @@ archive_root=""
 
 install_root="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-phase6-desktop-install.XXXXXX")"
 installed_app="$install_root/Jarvis.app"
-marker_path="$install_root/app-when-ready.json"
+user_data_root="$install_root/user-data"
+marker_path="$install_root/renderer-ready.json"
+mkdir -m 700 "$user_data_root"
 cp -R "$app_source" "$installed_app"
 
 JARVIS_DESKTOP_SMOKE_MARKER="$marker_path" \
 JARVIS_DESKTOP_SMOKE_ROOT="$install_root" \
   "$installed_app/Contents/MacOS/Jarvis" --disable-gpu \
+  --user-data-dir="$user_data_root" \
   >"$install_root/electron.stdout.log" 2>"$install_root/electron.stderr.log" &
 app_pid=$!
 
@@ -153,27 +85,26 @@ for _ in {1..80}; do
   sleep 0.25
 done
 if [[ "$marker_ready" -ne 1 ]]; then
-  echo "Installed Jarvis.app did not reach app.whenReady while its process was alive." >&2
+  echo "Installed Jarvis.app did not mount the renderer while its process was alive." >&2
   tail -80 "$install_root/electron.stderr.log" >&2 || true
   exit 1
 fi
 
-# Keep the installed process alive long enough for the rest of the
-# app.whenReady callback (including tray construction) to complete.
+# Keep the installed process alive long enough to verify the renderer marker.
 sleep 1
 if ! kill -0 "$app_pid" 2>/dev/null; then
-  echo "Installed Jarvis.app exited after app.whenReady." >&2
+  echo "Installed Jarvis.app exited after renderer.ready." >&2
   tail -80 "$install_root/electron.stderr.log" >&2 || true
   exit 1
 fi
 
 marker_event="$(jq -r '.event // empty' "$marker_path")"
 marker_pid="$(jq -r '.pid // empty' "$marker_path")"
-if [[ "$marker_event" != "app.whenReady" || "$marker_pid" != "$app_pid" ]]; then
-  echo "Electron smoke marker did not prove the installed process reached app.whenReady." >&2
+if [[ "$marker_event" != "renderer.ready" || "$marker_pid" != "$app_pid" ]]; then
+  echo "Electron smoke marker did not prove the installed process mounted the renderer." >&2
   exit 1
 fi
-echo "Desktop install/start smoke passed: Jarvis.app pid $app_pid reached app.whenReady."
+echo "Desktop install/start smoke passed: Jarvis.app pid $app_pid mounted the renderer."
 
 artifact="$forge_artifact"
 if [[ -z "$artifact" ]]; then

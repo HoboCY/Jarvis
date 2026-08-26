@@ -29,13 +29,14 @@ dotnet ef migrations has-pending-model-changes ...                            PA
 
 pnpm typecheck                                                               PASS
 pnpm lint                                                                    PASS
-pnpm test                                                                    PASS (74/74: contracts 4 + realtime 12 + api-client 3 + Desktop 55)
+pnpm --filter @jarvis/desktop test                                             PASS (57 TS tests + 5 build tests)
+pnpm test                                                                      PASS (recursive: contracts 4 + realtime 12 + api-client 3 + Desktop 57 + build 5 + Mobile 49; 130 individual tests)
 pnpm build                                                                   PASS
 pnpm generate:openapi && pnpm check:openapi                                  PASS (byte-for-byte stable)
 pnpm check:codex-schema && pnpm check:codex-schema-canonical                 PASS (275 schema files)
 pnpm test:codex-schema-canonical                                             PASS (2/2)
 pnpm check:secrets && pnpm test:secret-scan                                  PASS
-pnpm test:service-manifest                                                   PASS (10/10)
+pnpm test:service-manifest                                                   PASS (14/14)
 git diff --check                                                             PASS
 
 bash tests/e2e/run-e2e.sh                                                    PASS
@@ -80,21 +81,23 @@ Device Node 生产默认使用 macOS Security.framework Keychain store；同步�
 
 ## Desktop 产物证据
 
-`bash eng/scripts/package-desktop-macos.sh` 会构建 Forge package、复制 `.app` 到唯一临时安装目录，直接启动 `Contents/MacOS/Jarvis`，等待受限临时路径中的 `app.whenReady` marker 和进程存活，再退出并清理安装目录。最近一次真实安装/启动 smoke：
+`bash eng/scripts/package-desktop-macos.sh` 会先通过 `pnpm build` 生成自包含的 main/preload/renderer bundle，再构建 Forge package；启动前由 `scripts/assert-package.mjs` 精确校验 ASAR 文件集合、条目类型和 bundle imports。脚本随后复制 `.app` 到唯一临时安装目录，创建 `install_root/user-data` 的 owner-only `0700` profile 并通过 `--user-data-dir` 启动 `Contents/MacOS/Jarvis`，不复用正常 profile 或 single-instance lock。仅在受限临时路径 marker 环境开启时，主进程等待 renderer load，并用固定 `executeJavaScript` 检查 `#root` 已有子节点后写入 `renderer.ready` marker；脚本同时校验 marker 的事件、PID 和进程存活，最后退出并清理安装目录。最近一次真实安装/启动 smoke：
 
 ```text
-Desktop install/start smoke passed: Jarvis.app pid 94324 reached app.whenReady.
+Desktop install/start smoke passed: Jarvis.app pid 52508 mounted the renderer.
 ```
 
-版本清单：`artifacts/releases/version-manifest.json`（生成物，`unsigned-test` / `not-run`）。
+该 smoke 与一个不带 `--user-data-dir` 的默认 profile Jarvis 进程并发执行；默认 profile PID 52368 在整个打包和安装启动期间保持存活，证明隔离 profile 不会争用正常 single-instance lock。
+
+版本清单：`artifacts/releases/version-manifest.json`（生成物，`signatureStatus=unsigned-test`、`notarizationStatus=not-run`，二者均为 UNVERIFIED）。本次 ASAR 只包含 `package.json` 和 9 个必要的 dist entry/HTML/PNG 文件；不包含 `node_modules`、workspace symlink、source 或测试文件。构建输出的 main bundle 仅保留 Electron/Node builtins external，renderer bundle 无 bare external import。
 
 ```text
 artifact: src/clients/desktop/out/make/zip/darwin/arm64/Jarvis-darwin-arm64-0.1.0.zip
-size: 132757123 bytes
-sha256: 57eb7165f1ee3d3adc8072e2a46b6408e786a273af7a6bb6b69de22653f7f352
+size: 131584746 bytes
+sha256: 07fd2aba70c20953aa9a150d1b4a6d1763d12a4f9938074d93db0c9ca7804e95
 ```
 
-该 zip 已独立用 `shasum -a 256` 复核，并由连续两次真实 package/install/start smoke 得到相同字节；包含 arm64 `Jarvis.app/Contents/MacOS/Jarvis` 与 `app.asar`。CI 的 macOS job 固定 `macos-15`，会执行同一 package/install/start smoke、service publish/smoke 并上传报告和清单。
+该 zip 已独立用 `shasum -a 256` 复核，包含 arm64 `Jarvis.app/Contents/MacOS/Jarvis` 与 `app.asar`。CI 的 macOS job 固定 `macos-15`，会执行同一 package/install/start smoke、service publish/smoke 并上传报告和清单。
 
 ## 影响、回滚与残余风险
 

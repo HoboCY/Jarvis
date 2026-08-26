@@ -36,6 +36,9 @@ const nonTerminalTaskStatuses = new Set([
   "recovering",
   "cancellationRequested"
 ]);
+const rendererMountProbe = "document.querySelector('#root')?.children.length > 0";
+const rendererMountProbeAttempts = 40;
+const rendererMountProbeDelayMs = 50;
 
 let mainWindow: BrowserWindow | undefined;
 let overlayWindow: BrowserWindow | undefined;
@@ -46,7 +49,7 @@ let isQuitting = false;
 let overlayHideTimer: NodeJS.Timeout | undefined;
 const notificationProjectionCache = new NotificationProjectionCache();
 
-function writeDesktopSmokeMarker(): void {
+async function writeDesktopSmokeMarker(window: BrowserWindow): Promise<void> {
   const markerPath = process.env.JARVIS_DESKTOP_SMOKE_MARKER;
   const markerRoot = process.env.JARVIS_DESKTOP_SMOKE_ROOT;
   if (!markerPath || !markerRoot || !isAbsolute(markerPath) || !isAbsolute(markerRoot)) {
@@ -69,13 +72,36 @@ function writeDesktopSmokeMarker(): void {
   }
 
   try {
-    writeFileSync(markerFullPath, `${JSON.stringify({
-      event: "app.whenReady",
-      pid: process.pid,
-      version: app.getVersion(),
-      occurredAt: Date.now()
-    })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    chmodSync(markerFullPath, 0o600);
+    if (window.webContents.isLoading()) {
+      await new Promise<void>((resolve, reject) => {
+        const onFinished = (): void => {
+          window.webContents.removeListener("did-fail-load", onFailed);
+          resolve();
+        };
+        const onFailed = (): void => {
+          window.webContents.removeListener("did-finish-load", onFinished);
+          reject(new Error("The packaged renderer failed to load."));
+        };
+        window.webContents.once("did-finish-load", onFinished);
+        window.webContents.once("did-fail-load", onFailed);
+      });
+    }
+
+    for (let attempt = 0; attempt < rendererMountProbeAttempts; attempt++) {
+      const rendererMounted = await window.webContents.executeJavaScript(rendererMountProbe);
+      if (rendererMounted === true) {
+        writeFileSync(markerFullPath, `${JSON.stringify({
+          event: "renderer.ready",
+          pid: process.pid,
+          version: app.getVersion(),
+          occurredAt: Date.now()
+        })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+        chmodSync(markerFullPath, 0o600);
+        return;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, rendererMountProbeDelayMs));
+    }
   } catch {
     // The marker is an opt-in release-test seam and must not change runtime
     // startup behavior when the environment is not configured correctly.
@@ -215,7 +241,7 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
     height: 900,
     webPreferences: {
       ...secureWebPreferences,
-      preload: new URL("../preload/index.js", import.meta.url).pathname
+      preload: new URL("../preload/index.cjs", import.meta.url).pathname
     }
   });
 
@@ -244,7 +270,7 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
 function createOverlayWindow(): BrowserWindow {
   const entryUrl = new URL("../renderer/overlay.html", import.meta.url).href;
   const window = new BrowserWindow(createOverlayWindowOptions(
-    new URL("../preload/overlay.js", import.meta.url).pathname));
+    new URL("../preload/overlay.cjs", import.meta.url).pathname));
   window.setAlwaysOnTop(true, "floating");
   window.webContents.on("will-navigate", event => event.preventDefault());
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -640,9 +666,11 @@ if (!app.requestSingleInstanceLock()) {
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
     rendererEntryUrl = getRendererEntryUrl(app.isPackaged, process.env.JARVIS_DEV_SERVER_URL);
-    ensureMainWindow();
+    const window = ensureMainWindow();
     createTray();
-    writeDesktopSmokeMarker();
+    if (window) {
+      void writeDesktopSmokeMarker(window);
+    }
   });
 }
 

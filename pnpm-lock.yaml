@@ -78,10 +78,16 @@ importers:
         version: 5.9.2
 
   src/clients/desktop:
-    dependencies:
-      '@jarvis/api-client-ts':
-        specifier: workspace:*
-        version: link:../../../packages/api-client-ts
+    devDependencies:
+      '@electron-forge/cli':
+        specifier: 7.11.2
+        version: 7.11.2(encoding@0.1.13)(esbuild@0.25.0)
+      '@electron-forge/maker-zip':
+        specifier: 7.11.2
+        version: 7.11.2
+      '@electron/asar':
+        specifier: 3.4.1
+        version: 3.4.1
       '@jarvis/contracts-ts':
         specifier: workspace:*
         version: link:../../../packages/contracts-ts
@@ -91,19 +97,6 @@ importers:
       '@microsoft/signalr':
         specifier: 8.0.7
         version: 8.0.7(encoding@0.1.13)
-      react:
-        specifier: 19.1.1
-        version: 19.1.1
-      react-dom:
-        specifier: 19.1.1
-        version: 19.1.1(react@19.1.1)
-    devDependencies:
-      '@electron-forge/cli':
-        specifier: 7.11.2
-        version: 7.11.2(encoding@0.1.13)
-      '@electron-forge/maker-zip':
-        specifier: 7.11.2
-        version: 7.11.2
       '@types/node':
         specifier: 24.3.0
         version: 24.3.0
@@ -116,6 +109,15 @@ importers:
       electron:
         specifier: 44.0.0
         version: 44.0.0
+      esbuild:
+        specifier: 0.25.0
+        version: 0.25.0
+      react:
+        specifier: 19.1.1
+        version: 19.1.1
+      react-dom:
+        specifier: 19.1.1
+        version: 19.1.1(react@19.1.1)
       tsx:
         specifier: 4.19.2
         version: 4.19.2
@@ -6106,9 +6108,9 @@ snapshots:
 
   '@bcoe/v8-coverage@0.2.3': {}
 
-  '@electron-forge/cli@7.11.2(encoding@0.1.13)':
+  '@electron-forge/cli@7.11.2(encoding@0.1.13)(esbuild@0.25.0)':
     dependencies:
-      '@electron-forge/core': 7.11.2(encoding@0.1.13)
+      '@electron-forge/core': 7.11.2(encoding@0.1.13)(esbuild@0.25.0)
       '@electron-forge/core-utils': 7.11.2
       '@electron-forge/shared-types': 7.11.2
       '@electron/get': 3.1.0
@@ -6155,7 +6157,7 @@ snapshots:
       - bluebird
       - supports-color
 
-  '@electron-forge/core@7.11.2(encoding@0.1.13)':
+  '@electron-forge/core@7.11.2(encoding@0.1.13)(esbuild@0.25.0)':
     dependencies:
       '@electron-forge/core-utils': 7.11.2
       '@electron-forge/maker-base': 7.11.2
@@ -6166,7 +6168,7 @@ snapshots:
       '@electron-forge/template-vite': 7.11.2
       '@electron-forge/template-vite-typescript': 7.11.2
       '@electron-forge/template-webpack': 7.11.2
-      '@electron-forge/template-webpack-typescript': 7.11.2
+      '@electron-forge/template-webpack-typescript': 7.11.2(esbuild@0.25.0)
       '@electron-forge/tracer': 7.11.2
       '@electron/get': 3.1.0
       '@electron/packager': 18.4.4
@@ -6284,13 +6286,13 @@ snapshots:
       - bluebird
       - supports-color
 
-  '@electron-forge/template-webpack-typescript@7.11.2':
+  '@electron-forge/template-webpack-typescript@7.11.2(esbuild@0.25.0)':
     dependencies:
       '@electron-forge/shared-types': 7.11.2
       '@electron-forge/template-base': 7.11.2
       fs-extra: 10.1.0
       typescript: 5.4.5
-      webpack: 5.109.2
+      webpack: 5.109.2(esbuild@0.25.0)
     transitivePeerDependencies:
       - '@minify-html/node'
       - '@swc/core'
@@ -10257,13 +10259,15 @@ snapshots:
 
   minimist@1.2.8: {}
 
-  minimizer-webpack-plugin@5.6.1(webpack@5.109.2):
+  minimizer-webpack-plugin@5.6.1(esbuild@0.25.0)(webpack@5.109.2(esbuild@0.25.0)):
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       jest-worker: 27.5.1
       schema-utils: 4.3.3
       terser: 5.50.0
-      webpack: 5.109.2
+      webpack: 5.109.2(esbuild@0.25.0)
+    optionalDependencies:
+      esbuild: 0.25.0
 
   minipass-collect@1.0.2:
     dependencies:
@@ -11511,7 +11515,7 @@ snapshots:
 
   webpack-sources@3.5.1: {}
 
-  webpack@5.109.2:
+  webpack@5.109.2(esbuild@0.25.0):
     dependencies:
       '@types/estree': 1.0.9
       '@types/json-schema': 7.0.15
@@ -11527,7 +11531,7 @@ snapshots:
       events: 3.3.0
       graceful-fs: 4.2.11
       mime-db: 1.54.0
-      minimizer-webpack-plugin: 5.6.1(webpack@5.109.2)
+      minimizer-webpack-plugin: 5.6.1(esbuild@0.25.0)(webpack@5.109.2(esbuild@0.25.0))
       neo-async: 2.6.2
       schema-utils: 4.3.3
       tapable: 2.3.3
