@@ -32,6 +32,35 @@ public sealed class EfDeviceStore(
     private const long DeviceHeartbeatFreshnessMs = 60_000;
     private const long ApprovalLifetimeMs = 5 * 60_000;
 
+    public async Task<DeviceOperation<DeviceListResponse>> ListOwnedAsync(
+        Guid userId,
+        DeviceListQuery query,
+        CancellationToken cancellationToken)
+    {
+        var devices = db.Devices.AsNoTracking().Where(device => device.UserId == userId);
+        if (!string.IsNullOrWhiteSpace(query.DeviceType)
+            && Enum.TryParse<DeviceTypeValue>(query.DeviceType, true, out var deviceType)
+            && Enum.IsDefined(deviceType))
+        {
+            devices = devices.Where(device => device.DeviceType == (DeviceType)deviceType);
+        }
+
+        var entities = await devices
+            .OrderBy(device => device.Name)
+            .ToListAsync(cancellationToken);
+        var items = entities.Select(device => new DeviceSummaryResponse(
+            device.Id,
+            device.Name,
+            (DeviceTypeValue)device.DeviceType,
+            device.Platform,
+            (DeviceStatusValue)device.Status,
+            DeserializeList(device.CapabilitiesJson),
+            device.LastSeenAtMs,
+            device.PairedAtMs,
+            device.Version)).ToArray();
+        return new(DeviceOperationStatus.Succeeded, new DeviceListResponse(items));
+    }
+
     public async Task<DeviceOperation<DeviceRegistrationResponse>> RegisterAsync(
         Guid userId,
         DeviceRegistrationRequest request,

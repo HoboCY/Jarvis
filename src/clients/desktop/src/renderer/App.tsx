@@ -20,6 +20,7 @@ import {
   type DesktopApproval
 } from "./approval-feed.js";
 import { parseDiagnostics, type DesktopDiagnostics } from "./diagnostics.js";
+import { buildDesktopMobilePairingInput, mobilePairingFrom, type MobilePairing } from "./mobile-pairing.js";
 
 type Message = {
   id: string;
@@ -200,6 +201,8 @@ export function App() {
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | undefined>();
   const [backendConnectionState, setBackendConnectionState] = useState("connecting");
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | undefined>();
+  const [mobilePairing, setMobilePairing] = useState<MobilePairing | undefined>();
+  const [creatingMobilePairing, setCreatingMobilePairing] = useState(false);
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
   const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
   const approvalFeed = useRef<DesktopApprovalFeed | undefined>(undefined);
@@ -242,6 +245,19 @@ export function App() {
       setDiagnostics(parseDiagnostics(await window.jarvis.getDiagnostics()));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Diagnostics request failed.");
+    }
+  }
+
+  async function createMobilePairing(): Promise<void> {
+    setCreatingMobilePairing(true);
+    setError(undefined);
+    try {
+      setMobilePairing(mobilePairingFrom(await window.jarvis.createMobilePairing(
+        buildDesktopMobilePairingInput(crypto.randomUUID()))));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Mobile pairing creation failed.");
+    } finally {
+      setCreatingMobilePairing(false);
     }
   }
 
@@ -532,6 +548,18 @@ export function App() {
           <p>Circuits {Object.entries(diagnostics.circuits).map(([name, state]) => `${name}:${state}`).join(" · ") || "none"}</p>
         </section>
       ) : null}
+      <section aria-label="Mobile Pairing">
+        <h2>Mobile 配对</h2>
+        <p>在手机端输入一次性配对码以建立 Mobile Session。</p>
+        <button type="button" onClick={() => void createMobilePairing()} disabled={creatingMobilePairing}>
+          {creatingMobilePairing ? "生成中…" : "生成手机配对码"}
+        </button>
+        {mobilePairing ? (
+          <p>
+            配对码：<code>{mobilePairing.code}</code>（{new Date(mobilePairing.expiresAtMs).toLocaleTimeString()} 前有效）
+          </p>
+        ) : null}
+      </section>
       <div>
         <button type="button" onClick={() => void createConversation()}>新建会话</button>
         <input

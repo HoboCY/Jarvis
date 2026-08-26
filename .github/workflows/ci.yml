@@ -48,6 +48,9 @@ jobs:
       - name: Install TypeScript workspace with frozen lockfile
         run: pnpm install --frozen-lockfile
 
+      - name: Audit package vulnerabilities
+        run: pnpm check:package-audit
+
       - name: Typecheck workspace
         run: pnpm typecheck
 
@@ -59,6 +62,21 @@ jobs:
 
       - name: Build workspace
         run: pnpm build
+
+      - name: Typecheck React Native mobile client
+        run: pnpm --filter @jarvis/mobile typecheck
+
+      - name: Test React Native mobile client
+        run: pnpm --filter @jarvis/mobile test
+
+      - name: Build Android release Metro bundle
+        run: pnpm --filter @jarvis/mobile bundle:android
+
+      - name: Build iOS release Metro bundle
+        run: pnpm --filter @jarvis/mobile bundle:ios
+
+      - name: Verify mobile native configuration and bundle safety
+        run: pnpm check:mobile-native-config -- --require-bundles
 
       - name: Verify OpenAPI generated contract
         run: pnpm check:openapi

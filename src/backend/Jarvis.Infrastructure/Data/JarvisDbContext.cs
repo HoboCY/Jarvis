@@ -7,6 +7,7 @@ using Jarvis.Domain.Outbox;
 using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Memory;
 using Jarvis.Domain.Tasks;
+using Jarvis.Domain.Mobile;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -41,6 +42,10 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
     public DbSet<ConversationSummary> ConversationSummaries => Set<ConversationSummary>();
 
     public DbSet<MemoryFact> MemoryFacts => Set<MemoryFact>();
+
+    public DbSet<MobilePairing> MobilePairings => Set<MobilePairing>();
+
+    public DbSet<MobileSession> MobileSessions => Set<MobileSession>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -324,6 +329,41 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
                 .HasForeignKey(notification => notification.ApprovalId)
                 .OnDelete(DeleteBehavior.Cascade);
             ConfigureVersion(entity.Property(notification => notification.Version));
+        });
+
+        modelBuilder.Entity<MobilePairing>(entity =>
+        {
+            entity.ToTable("MobilePairings");
+            entity.HasKey(pairing => pairing.Id);
+            entity.Property(pairing => pairing.CodeHash).HasMaxLength(128).IsRequired();
+            entity.Property(pairing => pairing.DeviceName).HasMaxLength(200).IsRequired();
+            entity.Property(pairing => pairing.Platform).HasMaxLength(64).IsRequired();
+            entity.Property(pairing => pairing.CapabilitiesJson).HasMaxLength(20_000).IsRequired();
+            entity.HasIndex(pairing => pairing.CodeHash).IsUnique();
+            entity.HasIndex(pairing => new { pairing.UserId, pairing.ExpiresAtMs, pairing.ConsumedAtMs });
+            entity.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(pairing => pairing.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            ConfigureVersion(entity.Property(pairing => pairing.Version));
+        });
+
+        modelBuilder.Entity<MobileSession>(entity =>
+        {
+            entity.ToTable("MobileSessions");
+            entity.HasKey(session => session.Id);
+            entity.Property(session => session.RefreshTokenHash).HasMaxLength(128).IsRequired();
+            entity.HasIndex(session => session.RefreshTokenHash).IsUnique();
+            entity.HasIndex(session => new { session.UserId, session.DeviceId, session.RevokedAtMs });
+            entity.HasOne<User>()
+                .WithMany()
+                .HasForeignKey(session => session.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Device>()
+                .WithMany()
+                .HasForeignKey(session => session.DeviceId)
+                .OnDelete(DeleteBehavior.Cascade);
+            ConfigureVersion(entity.Property(session => session.Version));
         });
     }
 

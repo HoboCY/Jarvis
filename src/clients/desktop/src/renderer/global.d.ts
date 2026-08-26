@@ -3,6 +3,12 @@ interface Window {
     getAppVersion: () => Promise<string>;
     getDiagnostics: () => Promise<unknown>;
     getDesktopDevice: () => Promise<unknown>;
+    createMobilePairing: (input: {
+      deviceName: string;
+      platform: string;
+      capabilities?: string[];
+      idempotencyKey: string;
+    }) => Promise<unknown>;
     createConversation: (input: { title?: string | null; idempotencyKey: string }) => Promise<unknown>;
     getConversation: (conversationId: string) => Promise<unknown>;
     addTypedMessage: (input: {

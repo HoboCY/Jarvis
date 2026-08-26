@@ -1,4 +1,4 @@
-import type { paths } from "@jarvis/contracts-ts";
+import type { components, paths } from "@jarvis/contracts-ts";
 
 export type Phase0HealthResponse =
   paths["/api/v1/phase0/health"]["get"]["responses"][200]["content"]["application/json"];
@@ -48,6 +48,36 @@ export type NotificationListResponse =
   paths["/api/v1/notifications"]["get"]["responses"][200]["content"]["application/json"];
 export type NotificationResponse =
   paths["/api/v1/notifications/{notificationId}/read"]["post"]["responses"][200]["content"]["application/json"];
+export type DeviceListResponse =
+  paths["/api/v1/devices"]["get"]["responses"][200]["content"]["application/json"];
+export type MobilePairingRequest =
+  NonNullable<paths["/api/v1/mobile-pairings"]["post"]["requestBody"]>["content"]["application/json"];
+export type MobilePairingResponse =
+  paths["/api/v1/mobile-pairings"]["post"]["responses"][201]["content"]["application/json"];
+export type MobilePairingExchangeRequest =
+  NonNullable<paths["/api/v1/mobile-pairings/exchange"]["post"]["requestBody"]>["content"]["application/json"];
+export type MobileSessionResponse =
+  paths["/api/v1/mobile-pairings/exchange"]["post"]["responses"][200]["content"]["application/json"];
+export type MobileSessionRefreshRequest =
+  NonNullable<paths["/api/v1/mobile-sessions/refresh"]["post"]["requestBody"]>["content"]["application/json"];
+export type MobileSessionRevokeResponse =
+  paths["/api/v1/mobile-sessions/revoke"]["post"]["responses"][200]["content"]["application/json"];
+export type DeviceSummary =
+  components["schemas"]["DeviceSummaryResponse"];
+export type ConversationResponse =
+  paths["/api/v1/conversations/{conversationId}"]["get"]["responses"][200]["content"]["application/json"];
+export type MessagePageResponse =
+  paths["/api/v1/conversations/{conversationId}/messages"]["get"]["responses"][200]["content"]["application/json"];
+export type TypedMessageRequest =
+  paths["/api/v1/conversations/{conversationId}/messages/typed"]["post"]["requestBody"]["content"]["application/json"];
+export type TypedMessageResponse =
+  paths["/api/v1/conversations/{conversationId}/messages/typed"]["post"]["responses"][200]["content"]["application/json"];
+export type ApprovalListResponse =
+  paths["/api/v1/approvals"]["get"]["responses"][200]["content"]["application/json"];
+export type ApprovalDecisionRequest =
+  NonNullable<paths["/api/v1/approvals/{approvalId}/decision"]["post"]["requestBody"]>["content"]["application/json"];
+export type ApprovalResponse =
+  paths["/api/v1/approvals/{approvalId}/decision"]["post"]["responses"][200]["content"]["application/json"];
 export type CreateMemoryFactRequest =
   paths["/api/v1/memory-facts"]["post"]["requestBody"]["content"]["application/json"];
 export type MemoryFactSaveResponse =
@@ -80,6 +110,121 @@ export async function createTask(
     idempotencyKey,
     options
   ) as Promise<TaskAcceptedResponse>;
+}
+
+export async function createConversation(
+  baseUrl: string,
+  request: NonNullable<paths["/api/v1/conversations"]["post"]["requestBody"]>["content"]["application/json"],
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<ConversationResponse> {
+  return requestJson(new URL("/api/v1/conversations", baseUrl), request, idempotencyKey, options) as Promise<ConversationResponse>;
+}
+
+export async function getConversation(
+  baseUrl: string,
+  conversationId: string,
+  options: ApiRequestOptions = {}
+): Promise<ConversationResponse> {
+  return requestGetJson(
+    new URL(`/api/v1/conversations/${encodeURIComponent(conversationId)}`, baseUrl),
+    options) as Promise<ConversationResponse>;
+}
+
+export async function getConversationMessages(
+  baseUrl: string,
+  conversationId: string,
+  query: { cursor?: string; limit?: number | string } = {},
+  options: ApiRequestOptions = {}
+): Promise<MessagePageResponse> {
+  const url = new URL(`/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`, baseUrl);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+  return requestGetJson(url, options) as Promise<MessagePageResponse>;
+}
+
+export async function addTypedConversationMessage(
+  baseUrl: string,
+  conversationId: string,
+  request: TypedMessageRequest,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<TypedMessageResponse> {
+  return requestJson(
+    new URL(`/api/v1/conversations/${encodeURIComponent(conversationId)}/messages/typed`, baseUrl),
+    request,
+    idempotencyKey,
+    options) as Promise<TypedMessageResponse>;
+}
+
+export async function listDevices(
+  baseUrl: string,
+  deviceType?: "desktop" | "mobile" | "server",
+  options: ApiRequestOptions = {}
+): Promise<DeviceListResponse> {
+  const url = new URL("/api/v1/devices", baseUrl);
+  if (deviceType) {
+    url.searchParams.set("deviceType", deviceType);
+  }
+  return requestGetJson(url, options) as Promise<DeviceListResponse>;
+}
+
+export async function createMobilePairing(
+  baseUrl: string,
+  request: MobilePairingRequest,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<MobilePairingResponse> {
+  return requestJson(new URL("/api/v1/mobile-pairings", baseUrl), request, idempotencyKey, options) as Promise<MobilePairingResponse>;
+}
+
+export async function exchangeMobilePairing(
+  baseUrl: string,
+  request: MobilePairingExchangeRequest,
+  options: ApiRequestOptions = {}
+): Promise<MobileSessionResponse> {
+  return requestJson(new URL("/api/v1/mobile-pairings/exchange", baseUrl), request, undefined, options) as Promise<MobileSessionResponse>;
+}
+
+export async function refreshMobileSession(
+  baseUrl: string,
+  request: MobileSessionRefreshRequest,
+  options: ApiRequestOptions = {}
+): Promise<MobileSessionResponse> {
+  return requestJson(new URL("/api/v1/mobile-sessions/refresh", baseUrl), request, undefined, options) as Promise<MobileSessionResponse>;
+}
+
+export async function revokeMobileSession(
+  baseUrl: string,
+  options: ApiRequestOptions = {}
+): Promise<MobileSessionRevokeResponse> {
+  return requestJson(new URL("/api/v1/mobile-sessions/revoke", baseUrl), {}, undefined, options) as Promise<MobileSessionRevokeResponse>;
+}
+
+export async function listPendingApprovals(
+  baseUrl: string,
+  options: ApiRequestOptions = {}
+): Promise<ApprovalListResponse> {
+  const url = new URL("/api/v1/approvals", baseUrl);
+  url.searchParams.set("status", "pending");
+  return requestGetJson(url, options) as Promise<ApprovalListResponse>;
+}
+
+export async function decideApproval(
+  baseUrl: string,
+  approvalId: string,
+  request: ApprovalDecisionRequest,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<ApprovalResponse> {
+  return requestJson(
+    new URL(`/api/v1/approvals/${encodeURIComponent(approvalId)}/decision`, baseUrl),
+    request,
+    idempotencyKey,
+    options) as Promise<ApprovalResponse>;
 }
 
 export async function getTask(
@@ -256,14 +401,14 @@ export async function ingestRealtimeEvents(
 async function requestJson(
   url: URL,
   body: unknown,
-  idempotencyKey: string,
+  idempotencyKey: string | undefined,
   options: ApiRequestOptions
 ): Promise<unknown> {
   const fetcher = options.fetcher ?? fetch;
-  const headers = new Headers({
-    "Content-Type": "application/json",
-    "Idempotency-Key": idempotencyKey
-  });
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (idempotencyKey) {
+    headers.set("Idempotency-Key", idempotencyKey);
+  }
   if (options.bearerToken) {
     headers.set("Authorization", `Bearer ${options.bearerToken}`);
   }

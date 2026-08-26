@@ -1,0 +1,8 @@
+node_modules/
+Pods/
+build/
+*.xcworkspace/
+android/app/build/
+android/.gradle/
+android/app/src/main/assets/*.bundle
+ios/main.jsbundle

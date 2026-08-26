@@ -51,6 +51,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -76,6 +79,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -111,6 +117,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -134,6 +143,64 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/devices": {
+      "get": {
+        "tags": [
+          "DeviceEndpoints"
+        ],
+        "summary": "Lists the authenticated user's safe device projections.",
+        "operationId": "ListDevices",
+        "parameters": [
+          {
+            "name": "deviceType",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
+          }
+        ]
       }
     },
     "/api/v1/devices/register": {
@@ -213,6 +280,271 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mobile-pairings": {
+      "post": {
+        "tags": [
+          "MobilePairingEndpoints"
+        ],
+        "summary": "Creates a short-lived one-time mobile pairing code for the local user.",
+        "operationId": "CreateMobilePairing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MobilePairingRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobilePairingResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mobile-pairings/exchange": {
+      "post": {
+        "tags": [
+          "MobilePairingEndpoints"
+        ],
+        "summary": "Consumes a one-time mobile pairing code and creates a mobile session.",
+        "operationId": "ExchangeMobilePairing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MobilePairingExchangeRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mobile-sessions/refresh": {
+      "post": {
+        "tags": [
+          "MobilePairingEndpoints"
+        ],
+        "summary": "Rotates a mobile refresh token and returns a new in-memory access token.",
+        "operationId": "RefreshMobileSession",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MobileSessionRefreshRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/mobile-sessions/revoke": {
+      "post": {
+        "tags": [
+          "MobilePairingEndpoints"
+        ],
+        "summary": "Revokes the current mobile session.",
+        "operationId": "RevokeMobileSession",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSessionRevokeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -289,6 +621,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -346,6 +681,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -437,6 +775,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -532,6 +873,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -684,6 +1028,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -779,6 +1126,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -874,6 +1224,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -969,6 +1322,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1055,6 +1411,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       },
@@ -1134,6 +1493,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1190,6 +1552,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1274,6 +1639,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1336,6 +1704,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1420,6 +1791,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1504,6 +1878,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1588,6 +1965,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1674,6 +2054,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1759,6 +2142,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1803,6 +2189,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -1903,6 +2292,9 @@
         "security": [
           {
             "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
           }
         ]
       }
@@ -3149,6 +3541,20 @@
           }
         }
       },
+      "DeviceListResponse": {
+        "required": [
+          "items"
+        ],
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceSummaryResponse"
+            }
+          }
+        }
+      },
       "DeviceRegistrationRequest": {
         "required": [
           "name",
@@ -3237,6 +3643,69 @@
           "offline",
           "disabled"
         ]
+      },
+      "DeviceSummaryResponse": {
+        "required": [
+          "deviceId",
+          "name",
+          "deviceType",
+          "platform",
+          "status",
+          "capabilities",
+          "lastSeenAtMs",
+          "pairedAtMs",
+          "entityVersion"
+        ],
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "deviceType": {
+            "$ref": "#/components/schemas/DeviceTypeValue"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeviceStatusValue"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lastSeenAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "pairedAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "entityVersion": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
       },
       "DeviceTaskClaimRequest": {
         "type": "object",
@@ -3809,6 +4278,162 @@
           "interrupted",
           "failed"
         ]
+      },
+      "MobilePairingExchangeRequest": {
+        "required": [
+          "code"
+        ],
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "deviceName": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "platform": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "capabilities": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MobilePairingRequest": {
+        "required": [
+          "deviceName",
+          "platform"
+        ],
+        "type": "object",
+        "properties": {
+          "deviceName": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MobilePairingResponse": {
+        "required": [
+          "pairingId",
+          "code",
+          "expiresAtMs"
+        ],
+        "type": "object",
+        "properties": {
+          "pairingId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "expiresAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "MobileSessionRefreshRequest": {
+        "required": [
+          "sessionId",
+          "refreshToken"
+        ],
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "refreshToken": {
+            "type": "string"
+          }
+        }
+      },
+      "MobileSessionResponse": {
+        "required": [
+          "sessionId",
+          "deviceId",
+          "accessToken",
+          "accessTokenExpiresAtMs",
+          "refreshToken",
+          "refreshTokenExpiresAtMs"
+        ],
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "accessToken": {
+            "type": "string"
+          },
+          "accessTokenExpiresAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "refreshToken": {
+            "type": "string"
+          },
+          "refreshTokenExpiresAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "MobileSessionRevokeResponse": {
+        "required": [
+          "sessionId",
+          "revoked"
+        ],
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revoked": {
+            "type": "boolean"
+          }
+        }
       },
       "NotificationListResponse": {
         "required": [
@@ -4796,6 +5421,10 @@
       "DeviceBearer": {
         "type": "http",
         "scheme": "bearer"
+      },
+      "MobileBearer": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   },
@@ -4808,6 +5437,9 @@
     },
     {
       "name": "DeviceEndpoints"
+    },
+    {
+      "name": "MobilePairingEndpoints"
     },
     {
       "name": "ConversationEndpoints"

@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Jarvis.Api.Authentication;
 using Jarvis.Application.Realtime;
 using Jarvis.Contracts;
 
@@ -8,14 +9,16 @@ public static class RealtimeEndpoints
 {
     public static IEndpointRouteBuilder MapRealtimeEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        var realtime = endpoints.MapGroup("/api/v1/realtime").RequireAuthorization();
+        var realtime = endpoints.MapGroup("/api/v1/realtime");
         realtime.MapPost("/desktop-device", GetDesktopDeviceAsync)
+            .RequireAuthorization(AuthenticationConstants.LocalOnlyPolicy)
             .WithName("GetDesktopRealtimeDevice")
             .WithSummary("Returns the authenticated local user's seeded Desktop device.")
             .Produces<DesktopDeviceBootstrapResponse>()
             .ProducesProblem(StatusCodes.Status401Unauthorized);
 
         realtime.MapPost("/client-secrets", CreateClientSecretAsync)
+            .RequireAuthorization()
             .WithName("CreateRealtimeClientSecret")
             .WithSummary("Creates a short-lived Realtime client secret for an owned conversation and Desktop device.")
             .RequireRateLimiting("realtime-client-secret")
@@ -28,6 +31,7 @@ public static class RealtimeEndpoints
             .ProducesProblem(StatusCodes.Status502BadGateway);
 
         realtime.MapPost("/sessions/{sessionId:guid}/connected", MarkConnectedAsync)
+            .RequireAuthorization()
             .WithName("MarkRealtimeSessionConnected")
             .WithSummary("Records that the Desktop connected its ephemeral Realtime session.")
             .Produces<RealtimeSessionResponse>()
@@ -37,6 +41,7 @@ public static class RealtimeEndpoints
             .ProducesProblem(StatusCodes.Status409Conflict);
 
         realtime.MapPost("/sessions/{sessionId:guid}/ended", MarkEndedAsync)
+            .RequireAuthorization()
             .WithName("MarkRealtimeSessionEnded")
             .WithSummary("Records a Realtime session disconnect, rotation, or failure.")
             .Produces<RealtimeSessionResponse>()
@@ -45,8 +50,9 @@ public static class RealtimeEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status409Conflict);
 
-        var conversations = endpoints.MapGroup("/api/v1/conversations").RequireAuthorization();
+        var conversations = endpoints.MapGroup("/api/v1/conversations");
         conversations.MapPost("/{conversationId:guid}/realtime-events:ingest", IngestEventsAsync)
+            .RequireAuthorization()
             .WithName("IngestRealtimeEvents")
             .WithSummary("Persists versioned normalized Realtime events into an owned conversation.")
             .Produces<RealtimeEventsIngestResponse>()

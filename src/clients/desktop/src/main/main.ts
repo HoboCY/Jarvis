@@ -167,6 +167,14 @@ function requiredStringArray(value: unknown, name: string, maxItems = 100): stri
   return value.map(item => requiredString(item, name));
 }
 
+function optionalStringArray(value: unknown, name: string, maxItems = 100): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  return requiredStringArray(value, name, maxItems);
+}
+
 function requiredUuidArray(value: unknown, name: string, maxItems = 100): string[] {
   return requiredStringArray(value, name, maxItems).map(item => {
     if (!isUuid(item)) {
@@ -422,6 +430,18 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
     ipcMain.handle("backend:getDesktopDevice", () =>
       requestBackend("/api/v1/realtime/desktop-device", "POST", {}, randomUUID()));
+    ipcMain.handle("backend:createMobilePairing", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      return requestBackend(
+        "/api/v1/mobile-pairings",
+        "POST",
+        {
+          deviceName: requiredString(input.deviceName, "deviceName"),
+          platform: requiredString(input.platform, "platform", 64),
+          capabilities: optionalStringArray(input.capabilities, "capabilities", 50)
+        },
+        requiredString(input.idempotencyKey, "idempotencyKey"));
+    });
     ipcMain.handle("backend:createConversation", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(

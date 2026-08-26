@@ -1,3 +1,16 @@
 packages:
-  - "packages/*"
-  - "src/clients/desktop"
+  - packages/*
+  - src/clients/desktop
+  - src/clients/mobile
+
+auditConfig:
+  ignoreCves:
+    - CVE-2025-71330
+    - CVE-2025-71329
+    - CVE-2026-56876
+
+overrides:
+  '@babel/core@<=7.29.0': 7.29.7
+  esbuild@<=0.24.2: 0.25.0
+  tar@<=7.5.20: 7.5.22
+  tmp@<0.2.6: 0.2.7

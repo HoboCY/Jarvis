@@ -46,7 +46,10 @@ public sealed class LocalBearerAuthenticationHandler(
         var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expectedToken));
         if (!CryptographicOperations.FixedTimeEquals(suppliedHash, expectedHash))
         {
-            return Task.FromResult(AuthenticateResult.Fail("Invalid bearer token."));
+            // The UI policy also evaluates MobileBearer. Let that scheme
+            // authenticate a mobile access token without turning LocalBearer's
+            // expected mismatch into a competing failure.
+            return Task.FromResult(AuthenticateResult.NoResult());
         }
 
         if (localUser.UserId is not Guid userId)

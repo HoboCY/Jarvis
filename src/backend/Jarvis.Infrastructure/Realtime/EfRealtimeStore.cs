@@ -45,7 +45,7 @@ public sealed class EfRealtimeStore(
         var device = await db.Devices.AsNoTracking().SingleOrDefaultAsync(
             candidate => candidate.Id == request.DeviceId
                 && candidate.UserId == userId
-                && candidate.DeviceType == DeviceType.Desktop
+                && (candidate.DeviceType == DeviceType.Desktop || candidate.DeviceType == DeviceType.Mobile)
                 && candidate.Status != DeviceStatus.Disabled,
             cancellationToken);
         if (device is null)
@@ -210,7 +210,7 @@ public sealed class EfRealtimeStore(
         var ownsDevice = await db.Devices.AnyAsync(
             device => device.Id == bootstrap.DeviceId
                 && device.UserId == userId
-                && device.DeviceType == DeviceType.Desktop
+                && (device.DeviceType == DeviceType.Desktop || device.DeviceType == DeviceType.Mobile)
                 && device.Status != DeviceStatus.Disabled,
             cancellationToken);
         if (!ownsConversation || !ownsDevice)

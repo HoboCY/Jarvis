@@ -511,6 +511,107 @@ namespace Jarvis.Infrastructure.Data.Migrations
                     b.ToTable("MemoryFacts", (string)null);
                 });
 
+            modelBuilder.Entity("Jarvis.Domain.Mobile.MobilePairing", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CapabilitiesJson")
+                        .IsRequired()
+                        .HasMaxLength(20000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CodeHash")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ConsumedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DeviceName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ExpiresAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Platform")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CodeHash")
+                        .IsUnique();
+
+                    b.HasIndex("UserId", "ExpiresAtMs", "ConsumedAtMs");
+
+                    b.ToTable("MobilePairings", (string)null);
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Mobile.MobileSession", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("DeviceId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("LastRefreshedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RefreshTokenExpiresAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RefreshTokenHash")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("RevokedAtMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0L);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DeviceId");
+
+                    b.HasIndex("RefreshTokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("UserId", "DeviceId", "RevokedAtMs");
+
+                    b.ToTable("MobileSessions", (string)null);
+                });
+
             modelBuilder.Entity("Jarvis.Domain.Notifications.Notification", b =>
                 {
                     b.Property<Guid>("Id")
@@ -982,6 +1083,30 @@ namespace Jarvis.Infrastructure.Data.Migrations
                         .WithMany()
                         .HasForeignKey("SupersedesMemoryId")
                         .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Jarvis.Domain.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Mobile.MobilePairing", b =>
+                {
+                    b.HasOne("Jarvis.Domain.Identity.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Jarvis.Domain.Mobile.MobileSession", b =>
+                {
+                    b.HasOne("Jarvis.Domain.Devices.Device", null)
+                        .WithMany()
+                        .HasForeignKey("DeviceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.HasOne("Jarvis.Domain.Identity.User", null)
                         .WithMany()

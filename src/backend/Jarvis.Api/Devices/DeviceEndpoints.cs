@@ -9,8 +9,16 @@ public static class DeviceEndpoints
 {
     public static IEndpointRouteBuilder MapDeviceEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapPost("/api/v1/devices/register", RegisterAsync)
+        endpoints.MapGet("/api/v1/devices", ListOwnedAsync)
             .RequireAuthorization()
+            .WithName("ListDevices")
+            .WithSummary("Lists the authenticated user's safe device projections.")
+            .Produces<DeviceListResponse>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status401Unauthorized);
+
+        endpoints.MapPost("/api/v1/devices/register", RegisterAsync)
+            .RequireAuthorization(AuthenticationConstants.LocalOnlyPolicy)
             .WithName("RegisterDevice")
             .Produces<DeviceRegistrationResponse>(StatusCodes.Status201Created)
             .ProducesProblem(StatusCodes.Status400BadRequest)
@@ -69,6 +77,26 @@ public static class DeviceEndpoints
             .ProducesProblem(StatusCodes.Status401Unauthorized)
             .ProducesProblem(StatusCodes.Status404NotFound);
         return endpoints;
+    }
+
+    private static async Task<IResult> ListOwnedAsync(
+        HttpContext httpContext,
+        DeviceCoordinationService service,
+        string? deviceType,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(httpContext, out var userId))
+        {
+            return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "Authentication is required.");
+        }
+
+        var result = await service.ListOwnedAsync(userId, deviceType, cancellationToken);
+        return result.Status switch
+        {
+            DeviceOperationStatus.Succeeded => TypedResults.Ok(result.Value),
+            DeviceOperationStatus.Invalid => Problem(StatusCodes.Status400BadRequest, "Invalid device filter", result.Detail),
+            _ => Problem(StatusCodes.Status500InternalServerError, "Device list failed", "The device list could not be read.")
+        };
     }
 
     private static async Task<IResult> RegisterAsync(

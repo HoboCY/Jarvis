@@ -69,6 +69,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Lists the authenticated user's safe device projections. */
+        get: operations["ListDevices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/devices/register": {
         parameters: {
             query?: never;
@@ -79,6 +96,74 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["RegisterDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-pairings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Creates a short-lived one-time mobile pairing code for the local user. */
+        post: operations["CreateMobilePairing"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-pairings/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Consumes a one-time mobile pairing code and creates a mobile session. */
+        post: operations["ExchangeMobilePairing"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-sessions/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rotates a mobile refresh token and returns a new in-memory access token. */
+        post: operations["RefreshMobileSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mobile-sessions/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revokes the current mobile session. */
+        post: operations["RevokeMobileSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -701,6 +786,9 @@ export interface components {
             /** Format: int64 */
             entityVersion: number | string;
         };
+        DeviceListResponse: {
+            items: components["schemas"]["DeviceSummaryResponse"][];
+        };
         DeviceRegistrationRequest: {
             name: string;
             deviceType: components["schemas"]["DeviceTypeValue"];
@@ -722,6 +810,21 @@ export interface components {
         };
         /** @enum {unknown} */
         DeviceStatusValue: "online" | "offline" | "disabled";
+        DeviceSummaryResponse: {
+            /** Format: uuid */
+            deviceId: string;
+            name: string;
+            deviceType: components["schemas"]["DeviceTypeValue"];
+            platform: string;
+            status: components["schemas"]["DeviceStatusValue"];
+            capabilities: string[];
+            /** Format: int64 */
+            lastSeenAtMs: null | number | string;
+            /** Format: int64 */
+            pairedAtMs: number | string;
+            /** Format: int64 */
+            entityVersion: number | string;
+        };
         DeviceTaskClaimRequest: {
             leaseOwner?: null | string;
             capabilityEnvelope?: null | components["schemas"]["CapabilityEnvelopeContract"];
@@ -854,6 +957,46 @@ export interface components {
         MessageRoleValue: "user" | "assistant" | "tool" | "system";
         /** @enum {unknown} */
         MessageStatusValue: "pending" | "streaming" | "completed" | "interrupted" | "failed";
+        MobilePairingExchangeRequest: {
+            code: string;
+            deviceName?: null | string;
+            platform?: null | string;
+            capabilities?: null | string[];
+        };
+        MobilePairingRequest: {
+            deviceName: string;
+            platform: string;
+            capabilities?: null | string[];
+        };
+        MobilePairingResponse: {
+            /** Format: uuid */
+            pairingId: string;
+            code: string;
+            /** Format: int64 */
+            expiresAtMs: number | string;
+        };
+        MobileSessionRefreshRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            refreshToken: string;
+        };
+        MobileSessionResponse: {
+            /** Format: uuid */
+            sessionId: string;
+            /** Format: uuid */
+            deviceId: string;
+            accessToken: string;
+            /** Format: int64 */
+            accessTokenExpiresAtMs: number | string;
+            refreshToken: string;
+            /** Format: int64 */
+            refreshTokenExpiresAtMs: number | string;
+        };
+        MobileSessionRevokeResponse: {
+            /** Format: uuid */
+            sessionId: string;
+            revoked: boolean;
+        };
         NotificationListResponse: {
             items: components["schemas"]["NotificationResponse"][];
         };
@@ -1201,6 +1344,46 @@ export interface operations {
             };
         };
     };
+    ListDevices: {
+        parameters: {
+            query?: {
+                deviceType?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceListResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
     RegisterDevice: {
         parameters: {
             query?: never;
@@ -1245,6 +1428,206 @@ export interface operations {
             };
             /** @description Conflict */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CreateMobilePairing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["MobilePairingRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobilePairingResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    ExchangeMobilePairing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["MobilePairingExchangeRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    RefreshMobileSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["MobileSessionRefreshRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    RevokeMobileSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileSessionRevokeResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

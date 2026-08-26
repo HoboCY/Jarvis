@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { ScriptedRealtimeTransport } from "@openai/agents/realtime/testing";
-import { RealtimeSession } from "@openai/agents/realtime";
+import { ScriptedRealtimeTransport } from "@openai/agents-realtime/testing";
+import { RealtimeSession } from "@openai/agents-realtime";
 import {
   SessionRotationStateMachine,
   createRealtimeAgent,

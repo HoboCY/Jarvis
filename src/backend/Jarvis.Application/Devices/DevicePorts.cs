@@ -16,8 +16,15 @@ public enum DeviceOperationStatus
 
 public sealed record DeviceOperation<T>(DeviceOperationStatus Status, T? Value = default, string? Detail = null);
 
+public sealed record DeviceListQuery(string? DeviceType = null);
+
 public interface IDeviceStore
 {
+    Task<DeviceOperation<DeviceListResponse>> ListOwnedAsync(
+        Guid userId,
+        DeviceListQuery query,
+        CancellationToken cancellationToken);
+
     Task<DeviceOperation<DeviceRegistrationResponse>> RegisterAsync(
         Guid userId,
         DeviceRegistrationRequest request,
@@ -82,6 +89,30 @@ public sealed class DeviceCoordinationService(IDeviceStore store)
         "task.failed",
         "task.cancelled"
     };
+
+    public Task<DeviceOperation<DeviceListResponse>> ListOwnedAsync(
+        Guid userId,
+        string? deviceType,
+        CancellationToken cancellationToken)
+    {
+        if (userId == Guid.Empty)
+        {
+            return Task.FromResult(new DeviceOperation<DeviceListResponse>(
+                DeviceOperationStatus.Invalid,
+                Detail: "User identity is invalid."));
+        }
+
+        if (!string.IsNullOrWhiteSpace(deviceType)
+            && (!Enum.TryParse<DeviceTypeValue>(deviceType, true, out var parsed)
+                || !Enum.IsDefined(parsed)))
+        {
+            return Task.FromResult(new DeviceOperation<DeviceListResponse>(
+                DeviceOperationStatus.Invalid,
+                Detail: "deviceType is invalid."));
+        }
+
+        return store.ListOwnedAsync(userId, new DeviceListQuery(deviceType?.Trim()), cancellationToken);
+    }
 
     public Task<DeviceOperation<DeviceRegistrationResponse>> RegisterAsync(
         Guid userId,

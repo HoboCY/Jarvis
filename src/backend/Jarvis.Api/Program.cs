@@ -10,9 +10,11 @@ using Jarvis.Api.Realtime;
 using Jarvis.Api.Tasks;
 using Jarvis.Api.Notifications;
 using Jarvis.Api.Memory;
+using Jarvis.Api.Mobile;
 using Jarvis.Api.Observability;
 using Jarvis.Api.Diagnostics;
 using Jarvis.Application.Outbox;
+using Jarvis.Application.Mobile;
 using Jarvis.Contracts;
 using Jarvis.Infrastructure;
 using Jarvis.Infrastructure.Data;
@@ -52,9 +54,14 @@ builder.Services.AddOpenApi(options =>
             Type = SecuritySchemeType.Http,
             Scheme = "bearer"
         };
+        document.Components.SecuritySchemes["MobileBearer"] = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer"
+        };
         return Task.CompletedTask;
     });
-    options.AddOperationTransformer((operation, _, _) =>
+    options.AddOperationTransformer((operation, context, _) =>
     {
         if (operation.OperationId is "CreateConversation"
             or "AddTypedConversationMessage"
@@ -122,6 +129,9 @@ builder.Services.AddOpenApi(options =>
                 "api/v1/devices/register",
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.Equals(
+                "api/v1/devices",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.Equals(
                 "api/v1/diagnostics",
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.StartsWith(
@@ -133,11 +143,52 @@ builder.Services.AddOpenApi(options =>
                 new OpenApiSecurityRequirement
                 {
                     [new OpenApiSecuritySchemeReference("LocalBearer", context.Document, null)] = []
+                },
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("MobileBearer", context.Document, null)] = []
                 }
             ];
         }
 
         if (context.Description.RelativePath?.StartsWith("api/v1/approvals", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            operation.Security =
+            [
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("LocalBearer", context.Document, null)] = []
+                },
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("MobileBearer", context.Document, null)] = []
+                }
+            ];
+        }
+
+        if (context.Description.RelativePath?.Equals("api/v1/mobile-pairings", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            operation.Security =
+            [
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("LocalBearer", context.Document, null)] = []
+                }
+            ];
+        }
+
+        if (context.Description.RelativePath?.Equals("api/v1/mobile-sessions/revoke", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            operation.Security =
+            [
+                new OpenApiSecurityRequirement
+                {
+                    [new OpenApiSecuritySchemeReference("MobileBearer", context.Document, null)] = []
+                }
+            ];
+        }
+
+        if (context.Description.RelativePath?.Equals("api/v1/realtime/desktop-device", StringComparison.OrdinalIgnoreCase) == true)
         {
             operation.Security =
             [
@@ -175,13 +226,32 @@ builder.Services
         "Authentication:BearerToken must be configured and contain at least 32 characters.")
     .ValidateOnStart();
 builder.Services
-    .AddAuthentication("LocalBearer")
-    .AddScheme<AuthenticationSchemeOptions, LocalBearerAuthenticationHandler>("LocalBearer", _ => { });
-builder.Services
-    .AddAuthentication()
+    .AddAuthentication(AuthenticationConstants.UiScheme)
+    .AddScheme<AuthenticationSchemeOptions, LocalBearerAuthenticationHandler>(AuthenticationConstants.UiScheme, _ => { })
+    .AddScheme<AuthenticationSchemeOptions, MobileBearerAuthenticationHandler>(AuthenticationConstants.MobileScheme, _ => { })
     .AddScheme<AuthenticationSchemeOptions, DeviceCredentialAuthenticationHandler>(AuthenticationConstants.DeviceScheme, _ => { });
 builder.Services.AddAuthorization(options =>
 {
+    options.DefaultPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder(
+            AuthenticationConstants.UiScheme,
+            AuthenticationConstants.MobileScheme)
+        .RequireAuthenticatedUser()
+        .Build();
+    options.AddPolicy(AuthenticationConstants.UiPolicy, policy =>
+    {
+        policy.AddAuthenticationSchemes(AuthenticationConstants.UiScheme, AuthenticationConstants.MobileScheme);
+        policy.RequireAuthenticatedUser();
+    });
+    options.AddPolicy(AuthenticationConstants.LocalOnlyPolicy, policy =>
+    {
+        policy.AddAuthenticationSchemes(AuthenticationConstants.UiScheme);
+        policy.RequireAuthenticatedUser();
+    });
+    options.AddPolicy(AuthenticationConstants.MobileOnlyPolicy, policy =>
+    {
+        policy.AddAuthenticationSchemes(AuthenticationConstants.MobileScheme);
+        policy.RequireAuthenticatedUser();
+    });
     options.AddPolicy(AuthenticationConstants.DevicePolicy, policy =>
     {
         policy.AddAuthenticationSchemes(AuthenticationConstants.DeviceScheme);
@@ -213,6 +283,30 @@ builder.Services.AddRateLimiter(options =>
             _ => new FixedWindowRateLimiterOptions
             {
                 PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+    options.AddPolicy("mobile-pairing-exchange", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = context.RequestServices
+                    .GetRequiredService<Microsoft.Extensions.Options.IOptions<MobileSessionOptions>>()
+                    .Value.ExchangePermitLimit,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+    options.AddPolicy("mobile-session-refresh", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.Connection.RemoteIpAddress?.ToString() ?? "anonymous",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = context.RequestServices
+                    .GetRequiredService<Microsoft.Extensions.Options.IOptions<MobileSessionOptions>>()
+                    .Value.RefreshPermitLimit,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 AutoReplenishment = true
@@ -249,6 +343,7 @@ app.MapNotificationEndpoints();
 app.MapMemoryEndpoints();
 app.MapApprovalEndpoints();
 app.MapDeviceEndpoints();
+app.MapMobilePairingEndpoints();
 app.MapHub<ClientHub>("/hubs/client").RequireAuthorization();
 app.MapHub<DeviceHub>("/hubs/device").RequireAuthorization(AuthenticationConstants.DevicePolicy);
 

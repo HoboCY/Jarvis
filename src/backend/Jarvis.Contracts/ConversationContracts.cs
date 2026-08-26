@@ -489,6 +489,47 @@ public enum DeviceStatusValue
     Disabled
 }
 
+public sealed record DeviceSummaryResponse(
+    Guid DeviceId,
+    string Name,
+    DeviceTypeValue DeviceType,
+    string Platform,
+    DeviceStatusValue Status,
+    IReadOnlyList<string> Capabilities,
+    long? LastSeenAtMs,
+    long PairedAtMs,
+    long EntityVersion);
+
+public sealed record DeviceListResponse(IReadOnlyList<DeviceSummaryResponse> Items);
+
+public sealed record MobilePairingRequest(
+    string DeviceName,
+    string Platform,
+    IReadOnlyList<string>? Capabilities = null);
+
+public sealed record MobilePairingResponse(
+    Guid PairingId,
+    string Code,
+    long ExpiresAtMs);
+
+public sealed record MobilePairingExchangeRequest(
+    string Code,
+    string? DeviceName = null,
+    string? Platform = null,
+    IReadOnlyList<string>? Capabilities = null);
+
+public sealed record MobileSessionResponse(
+    Guid SessionId,
+    Guid DeviceId,
+    string AccessToken,
+    long AccessTokenExpiresAtMs,
+    string RefreshToken,
+    long RefreshTokenExpiresAtMs);
+
+public sealed record MobileSessionRefreshRequest(Guid SessionId, string RefreshToken);
+
+public sealed record MobileSessionRevokeResponse(Guid SessionId, bool Revoked);
+
 public sealed record OutboxEventEnvelope(
     Guid EventId,
     long OccurredAt,

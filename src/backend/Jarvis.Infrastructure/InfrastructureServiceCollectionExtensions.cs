@@ -3,6 +3,7 @@ using Jarvis.Application.Approvals;
 using Jarvis.Application.Devices;
 using Jarvis.Application.Identity;
 using Jarvis.Application.Memory;
+using Jarvis.Application.Mobile;
 using Jarvis.Application.Notifications;
 using Jarvis.Application.Realtime;
 using Jarvis.Application.Responses;
@@ -16,6 +17,7 @@ using Jarvis.Infrastructure.Realtime;
 using Jarvis.Infrastructure.Tasks;
 using Jarvis.Infrastructure.Devices;
 using Jarvis.Infrastructure.Memory;
+using Jarvis.Infrastructure.Mobile;
 using Jarvis.Infrastructure.Responses;
 using Jarvis.Infrastructure.Summaries;
 using Jarvis.Infrastructure.Resilience;
@@ -51,6 +53,21 @@ public static class InfrastructureServiceCollectionExtensions
             options.AddInterceptors(serviceProvider.GetServices<DbCommandInterceptor>());
         });
         services.AddSingleton<LocalUserIdentity>();
+        services.AddOptions<MobileSessionOptions>()
+            .Bind(configuration.GetSection(MobileSessionOptions.SectionName))
+            .Validate(options => options.PairingLifetimeMs is >= 60_000 and <= 3_600_000, "MobileSession:PairingLifetimeMs must be between one and sixty minutes.")
+            .Validate(options => options.AccessTokenLifetimeMs is >= 60_000 and <= 3_600_000, "MobileSession:AccessTokenLifetimeMs must be between one and sixty minutes.")
+            .Validate(options => options.RefreshTokenLifetimeMs is >= 3_600_000 and <= 365L * 24 * 60 * 60_000, "MobileSession:RefreshTokenLifetimeMs is outside the supported range.")
+            .Validate(options => options.ExchangePermitLimit is >= 1 and <= 100, "MobileSession:ExchangePermitLimit must be between 1 and 100.")
+            .Validate(options => options.RefreshPermitLimit is >= 1 and <= 100, "MobileSession:RefreshPermitLimit must be between 1 and 100.")
+            .ValidateOnStart();
+        services.AddSingleton<IMobileAccessTokenStore, InMemoryMobileAccessTokenStore>();
+        services.AddScoped<IMobilePairingStore, EfMobilePairingStore>();
+        services.AddScoped<MobileSessionService>(serviceProvider => new MobileSessionService(
+            serviceProvider.GetRequiredService<IMobilePairingStore>(),
+            serviceProvider.GetRequiredService<IMobileAccessTokenStore>(),
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<MobileSessionOptions>>().Value));
         services.AddOptions<ResilienceOptions>()
             .Bind(configuration.GetSection(ResilienceOptions.SectionName))
             .Validate(options => options.MaxRetryAttempts is >= 0 and <= 5, "Resilience:MaxRetryAttempts must be between 0 and 5.")

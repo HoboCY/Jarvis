@@ -4,7 +4,7 @@ import {
   type RealtimeSessionOptions,
   type RealtimeTransportLayer,
   tool
-} from "@openai/agents/realtime";
+} from "@openai/agents-realtime";
 import { z } from "zod";
 
 export const realtimeToolNames = ["delegate_task", "get_task_status", "cancel_task", "remember_fact"] as const;
