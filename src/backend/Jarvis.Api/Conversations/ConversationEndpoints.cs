@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using Jarvis.Application.Conversations;
 using Jarvis.Contracts;
+using Jarvis.Infrastructure.Observability;
+using System.Diagnostics;
 
 namespace Jarvis.Api.Conversations;
 
@@ -130,12 +132,19 @@ public static class ConversationEndpoints
             return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "Authentication is required.");
         }
 
+        var startedAt = Stopwatch.GetTimestamp();
         var result = await service.AddTypedMessageAsync(
             userId,
             conversationId,
             httpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(),
             request,
             cancellationToken);
+        if (result.Status is ConversationOperationStatus.Succeeded or ConversationOperationStatus.Replayed)
+        {
+            JarvisTelemetry.RealtimeTypedMessageDuration.Record(
+                Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                JarvisTelemetry.BoundedTags(("operation", "typed_message")).ToArray());
+        }
         return result.Status switch
         {
             ConversationOperationStatus.Succeeded => TypedResults.Ok(result.Value),

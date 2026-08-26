@@ -4,6 +4,54 @@
  */
 
 export interface paths {
+    "/api/v1/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["GetDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/health/live": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["HealthLive"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/health/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["HealthReady"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/phase0/health": {
         parameters: {
             query?: never;
@@ -725,6 +773,41 @@ export interface components {
         };
         /** @enum {unknown} */
         DeviceTypeValue: "desktop" | "mobile" | "server";
+        DiagnosticsDatabase: {
+            available: boolean;
+        };
+        DiagnosticsResponse: {
+            version: string;
+            /** Format: int64 */
+            processStartedAtMs: number | string;
+            /** Format: int64 */
+            uptimeSeconds: number | string;
+            database: components["schemas"]["DiagnosticsDatabase"];
+            work: components["schemas"]["DiagnosticsWork"];
+            workers: {
+                [key: string]: string;
+            };
+            circuits: {
+                [key: string]: string;
+            };
+        };
+        DiagnosticsWork: {
+            tasksByStatus: {
+                [key: string]: number | string;
+            };
+            /** Format: int32 */
+            pendingApprovals: number | string;
+            /** Format: int32 */
+            unreadNotifications: number | string;
+            /** Format: int32 */
+            pendingOutbox: number | string;
+            /** Format: int32 */
+            onlineDevices: number | string;
+        };
+        HealthResponse: {
+            status: string;
+            healthy: boolean;
+        };
         MemoryFactRetractResponse: {
             /** Format: uuid */
             memoryId: string;
@@ -1011,6 +1094,93 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    GetDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    HealthLive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    HealthReady: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
     Phase0Health: {
         parameters: {
             query?: never;

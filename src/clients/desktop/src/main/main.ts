@@ -1,12 +1,21 @@
 import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
 import { randomUUID } from "node:crypto";
+import { chmodSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getRendererEntryUrl,
   isAllowedExternalUrl,
   isAllowedNavigation,
   secureWebPreferences
 } from "./security.js";
+import {
+  NotificationProjectionCache,
+  createOverlayWindowOptions,
+  shouldHideWindowOnClose
+} from "./desktop-lifecycle.js";
 import { isUuid } from "./input-validation.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -27,6 +36,51 @@ const nonTerminalTaskStatuses = new Set([
   "recovering",
   "cancellationRequested"
 ]);
+
+let mainWindow: BrowserWindow | undefined;
+let overlayWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let signalRConnection: HubConnection | undefined;
+let rendererEntryUrl: string | undefined;
+let isQuitting = false;
+let overlayHideTimer: NodeJS.Timeout | undefined;
+const notificationProjectionCache = new NotificationProjectionCache();
+
+function writeDesktopSmokeMarker(): void {
+  const markerPath = process.env.JARVIS_DESKTOP_SMOKE_MARKER;
+  const markerRoot = process.env.JARVIS_DESKTOP_SMOKE_ROOT;
+  if (!markerPath || !markerRoot || !isAbsolute(markerPath) || !isAbsolute(markerRoot)) {
+    return;
+  }
+
+  const temporaryRoot = resolve(tmpdir());
+  const rootPath = resolve(markerRoot);
+  const markerFullPath = resolve(markerPath);
+  const rootFromTemporaryDirectory = relative(temporaryRoot, rootPath);
+  const markerFromRoot = relative(rootPath, markerFullPath);
+  if (rootPath === temporaryRoot
+    || rootFromTemporaryDirectory.length === 0
+    || rootFromTemporaryDirectory.startsWith("..")
+    || isAbsolute(rootFromTemporaryDirectory)
+    || markerFromRoot.length === 0
+    || markerFromRoot.startsWith("..")
+    || isAbsolute(markerFromRoot)) {
+    return;
+  }
+
+  try {
+    writeFileSync(markerFullPath, `${JSON.stringify({
+      event: "app.whenReady",
+      pid: process.pid,
+      version: app.getVersion(),
+      occurredAt: Date.now()
+    })}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    chmodSync(markerFullPath, 0o600);
+  } catch {
+    // The marker is an opt-in release-test seam and must not change runtime
+    // startup behavior when the environment is not configured correctly.
+  }
+}
 
 async function requestBackend(
   path: string,
@@ -179,6 +233,136 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
   return window;
 }
 
+function createOverlayWindow(): BrowserWindow {
+  const entryUrl = new URL("../renderer/overlay.html", import.meta.url).href;
+  const window = new BrowserWindow(createOverlayWindowOptions(
+    new URL("../preload/overlay.js", import.meta.url).pathname));
+  window.setAlwaysOnTop(true, "floating");
+  window.webContents.on("will-navigate", event => event.preventDefault());
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.on("closed", () => {
+    if (overlayWindow === window) {
+      overlayWindow = undefined;
+    }
+  });
+  void window.loadURL(entryUrl);
+  return window;
+}
+
+function showNotificationOverlay(value: unknown): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return;
+  }
+
+  const payload = value as Record<string, unknown>;
+  const projection = notificationProjectionCache.accept({
+    id: payload.notificationId,
+    title: payload.title,
+    body: payload.body
+  });
+  if (!projection) {
+    return;
+  }
+
+  overlayWindow ??= createOverlayWindow();
+  const send = (): void => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return;
+    }
+    overlayWindow.webContents.send("overlay:notification", projection);
+    overlayWindow.showInactive();
+    if (overlayHideTimer) {
+      clearTimeout(overlayHideTimer);
+    }
+    overlayHideTimer = setTimeout(() => overlayWindow?.hide(), 6_000);
+  };
+  if (overlayWindow.webContents.isLoading()) {
+    overlayWindow.webContents.once("did-finish-load", send);
+  } else {
+    send();
+  }
+}
+
+function configureMainWindow(window: BrowserWindow): void {
+  window.on("close", event => {
+    if (!shouldHideWindowOnClose(isQuitting)) {
+      return;
+    }
+
+    event.preventDefault();
+    window.hide();
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = undefined;
+    }
+  });
+  window.on("show", updateTrayMenu);
+  window.on("hide", updateTrayMenu);
+}
+
+function ensureMainWindow(): BrowserWindow | undefined {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+  if (!rendererEntryUrl) {
+    return undefined;
+  }
+
+  mainWindow = createMainWindow(rendererEntryUrl);
+  configureMainWindow(mainWindow);
+  signalRConnection ??= startSignalR(mainWindow);
+  return mainWindow;
+}
+
+function updateTrayMenu(): void {
+  if (!tray) {
+    return;
+  }
+
+  const visible = mainWindow?.isVisible() ?? false;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: visible ? "Hide Jarvis" : "Show Jarvis",
+      click: () => {
+        if (visible) {
+          mainWindow?.hide();
+        } else {
+          ensureMainWindow();
+        }
+      }
+    },
+    {
+      label: "Quit",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]));
+}
+
+function createTray(): void {
+  const icon = nativeImage.createFromPath(fileURLToPath(new URL("../assets/JarvisTemplate.png", import.meta.url)));
+  const highResolutionIcon = nativeImage.createFromPath(fileURLToPath(new URL("../assets/JarvisTemplate@2x.png", import.meta.url)));
+  if (!icon.isEmpty() && !highResolutionIcon.isEmpty()) {
+    icon.addRepresentation({
+      scaleFactor: 2.0,
+      buffer: highResolutionIcon.toPNG()
+    });
+  }
+  if (icon.isEmpty()) {
+    throw new Error("The packaged Jarvis tray template asset could not be loaded.");
+  }
+  icon.setTemplateImage(true);
+  tray = new Tray(icon);
+  tray.setToolTip("Jarvis");
+  tray.on("click", () => ensureMainWindow());
+  updateTrayMenu();
+}
+
 function startSignalR(window: BrowserWindow): HubConnection | undefined {
   if (!backendBearer || backendBearer.length < 32) {
     return undefined;
@@ -212,6 +396,9 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
       if (!isSignalREnvelope(envelope)) {
         return;
       }
+      if (eventType === "notification.created") {
+        showNotificationOverlay(envelope.payload);
+      }
       if (!window.isDestroyed()) {
         window.webContents.send("backend:event", envelope);
       }
@@ -232,6 +419,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.whenReady().then(() => {
     ipcMain.handle("app:getVersion", () => app.getVersion());
+    ipcMain.handle("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
     ipcMain.handle("backend:getDesktopDevice", () =>
       requestBackend("/api/v1/realtime/desktop-device", "POST", {}, randomUUID()));
     ipcMain.handle("backend:createConversation", (_event, value: unknown) => {
@@ -431,13 +619,24 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    const rendererEntryUrl = getRendererEntryUrl(app.isPackaged, process.env.JARVIS_DEV_SERVER_URL);
-    const window = createMainWindow(rendererEntryUrl);
-    const signalRConnection = startSignalR(window);
-    app.on("before-quit", () => {
-      if (signalRConnection) {
-        void signalRConnection.stop();
-      }
-    });
+    rendererEntryUrl = getRendererEntryUrl(app.isPackaged, process.env.JARVIS_DEV_SERVER_URL);
+    ensureMainWindow();
+    createTray();
+    writeDesktopSmokeMarker();
   });
 }
+
+app.on("second-instance", () => {
+  ensureMainWindow();
+});
+
+app.on("activate", () => {
+  ensureMainWindow();
+});
+
+app.on("before-quit", () => {
+  isQuitting = true;
+  if (signalRConnection) {
+    void signalRConnection.stop();
+  }
+});

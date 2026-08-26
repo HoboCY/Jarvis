@@ -1,6 +1,7 @@
 interface Window {
   jarvis: {
     getAppVersion: () => Promise<string>;
+    getDiagnostics: () => Promise<unknown>;
     getDesktopDevice: () => Promise<unknown>;
     createConversation: (input: { title?: string | null; idempotencyKey: string }) => Promise<unknown>;
     getConversation: (conversationId: string) => Promise<unknown>;

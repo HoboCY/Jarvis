@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jarvis Notification</title>
+    <style>
+      body { margin: 0; padding: 18px; background: #202124; color: #f1f3f4; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+      h1 { margin: 0 0 8px; font-size: 16px; }
+      p { margin: 0; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <h1 id="notification-title">Jarvis</h1>
+    <p id="notification-body">暂无通知</p>
+    <script type="module" src="./overlay.js"></script>
+  </body>
+</html>

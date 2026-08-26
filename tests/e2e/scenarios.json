@@ -1,0 +1,42 @@
+[
+  {
+    "name": "文字输入",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_TextInput_PersistsExactlyOnceAndTypedP95MeetsBudget"
+  },
+  {
+    "name": "跨模态指代",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_CrossModalReference_BindsTypedMessageToConnectedRealtimeSession"
+  },
+  {
+    "name": "文字打断语音",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_TypedInterruptsVoice_PersistsInterruptedVoiceAndContinuesText"
+  },
+  {
+    "name": "后台委派",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_BackgroundDelegation_ReturnsTaskIdUnderOneSecondAndQueuesWork"
+  },
+  {
+    "name": "通知断线补发",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_NotificationOfflinePull_PublishesAndPullsWithoutLossWithinTwoSeconds"
+  },
+  {
+    "name": "Codex审批",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_CodexApproval_PropagatesBoundDecisionFromUiToDevice"
+  },
+  {
+    "name": "Codex崩溃恢复",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_CodexCrashRecovery_UsesChildProcessExitAndFailsUncertainTurnWithoutReplay"
+  },
+  {
+    "name": "Session rotation",
+    "testProject": "Jarvis.E2E.Tests",
+    "testName": "Scenario_SessionRotationAndBackendRestart_PreservesConversationAndRealtimeContext"
+  }
+]

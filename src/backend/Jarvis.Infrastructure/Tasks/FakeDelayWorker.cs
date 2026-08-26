@@ -3,6 +3,7 @@ using System.Data.Common;
 using Jarvis.Application.Tasks;
 using Jarvis.Domain.Notifications;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -197,6 +198,15 @@ public sealed class FakeDelayWorker(
         {
             task.MarkRecovering(nowMs);
             taskStore.AddTaskEventAndOutbox(task, "task.recovering", nowMs);
+            JarvisTelemetry.TaskRecoveries.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("operation", "lease_expired")).ToArray());
+            JarvisTelemetry.TaskLeaseExpiries.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal")).ToArray());
+            JarvisTelemetry.TaskQueueDepth.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("operation", "recover")).ToArray());
         }
 
         if (task.Status == DomainTaskStatus.Recovering && task.Attempt >= task.MaxAttempts)
@@ -217,6 +227,12 @@ public sealed class FakeDelayWorker(
 
         if (task.Status is DomainTaskStatus.Queued or DomainTaskStatus.Recovering)
         {
+            JarvisTelemetry.TaskQueueWaitDuration.Record(
+                Math.Max(0, nowMs - task.CreatedAtMs),
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal")).ToArray());
+            JarvisTelemetry.TaskQueueDepth.Add(
+                -1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("operation", "dequeue")).ToArray());
             task.Assign(WorkerId, checked(nowMs + FakeDelayOptions.LeaseDurationMs), nowMs, task.PreferredDeviceId);
             taskStore.AddTaskEventAndOutbox(task, "task.assigned", nowMs);
         }
@@ -323,6 +339,38 @@ public sealed class FakeDelayWorker(
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        var taskStatus = task.Status switch
+        {
+            DomainTaskStatus.Succeeded => "succeeded",
+            DomainTaskStatus.Cancelled => "cancelled",
+            DomainTaskStatus.Failed => "failed",
+            _ => "unknown"
+        };
+        if (taskStatus == "succeeded")
+        {
+            JarvisTelemetry.TasksSucceeded.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("task.status", taskStatus)).ToArray());
+        }
+        else if (taskStatus == "cancelled")
+        {
+            JarvisTelemetry.TasksCancelled.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("task.status", taskStatus)).ToArray());
+        }
+        else if (taskStatus == "failed")
+        {
+            JarvisTelemetry.TasksFailed.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("task.status", taskStatus)).ToArray());
+        }
+
+        if (task.StartedAtMs is long startedAtMs)
+        {
+            JarvisTelemetry.TaskDuration.Record(
+                Math.Max(0, nowMs - startedAtMs),
+                JarvisTelemetry.BoundedTags(("worker.kind", "internal"), ("task.status", taskStatus)).ToArray());
+        }
     }
 
     private async Task<bool> RenewLeaseLoopAsync(Guid taskId, CancellationTokenSource executionCts)
@@ -475,35 +523,48 @@ public sealed class FakeDelayWorker(
 public sealed partial class FakeDelayWorkerHostedService(
     IServiceScopeFactory scopeFactory,
     IOptions<FakeDelayOptions> options,
-    ILogger<FakeDelayWorkerHostedService> logger) : BackgroundService
+    ILogger<FakeDelayWorkerHostedService> logger,
+    IRuntimeStateObserver stateObserver) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        stateObserver.SetWorker("Fake", "starting");
         if (!options.Value.Enabled)
         {
+            stateObserver.SetWorker("Fake", "disabled");
             return;
         }
 
-        while (!stoppingToken.IsCancellationRequested)
+        stateObserver.SetWorker("Fake", "running");
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                var worker = scope.ServiceProvider.GetRequiredService<FakeDelayWorker>();
-                await worker.ProcessOneAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception exception)
-            {
-                LogCycleFailed(logger, exception);
-            }
+                try
+                {
+                    await using var scope = scopeFactory.CreateAsyncScope();
+                    var worker = scope.ServiceProvider.GetRequiredService<FakeDelayWorker>();
+                    await worker.ProcessOneAsync(stoppingToken);
+                    stateObserver.SetWorker("Fake", "running");
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception exception)
+                {
+                    stateObserver.SetWorker("Fake", "faulted");
+                    LogCycleFailed(logger, exception);
+                }
 
-            await Task.Delay(
-                Math.Clamp(options.Value.PollingIntervalMs, 25, 60_000),
-                stoppingToken);
+                await Task.Delay(
+                    Math.Clamp(options.Value.PollingIntervalMs, 25, 60_000),
+                    stoppingToken);
+            }
+        }
+        finally
+        {
+            stateObserver.SetWorker("Fake", "stopped");
         }
     }
 

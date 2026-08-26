@@ -9,6 +9,7 @@ using Jarvis.Domain.Memory;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -265,6 +266,7 @@ public sealed class EfMemoryStore(
             eventType,
             JsonSerializer.Serialize(new { eventId, occurredAt = nowMs, type = eventType, payload }, JsonOptions),
             nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
     }
 
     private Task<IdempotencyRecord?> FindIdempotencyAsync(

@@ -10,6 +10,7 @@ using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Outbox;
 using Jarvis.Domain.Tasks;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Observability;
 using Jarvis.Infrastructure.Idempotency;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Data.Sqlite;
@@ -255,10 +256,14 @@ public sealed class EfRealtimeStore(
             },
             JsonOptions),
             nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued("realtime.session.created");
         try
         {
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            JarvisTelemetry.RealtimeSessionsCreated.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("session.status", "created")).ToArray());
             return new(ToResponse(sessionEntity));
         }
         catch (DbUpdateException)
@@ -571,9 +576,27 @@ public sealed class EfRealtimeStore(
                 },
                 JsonOptions),
                 timeProvider.GetUtcNow().ToUnixTimeMilliseconds()));
+            JarvisTelemetry.RecordOutboxEnqueued("realtime.events.ingested");
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             committed = true;
+            var interruptedCount = request.Events.Count(item => item.Status == RealtimeEventStatusValue.Interrupted);
+            if (interruptedCount > 0)
+            {
+                JarvisTelemetry.RealtimeSpeechInterruptions.Add(
+                    interruptedCount,
+                    JarvisTelemetry.BoundedTags(("operation", "ingest")).ToArray());
+            }
+
+            var transcriptFailureCount = request.Events.Count(item =>
+                item.Status == RealtimeEventStatusValue.Failed
+                && item.Modality.Contains("transcript", StringComparison.OrdinalIgnoreCase));
+            if (transcriptFailureCount > 0)
+            {
+                JarvisTelemetry.RealtimeTranscriptIngestFailures.Add(
+                    transcriptFailureCount,
+                    JarvisTelemetry.BoundedTags(("operation", "ingest")).ToArray());
+            }
             return new(response);
         }
         finally
@@ -728,8 +751,34 @@ public sealed class EfRealtimeStore(
             },
             JsonOptions),
             occurredAtMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        if (request is RealtimeSessionConnectedRequest)
+        {
+            JarvisTelemetry.RealtimeSessionsConnected.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("session.status", "connected")).ToArray());
+            JarvisTelemetry.RealtimeConnectDuration.Record(
+                Math.Max(0, nowMs - session.StartedAtMs),
+                JarvisTelemetry.BoundedTags(("session.status", "connected")).ToArray());
+        }
+        else if (request is RealtimeSessionEndedRequest endedRequest)
+        {
+            var status = endedRequest.Status.ToString().ToLowerInvariant();
+            if (endedRequest.Status == RealtimeSessionStatusValue.Rotated)
+            {
+                JarvisTelemetry.RealtimeSessionRotations.Add(
+                    1,
+                    JarvisTelemetry.BoundedTags(("session.status", status)).ToArray());
+            }
+            else
+            {
+                JarvisTelemetry.RealtimeSessionsDisconnected.Add(
+                    1,
+                    JarvisTelemetry.BoundedTags(("session.status", status)).ToArray());
+            }
+        }
         _ = request;
         return new(response);
     }

@@ -17,6 +17,10 @@ node_modules/
 
 artifacts/openapi/.tmp/
 artifacts/openapi/.server.log
+artifacts/releases/
+artifacts/services/
+artifacts/test-reports/
+src/clients/desktop/out/
 
 *.user
 *.suo

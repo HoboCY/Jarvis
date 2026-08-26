@@ -8,6 +8,7 @@ using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -441,6 +442,7 @@ public sealed class EfTaskStore(
             payload
         }, JsonOptions);
         db.OutboxMessages.Add(OutboxMessage.Create(eventId, eventType, payloadJson, nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
     }
 
     private IdempotencyRecord CreateIdempotencyRecord(

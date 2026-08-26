@@ -5,6 +5,7 @@ using Jarvis.Application.Responses;
 using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Tasks;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Observability;
 using Jarvis.Infrastructure.Realtime;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -134,6 +135,15 @@ public sealed class ResponsesWorker(
         {
             task.MarkRecovering(nowMs);
             taskStore.AddTaskEventAndOutbox(task, "task.recovering", nowMs);
+            JarvisTelemetry.TaskRecoveries.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("operation", "lease_expired")).ToArray());
+            JarvisTelemetry.TaskLeaseExpiries.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses")).ToArray());
+            JarvisTelemetry.TaskQueueDepth.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("operation", "recover")).ToArray());
         }
 
         if (task.Status == DomainTaskStatus.Recovering && task.Attempt >= task.MaxAttempts)
@@ -154,6 +164,12 @@ public sealed class ResponsesWorker(
 
         if (task.Status is DomainTaskStatus.Queued or DomainTaskStatus.Recovering)
         {
+            JarvisTelemetry.TaskQueueWaitDuration.Record(
+                Math.Max(0, nowMs - task.CreatedAtMs),
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses")).ToArray());
+            JarvisTelemetry.TaskQueueDepth.Add(
+                -1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("operation", "dequeue")).ToArray());
             task.Assign(WorkerId, checked(nowMs + options.Value.LeaseDurationMs), nowMs);
             taskStore.AddTaskEventAndOutbox(task, "task.assigned", nowMs);
         }
@@ -356,6 +372,38 @@ public sealed class ResponsesWorker(
 
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+        var taskStatus = task.Status switch
+        {
+            DomainTaskStatus.Succeeded => "succeeded",
+            DomainTaskStatus.Cancelled => "cancelled",
+            DomainTaskStatus.Failed => "failed",
+            _ => "unknown"
+        };
+        if (taskStatus == "succeeded")
+        {
+            JarvisTelemetry.TasksSucceeded.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("task.status", taskStatus)).ToArray());
+        }
+        else if (taskStatus == "cancelled")
+        {
+            JarvisTelemetry.TasksCancelled.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("task.status", taskStatus)).ToArray());
+        }
+        else if (taskStatus == "failed")
+        {
+            JarvisTelemetry.TasksFailed.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("task.status", taskStatus)).ToArray());
+        }
+
+        if (task.StartedAtMs is long startedAtMs)
+        {
+            JarvisTelemetry.TaskDuration.Record(
+                Math.Max(0, nowMs - startedAtMs),
+                JarvisTelemetry.BoundedTags(("worker.kind", "responses"), ("task.status", taskStatus)).ToArray());
+        }
     }
 
     private bool HasLease(DomainTask? task, long nowMs) =>
@@ -470,32 +518,45 @@ public sealed class ResponsesWorkerOptions
 public sealed partial class ResponsesWorkerHostedService(
     IServiceScopeFactory scopeFactory,
     IOptions<ResponsesWorkerOptions> options,
-    ILogger<ResponsesWorkerHostedService> logger) : BackgroundService
+    ILogger<ResponsesWorkerHostedService> logger,
+    IRuntimeStateObserver stateObserver) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        stateObserver.SetWorker("Responses", "starting");
         if (!options.Value.Enabled)
         {
+            stateObserver.SetWorker("Responses", "disabled");
             return;
         }
 
-        while (!stoppingToken.IsCancellationRequested)
+        stateObserver.SetWorker("Responses", "running");
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                await scope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception exception)
-            {
-                LogCycleFailed(logger, exception);
-            }
+                try
+                {
+                    await using var scope = scopeFactory.CreateAsyncScope();
+                    await scope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync(stoppingToken);
+                    stateObserver.SetWorker("Responses", "running");
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception exception)
+                {
+                    stateObserver.SetWorker("Responses", "faulted");
+                    LogCycleFailed(logger, exception);
+                }
 
-            await Task.Delay(Math.Clamp(options.Value.PollingIntervalMs, 25, 60_000), stoppingToken);
+                await Task.Delay(Math.Clamp(options.Value.PollingIntervalMs, 25, 60_000), stoppingToken);
+            }
+        }
+        finally
+        {
+            stateObserver.SetWorker("Responses", "stopped");
         }
     }
 

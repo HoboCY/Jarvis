@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__EXECUTABLE__</string>
+    <string>--urls</string>
+    <string>http://127.0.0.1:__API_PORT__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__WORKING_DIRECTORY__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DOTNET_ENVIRONMENT</key>
+    <string>Production</string>
+    <key>ConnectionStrings__Jarvis</key>
+    <string>Data Source=__DATA_DIRECTORY__/jarvis.db</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIRECTORY__/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIRECTORY__/stderr.log</string>
+</dict>
+</plist>

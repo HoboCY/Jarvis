@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using Jarvis.Application.Notifications;
 using Jarvis.Contracts;
+using Jarvis.Infrastructure.Observability;
 
 namespace Jarvis.Api.Notifications;
 
@@ -83,12 +85,32 @@ public static class NotificationEndpoints
             return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "Authentication is required.");
         }
 
+        var startedAt = Stopwatch.GetTimestamp();
         var result = await service.UpdateAsync(
             userId,
             notificationId,
             action,
             httpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(),
             cancellationToken);
+        var tags = JarvisTelemetry.BoundedTags(("operation", action)).ToArray();
+        var elapsedMs = Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
+        if (action == "delivered")
+        {
+            JarvisTelemetry.NotificationDeliveryDuration.Record(elapsedMs, tags);
+            if (result.Status == NotificationOperationStatus.Succeeded)
+            {
+                JarvisTelemetry.NotificationsDelivered.Add(1, tags);
+            }
+        }
+        else if (action == "read")
+        {
+            JarvisTelemetry.NotificationReadDuration.Record(elapsedMs, tags);
+            if (result.Status == NotificationOperationStatus.Succeeded)
+            {
+                JarvisTelemetry.NotificationsRead.Add(1, tags);
+            }
+        }
+
         return result.Status switch
         {
             NotificationOperationStatus.Succeeded or NotificationOperationStatus.Replayed => TypedResults.Ok(result.Value),

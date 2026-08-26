@@ -7,6 +7,7 @@ using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -55,7 +56,9 @@ public sealed class EfNotificationStore(
         var existing = await FindIdempotencyRecordAsync(userId, scope, idempotencyKey, cancellationToken);
         if (existing is not null)
         {
-            return Replay(existing, requestHash);
+            var replay = Replay(existing, requestHash);
+            RecordDuplicateIfReplayed(replay, "replay");
+            return replay;
         }
 
         for (var attempt = 1; ; attempt++)
@@ -84,7 +87,9 @@ public sealed class EfNotificationStore(
                 }
                 if (existing is not null)
                 {
-                    return Replay(existing, requestHash);
+                    var replay = Replay(existing, requestHash);
+                    RecordDuplicateIfReplayed(replay, "race_replay");
+                    return replay;
                 }
 
                 await Task.Delay(TimeSpan.FromMilliseconds(10L * attempt), cancellationToken);
@@ -172,6 +177,19 @@ public sealed class EfNotificationStore(
             payload
         }, JsonOptions);
         db.OutboxMessages.Add(OutboxMessage.Create(eventId, eventType, payloadJson, nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
+    }
+
+    private static void RecordDuplicateIfReplayed(
+        NotificationUpdateStoreResult result,
+        string operation)
+    {
+        if (result.Kind == NotificationStoreResultKind.Replayed)
+        {
+            JarvisTelemetry.DuplicateNotificationsSuppressed.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("operation", operation)).ToArray());
+        }
     }
 
     private Task<IdempotencyRecord?> FindIdempotencyRecordAsync(

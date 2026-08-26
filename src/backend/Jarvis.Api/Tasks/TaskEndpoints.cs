@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Jarvis.Application.Tasks;
 using Jarvis.Contracts;
+using Jarvis.Infrastructure.Observability;
 
 namespace Jarvis.Api.Tasks;
 
@@ -60,6 +61,16 @@ public static class TaskEndpoints
             httpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(),
             request,
             cancellationToken);
+        if (result.Status == TaskOperationStatus.Succeeded)
+        {
+            JarvisTelemetry.TasksCreated.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("operation", "create")).ToArray());
+            JarvisTelemetry.TaskQueueDepth.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("operation", "enqueue")).ToArray());
+        }
+
         return result.Status switch
         {
             TaskOperationStatus.Succeeded or TaskOperationStatus.Replayed
@@ -124,6 +135,13 @@ public static class TaskEndpoints
             taskId,
             httpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(),
             cancellationToken);
+        if (result.Status == TaskOperationStatus.Succeeded)
+        {
+            JarvisTelemetry.TasksCancelled.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("task.reason", "user_request")).ToArray());
+        }
+
         return result.Status switch
         {
             TaskOperationStatus.Succeeded or TaskOperationStatus.Replayed => TypedResults.Ok(result.Value),

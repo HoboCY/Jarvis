@@ -13,6 +13,7 @@ using Jarvis.Domain.Outbox;
 using Jarvis.Domain.Tasks;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using DomainTask = Jarvis.Domain.Tasks.Task;
@@ -1061,6 +1062,7 @@ public sealed class EfDeviceStore(
     {
         var id = Guid.CreateVersion7();
         db.OutboxMessages.Add(OutboxMessage.Create(id, eventType, JsonSerializer.Serialize(new { eventId = id, occurredAt = nowMs, type = eventType, payload }, JsonOptions), nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
     }
 
     private static TaskResponse ToTaskResponse(DomainTask task, TaskExecution? execution = null) => new(

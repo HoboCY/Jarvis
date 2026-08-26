@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Jarvis.Application.Devices;
 using Jarvis.Contracts;
 using Jarvis.DeviceNode.Codex;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -299,6 +301,27 @@ public sealed partial class DeviceNodeWorker(
 
                 if (runtimeEvent.IsRequest && CodexProtocolMethods.ServerApprovalRequests.Contains(runtimeEvent.Method))
                 {
+                    var approvalKind = runtimeEvent.Method switch
+                    {
+                        "item/commandExecution/requestApproval" => "command",
+                        "item/fileChange/requestApproval" => "file_change",
+                        _ => "permission"
+                    };
+                    JarvisTelemetry.CodexApprovals.Add(
+                        1,
+                        JarvisTelemetry.BoundedTags(("approval.kind", approvalKind)).ToArray());
+                    if (approvalKind == "command")
+                    {
+                        JarvisTelemetry.CodexCommandApprovals.Add(
+                            1,
+                            JarvisTelemetry.BoundedTags(("approval.kind", approvalKind)).ToArray());
+                    }
+                    else if (approvalKind == "file_change")
+                    {
+                        JarvisTelemetry.CodexFileChangeApprovals.Add(
+                            1,
+                            JarvisTelemetry.BoundedTags(("approval.kind", approvalKind)).ToArray());
+                    }
                     var approval = await CreateApprovalAsync(task, execution, runtimeEvent, leaseOwner, cancellationToken).ConfigureAwait(false);
                     var resolution = await WaitForApprovalOrRuntimeExitAsync(
                         runtime,
@@ -358,6 +381,12 @@ public sealed partial class DeviceNodeWorker(
                         return summary;
                     }
                 }
+                else if (runtimeEvent.Method == "protocol/error")
+                {
+                    JarvisTelemetry.CodexProtocolErrors.Add(
+                        1,
+                        JarvisTelemetry.BoundedTags(("operation", "event")).ToArray());
+                }
             }
 
             if (cancellationRequested)
@@ -407,26 +436,36 @@ public sealed partial class DeviceNodeWorker(
         Guid approvalId,
         CancellationToken cancellationToken)
     {
+        var startedAt = Stopwatch.GetTimestamp();
         using var approvalCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var approvalTask = approvalWaiter.WaitAsync(taskId, approvalId, approvalCancellation.Token);
-        var exitTask = runtime.ProcessExit;
-        var completed = await Task.WhenAny(approvalTask, exitTask).ConfigureAwait(false);
-        if (completed == exitTask)
+        try
         {
-            approvalCancellation.Cancel();
-            try
+            var approvalTask = approvalWaiter.WaitAsync(taskId, approvalId, approvalCancellation.Token);
+            var exitTask = runtime.ProcessExit;
+            var completed = await Task.WhenAny(approvalTask, exitTask).ConfigureAwait(false);
+            if (completed == exitTask)
             {
-                await approvalTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (approvalCancellation.IsCancellationRequested)
-            {
+                approvalCancellation.Cancel();
+                try
+                {
+                    await approvalTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (approvalCancellation.IsCancellationRequested)
+                {
+                }
+
+                throw new EndOfStreamException("Codex app-server exited while waiting for an approval decision.");
             }
 
-            throw new EndOfStreamException("Codex app-server exited while waiting for an approval decision.");
+            return await approvalTask.ConfigureAwait(false)
+                ?? new DeviceApprovalResolution(ApprovalDecisionValue.Deny, ApprovalScopeValue.Once);
         }
-
-        return await approvalTask.ConfigureAwait(false)
-            ?? new DeviceApprovalResolution(ApprovalDecisionValue.Deny, ApprovalScopeValue.Once);
+        finally
+        {
+            JarvisTelemetry.ApprovalWaitDuration.Record(
+                Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                JarvisTelemetry.BoundedTags(("operation", "codex")).ToArray());
+        }
     }
 
     private async Task<DeviceApprovalResponse> CreateApprovalAsync(

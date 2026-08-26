@@ -1,7 +1,9 @@
 using System.Data;
+using System.Diagnostics;
 using Jarvis.Application.Outbox;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -14,7 +16,8 @@ public sealed partial class OutboxDispatcher(
     IServiceScopeFactory scopeFactory,
     IOptions<OutboxOptions> options,
     ILogger<OutboxDispatcher> logger,
-    TimeProvider timeProvider) : BackgroundService
+    TimeProvider timeProvider,
+    IRuntimeStateObserver stateObserver) : BackgroundService
 {
     public async Task<int> ProcessOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -57,10 +60,15 @@ public sealed partial class OutboxDispatcher(
         var processed = 0;
         foreach (var message in messages)
         {
+            var publishStartedAt = Stopwatch.GetTimestamp();
             try
             {
                 await publisher.PublishAsync(message, cancellationToken);
                 message.MarkPublished(timeProvider.GetUtcNow().ToUnixTimeMilliseconds(), leaseId);
+                JarvisTelemetry.RecordOutboxPublished();
+                JarvisTelemetry.NotificationPublishDuration.Record(
+                    Stopwatch.GetElapsedTime(publishStartedAt).TotalMilliseconds,
+                    JarvisTelemetry.BoundedTags(("operation", "publish")).ToArray());
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -72,6 +80,9 @@ public sealed partial class OutboxDispatcher(
                     exception.Message,
                     timeProvider.GetUtcNow().ToUnixTimeMilliseconds() + backoffMs,
                     leaseId);
+                JarvisTelemetry.NotificationPublishDuration.Record(
+                    Stopwatch.GetElapsedTime(publishStartedAt).TotalMilliseconds,
+                    JarvisTelemetry.BoundedTags(("operation", "publish_failed")).ToArray());
                 LogOutboxFailure(logger, exception, message.Id, attempt);
             }
 
@@ -84,28 +95,40 @@ public sealed partial class OutboxDispatcher(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        stateObserver.SetWorker("Outbox", "starting");
         if (!options.Value.Enabled)
         {
+            stateObserver.SetWorker("Outbox", "disabled");
             return;
         }
 
-        while (!stoppingToken.IsCancellationRequested)
+        stateObserver.SetWorker("Outbox", "running");
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await ProcessOnceAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception exception)
-            {
-                LogDispatcherCycleFailure(logger, exception);
-            }
+                try
+                {
+                    await ProcessOnceAsync(stoppingToken);
+                    stateObserver.SetWorker("Outbox", "running");
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception exception)
+                {
+                    stateObserver.SetWorker("Outbox", "faulted");
+                    LogDispatcherCycleFailure(logger, exception);
+                }
 
-            var delayMs = Math.Clamp(options.Value.PollingIntervalMs, 100, 60_000);
-            await Task.Delay(delayMs, stoppingToken);
+                var delayMs = Math.Clamp(options.Value.PollingIntervalMs, 100, 60_000);
+                await Task.Delay(delayMs, stoppingToken);
+            }
+        }
+        finally
+        {
+            stateObserver.SetWorker("Outbox", "stopped");
         }
     }
 

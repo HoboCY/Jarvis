@@ -4,6 +4,7 @@ using Jarvis.Domain.Approvals;
 using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Observability;
 using Jarvis.Infrastructure.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -128,6 +129,18 @@ public sealed class DeviceLeaseRecoveryService(
         {
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
+            if (recoveredCount > 0)
+            {
+                JarvisTelemetry.TaskRecoveries.Add(
+                    recoveredCount,
+                    JarvisTelemetry.BoundedTags(("worker.kind", "codex"), ("operation", "device_lease_expired")).ToArray());
+                JarvisTelemetry.TaskLeaseExpiries.Add(
+                    recoveredCount,
+                    JarvisTelemetry.BoundedTags(("worker.kind", "codex")).ToArray());
+                JarvisTelemetry.TaskQueueDepth.Add(
+                    recoveredCount,
+                    JarvisTelemetry.BoundedTags(("worker.kind", "codex"), ("operation", "recover")).ToArray());
+            }
             return recoveredCount;
         }
         catch (DbUpdateConcurrencyException)
@@ -166,6 +179,7 @@ public sealed class DeviceLeaseRecoveryService(
             "approval.resolved",
             JsonSerializer.Serialize(payload, JsonOptions),
             nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued("approval.resolved");
     }
 }
 

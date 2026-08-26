@@ -81,5 +81,110 @@ jobs:
       - name: Test secret scan fixtures
         run: pnpm test:secret-scan
 
+      - name: Test service manifests and launchd safety seams
+        run: pnpm test:service-manifest
+
       - name: Run Electron security configuration test
         run: pnpm --filter @jarvis/desktop test
+
+  phase-6-main:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: phase-0
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Setup pnpm 10.24.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Restore backend with lock files
+        run: dotnet restore Jarvis.sln --locked-mode
+
+      - name: Build backend and E2E project
+        run: dotnet build Jarvis.sln --configuration Release --no-restore
+
+      - name: Run Phase 6 E2E and performance smoke
+        run: tests/e2e/run-e2e.sh
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Desktop release-test input
+        run: pnpm --filter @jarvis/desktop build
+
+      - name: Test release manifest and service seams
+        run: pnpm test:service-manifest
+
+      - name: Upload Phase 6 reports and manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-phase6-main-reports
+          path: |
+            artifacts/test-reports/phase6-e2e
+            artifacts/releases
+
+  phase-6-macos-release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: phase-6-main
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Setup pnpm 10.24.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Restore backend with lock files
+        run: dotnet restore Jarvis.sln --locked-mode
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and package unsigned arm64 Desktop artifact
+        run: eng/scripts/package-desktop-macos.sh
+
+      - name: Publish Backend and Device Node arm64 artifacts
+        run: eng/scripts/publish-macos-arm64.sh
+
+      - name: Run isolated launchd API and Device Node smoke
+        run: eng/scripts/launchd-smoke-macos.sh
+
+      - name: Upload macOS release-test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-phase6-macos-arm64-release-test
+          path: |
+            src/clients/desktop/out/make
+            artifacts/services
+            artifacts/releases

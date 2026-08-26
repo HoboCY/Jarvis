@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 const jarvisApi = {
   getAppVersion: (): Promise<string> => ipcRenderer.invoke("app:getVersion") as Promise<string>,
+  getDiagnostics: (): Promise<unknown> => ipcRenderer.invoke("backend:getDiagnostics") as Promise<unknown>,
   getDesktopDevice: (): Promise<unknown> => ipcRenderer.invoke("backend:getDesktopDevice") as Promise<unknown>,
   createConversation: (input: { title?: string | null; idempotencyKey: string }): Promise<unknown> =>
     ipcRenderer.invoke("backend:createConversation", input) as Promise<unknown>,

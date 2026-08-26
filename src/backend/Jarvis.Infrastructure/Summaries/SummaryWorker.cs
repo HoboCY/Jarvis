@@ -5,6 +5,7 @@ using Jarvis.Domain.Conversations;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Realtime;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -123,6 +124,7 @@ public sealed class SummaryWorker(
                     }
                 }),
                 nowMs));
+            JarvisTelemetry.RecordOutboxEnqueued("conversation.summaryUpdated");
 
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -209,32 +211,45 @@ public sealed class SummaryWorkerOptions
 public sealed partial class SummaryWorkerHostedService(
     IServiceScopeFactory scopeFactory,
     IOptions<SummaryWorkerOptions> options,
-    ILogger<SummaryWorkerHostedService> logger) : BackgroundService
+    ILogger<SummaryWorkerHostedService> logger,
+    IRuntimeStateObserver stateObserver) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        stateObserver.SetWorker("Summary", "starting");
         if (!options.Value.Enabled)
         {
+            stateObserver.SetWorker("Summary", "disabled");
             return;
         }
 
-        while (!stoppingToken.IsCancellationRequested)
+        stateObserver.SetWorker("Summary", "running");
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                await scope.ServiceProvider.GetRequiredService<SummaryWorker>().ProcessOneAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception exception)
-            {
-                LogCycleFailed(logger, exception);
-            }
+                try
+                {
+                    await using var scope = scopeFactory.CreateAsyncScope();
+                    await scope.ServiceProvider.GetRequiredService<SummaryWorker>().ProcessOneAsync(stoppingToken);
+                    stateObserver.SetWorker("Summary", "running");
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception exception)
+                {
+                    stateObserver.SetWorker("Summary", "faulted");
+                    LogCycleFailed(logger, exception);
+                }
 
-            await Task.Delay(Math.Clamp(options.Value.PollingIntervalMs, 100, 60_000), stoppingToken);
+                await Task.Delay(Math.Clamp(options.Value.PollingIntervalMs, 100, 60_000), stoppingToken);
+            }
+        }
+        finally
+        {
+            stateObserver.SetWorker("Summary", "stopped");
         }
     }
 

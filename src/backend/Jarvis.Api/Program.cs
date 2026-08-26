@@ -10,16 +10,30 @@ using Jarvis.Api.Realtime;
 using Jarvis.Api.Tasks;
 using Jarvis.Api.Notifications;
 using Jarvis.Api.Memory;
+using Jarvis.Api.Observability;
+using Jarvis.Api.Diagnostics;
 using Jarvis.Application.Outbox;
 using Jarvis.Contracts;
 using Jarvis.Infrastructure;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Observability;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Logging.ClearProviders();
+builder.Logging.AddJarvisJsonConsole();
+builder.Services.AddJarvisTelemetry(builder.Configuration, "jarvis.api", includeAspNetCoreInstrumentation: true);
+builder.Services
+    .AddOptions<DiagnosticsOptions>()
+    .Bind(builder.Configuration.GetSection(DiagnosticsOptions.SectionName))
+    .Validate(options => options.RequireLoopback, "Diagnostics:RequireLoopback must remain enabled.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<DiagnosticsRegistry>();
+builder.Services.AddScoped<DiagnosticsService>();
 
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi(options =>
@@ -106,6 +120,12 @@ builder.Services.AddOpenApi(options =>
                 StringComparison.OrdinalIgnoreCase) == true
             || context.Description.RelativePath?.StartsWith(
                 "api/v1/devices/register",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.Equals(
+                "api/v1/diagnostics",
+                StringComparison.OrdinalIgnoreCase) == true
+            || context.Description.RelativePath?.StartsWith(
+                "health/",
                 StringComparison.OrdinalIgnoreCase) == true)
         {
             operation.Security =
@@ -144,6 +164,8 @@ builder.Services.AddOpenApi(options =>
     });
 });
 builder.Services.AddJarvisInfrastructure(builder.Configuration);
+builder.Services.AddSingleton<IRuntimeStateObserver>(serviceProvider =>
+    serviceProvider.GetRequiredService<DiagnosticsRegistry>());
 builder.Services.AddSingleton<IOutboxPublisher, SignalRNotificationPublisher>();
 builder.Services
     .AddOptions<LocalBearerTokenOptions>()
@@ -206,11 +228,13 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 var app = builder.Build();
 
+app.UseJarvisCorrelationId();
 app.UseExceptionHandler();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
 app.MapOpenApi();
+app.MapDiagnosticsEndpoints();
 
 app.MapGet("/api/v1/phase0/health", () =>
         TypedResults.Ok(new Phase0HealthResponse(Phase0Status.Ready, "phase-0")))

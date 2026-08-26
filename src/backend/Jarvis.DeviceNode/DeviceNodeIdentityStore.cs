@@ -1,8 +1,9 @@
-using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Jarvis.Contracts;
+using Jarvis.Infrastructure.Resilience;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
@@ -44,6 +45,7 @@ public sealed class DeviceNodeRegistrationHttpClient(HttpClient client) : IDevic
         };
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bootstrapBearer);
         message.Headers.Add("Idempotency-Key", idempotencyKey);
+        message.Options.Set(JarvisHttpResilience.AllowIdempotentRetry, true);
         using var response = await client.SendAsync(
             message,
             HttpCompletionOption.ResponseHeadersRead,
@@ -136,40 +138,151 @@ public sealed class DeviceNodeBootstrapHostedService(DeviceNodeBootstrapper boot
 }
 
 /// <summary>
-/// Persists the Device credential in the current macOS user's login Keychain.
-/// The secret is supplied through stdin, never a process argument or log field.
+/// Identifies the one executable allowed to read a Keychain item.
 /// </summary>
-public sealed class MacOsKeychainDeviceNodeIdentityStore(IOptions<DeviceNodeOptions> options) : IDeviceNodeIdentityStore
+public sealed record MacOsKeychainAccess
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private readonly DeviceNodeOptions nodeOptions = options.Value;
-
-    public async Task<DeviceNodeIdentity?> LoadAsync(CancellationToken cancellationToken = default)
+    public MacOsKeychainAccess(string trustedApplicationPath)
     {
-        EnsureMacOs();
-        var result = await RunSecurityAsync(
-            ["find-generic-password", "-a", Account(), "-s", Service(), "-w"],
-            null,
-            cancellationToken).ConfigureAwait(false);
-        if (result.ExitCode == 44)
+        if (string.IsNullOrWhiteSpace(trustedApplicationPath) || !Path.IsPathFullyQualified(trustedApplicationPath))
         {
-            return null;
+            throw new ArgumentException("A fully-qualified trusted application path is required.", nameof(trustedApplicationPath));
         }
 
-        EnsureSuccess(result);
-        return JsonSerializer.Deserialize<DeviceNodeIdentity>(result.StandardOutput.Trim(), JsonOptions)
-            ?? throw new InvalidDataException("The Keychain Device Node identity is invalid.");
+        var normalizedPath = Path.GetFullPath(trustedApplicationPath);
+        if (string.Equals(normalizedPath, "/usr/bin/security", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The generic macOS security CLI cannot be a Keychain trusted application.", nameof(trustedApplicationPath));
+        }
+
+        var executableName = Path.GetFileName(normalizedPath);
+        if (string.Equals(executableName, "dotnet", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(executableName, "dotnet.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "The shared dotnet host cannot be a Keychain trusted application; publish and run the dedicated self-contained Jarvis.DeviceNode apphost.",
+                nameof(trustedApplicationPath));
+        }
+
+        if (!string.Equals(executableName, "Jarvis.DeviceNode", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The Keychain trusted application must be the dedicated self-contained Jarvis.DeviceNode apphost.",
+                nameof(trustedApplicationPath));
+        }
+
+        TrustedApplicationPath = normalizedPath;
     }
 
-    public async Task SaveAsync(DeviceNodeIdentity identity, CancellationToken cancellationToken = default)
+    public string TrustedApplicationPath { get; }
+}
+
+/// <summary>
+/// Small public seam around the macOS Security.framework APIs. The production
+/// registration supplies the native implementation; tests can inject a
+/// synchronous fake without invoking a Keychain prompt or a shell command.
+/// </summary>
+public interface IMacOsKeychainApi
+{
+    string? ReadGenericPassword(string service, string account);
+
+    void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access);
+}
+
+/// <summary>
+/// Synchronous Security.framework seam. The interaction-state methods mirror
+/// the native OSStatus/out-Boolean ABI so tests can exercise fail-closed state
+/// capture and restoration without invoking a real Keychain or UI.
+/// </summary>
+internal interface IMacOsKeychainNative
+{
+    int GetUserInteractionAllowed(out byte state);
+
+    int SetUserInteractionAllowed(byte state);
+
+    string? ReadGenericPassword(string service, string account);
+
+    void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access);
+}
+
+/// <summary>
+/// Persists the Device credential in the current macOS user's login Keychain.
+/// Security.framework applies an ACL for the Device Node executable itself;
+/// no generic <c>/usr/bin/security</c> process is granted access.
+/// </summary>
+public sealed class MacOsKeychainDeviceNodeIdentityStore : IDeviceNodeIdentityStore
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly DeviceNodeOptions nodeOptions;
+    private readonly IMacOsKeychainApi keychainApi;
+    private readonly Func<string?> processPathProvider;
+    private readonly bool requireMacOs;
+
+    public MacOsKeychainDeviceNodeIdentityStore(IOptions<DeviceNodeOptions> options)
+        : this(options, new SecurityFrameworkKeychainApi(), static () => Environment.ProcessPath, requireMacOs: true)
+    {
+    }
+
+    public MacOsKeychainDeviceNodeIdentityStore(IOptions<DeviceNodeOptions> options, IMacOsKeychainApi keychainApi)
+        : this(options, keychainApi, static () => Environment.ProcessPath, requireMacOs: false)
+    {
+    }
+
+    public MacOsKeychainDeviceNodeIdentityStore(
+        IOptions<DeviceNodeOptions> options,
+        IMacOsKeychainApi keychainApi,
+        Func<string?> processPathProvider)
+        : this(options, keychainApi, processPathProvider, requireMacOs: false)
+    {
+    }
+
+    private MacOsKeychainDeviceNodeIdentityStore(
+        IOptions<DeviceNodeOptions> options,
+        IMacOsKeychainApi keychainApi,
+        Func<string?> processPathProvider,
+        bool requireMacOs)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(keychainApi);
+        ArgumentNullException.ThrowIfNull(processPathProvider);
+        nodeOptions = options.Value;
+        this.keychainApi = keychainApi;
+        this.processPathProvider = processPathProvider;
+        this.requireMacOs = requireMacOs;
+    }
+
+    public Task<DeviceNodeIdentity?> LoadAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureMacOs();
+        var serialized = keychainApi.ReadGenericPassword(Service(), Account());
+        cancellationToken.ThrowIfCancellationRequested();
+        if (serialized is null)
+        {
+            return Task.FromResult<DeviceNodeIdentity?>(null);
+        }
+
+        var identity = JsonSerializer.Deserialize<DeviceNodeIdentity>(serialized, JsonOptions)
+            ?? throw new InvalidDataException("The Keychain Device Node identity is invalid.");
+        return Task.FromResult<DeviceNodeIdentity?>(identity);
+    }
+
+    public Task SaveAsync(DeviceNodeIdentity identity, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(identity);
+        cancellationToken.ThrowIfCancellationRequested();
         EnsureMacOs();
-        var result = await RunSecurityAsync(
-            ["add-generic-password", "-U", "-a", Account(), "-s", Service(), "-w"],
-            JsonSerializer.Serialize(identity, JsonOptions),
-            cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(result);
+        var executable = processPathProvider();
+        if (string.IsNullOrWhiteSpace(executable))
+        {
+            throw new InvalidOperationException("The Device Node executable path is unavailable for Keychain ACL setup.");
+        }
+
+        var access = new MacOsKeychainAccess(executable);
+        var serialized = JsonSerializer.Serialize(identity, JsonOptions);
+        keychainApi.WriteGenericPassword(Service(), Account(), serialized, access);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
     }
 
     private string Account() => string.IsNullOrWhiteSpace(nodeOptions.KeychainAccount)
@@ -180,61 +293,433 @@ public sealed class MacOsKeychainDeviceNodeIdentityStore(IOptions<DeviceNodeOpti
         ? throw new InvalidOperationException("DeviceNode:KeychainService is required.")
         : nodeOptions.KeychainService;
 
-    private static void EnsureMacOs()
+    private void EnsureMacOs()
     {
-        if (!OperatingSystem.IsMacOS())
+        if (requireMacOs && !OperatingSystem.IsMacOS())
         {
             throw new PlatformNotSupportedException("V1 Device Node secure identity storage requires macOS Keychain.");
         }
     }
 
-    private static async Task<SecurityResult> RunSecurityAsync(
-        IReadOnlyList<string> arguments,
-        string? standardInput,
-        CancellationToken cancellationToken)
+}
+
+/// <summary>
+/// Native Security.framework implementation. Keeping this behind
+/// <see cref="IMacOsKeychainApi"/> makes ACL behavior observable in tests while
+/// ensuring the production path never invokes the interactive security CLI.
+/// </summary>
+internal sealed class SecurityFrameworkKeychainApi : IMacOsKeychainApi
+{
+    private const int ErrSecSuccess = 0;
+    private const int ErrSecItemNotFound = -25300;
+    private const int ErrSecInteractionNotAllowed = -25308;
+    private const string SecurityFramework = "/System/Library/Frameworks/Security.framework/Security";
+    private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    private static readonly object UserInteractionGate = new();
+    private readonly IMacOsKeychainNative native;
+
+    public SecurityFrameworkKeychainApi()
+        : this(new SecurityFrameworkKeychainNative())
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "/usr/bin/security",
-            UseShellExecute = false,
-            RedirectStandardInput = standardInput is not null,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        using var process = new Process { StartInfo = startInfo };
-        if (!process.Start())
-        {
-            throw new InvalidOperationException("macOS Keychain command could not start.");
-        }
-
-        if (standardInput is not null)
-        {
-            await process.StandardInput.WriteLineAsync(standardInput.AsMemory(), cancellationToken).ConfigureAwait(false);
-            process.StandardInput.Close();
-        }
-
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        return new SecurityResult(process.ExitCode, await outputTask.ConfigureAwait(false), await errorTask.ConfigureAwait(false));
     }
 
-    private static void EnsureSuccess(SecurityResult result)
+    internal SecurityFrameworkKeychainApi(IMacOsKeychainNative native)
     {
-        if (result.ExitCode != 0)
+        ArgumentNullException.ThrowIfNull(native);
+        this.native = native;
+    }
+
+    public string? ReadGenericPassword(string service, string account) =>
+        WithoutUserInteraction(() => native.ReadGenericPassword(service, account));
+
+    public void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access) =>
+        WithoutUserInteraction(() => native.WriteGenericPassword(service, account, password, access));
+
+    private static string? ReadGenericPasswordNative(string service, string account)
+    {
+        using var serviceBytes = new UnmanagedUtf8(service);
+        using var accountBytes = new UnmanagedUtf8(account);
+        var status = SecKeychainFindGenericPassword(
+            IntPtr.Zero,
+            checked((uint)serviceBytes.Length),
+            serviceBytes.Pointer,
+            checked((uint)accountBytes.Length),
+            accountBytes.Pointer,
+            out var passwordLength,
+            out var passwordData,
+            out var itemRef);
+        if (status == ErrSecItemNotFound)
         {
-            throw new InvalidOperationException(
-                $"macOS Keychain operation failed with exit code {result.ExitCode}: {Sanitize(result.StandardError)}");
+            return null;
+        }
+
+        EnsureStatus(status, "find generic password");
+        try
+        {
+            var bytes = new byte[passwordLength];
+            if (passwordLength > 0)
+            {
+                Marshal.Copy(passwordData, bytes, 0, checked((int)passwordLength));
+            }
+
+            return System.Text.Encoding.UTF8.GetString(bytes);
+        }
+        finally
+        {
+            if (passwordData != IntPtr.Zero)
+            {
+                EnsureStatus(SecKeychainItemFreeContent(IntPtr.Zero, passwordData), "free generic password content");
+            }
+
+            if (itemRef != IntPtr.Zero)
+            {
+                CFRelease(itemRef);
+            }
         }
     }
 
-    private static string Sanitize(string value) => value.Length <= 500 ? value.Trim() : value[..500].Trim();
+    private static void WriteGenericPasswordNative(string service, string account, string password, MacOsKeychainAccess access)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        using var serviceBytes = new UnmanagedUtf8(service);
+        using var accountBytes = new UnmanagedUtf8(account);
+        using var passwordBytes = new UnmanagedUtf8(password);
+        var status = SecKeychainFindGenericPassword(
+            IntPtr.Zero,
+            checked((uint)serviceBytes.Length),
+            serviceBytes.Pointer,
+            checked((uint)accountBytes.Length),
+            accountBytes.Pointer,
+            out _,
+            out var existingPasswordData,
+            out var itemRef);
 
-    private sealed record SecurityResult(int ExitCode, string StandardOutput, string StandardError);
+        if (existingPasswordData != IntPtr.Zero)
+        {
+            EnsureStatus(SecKeychainItemFreeContent(IntPtr.Zero, existingPasswordData), "free generic password content");
+        }
+
+        if (status == ErrSecItemNotFound)
+        {
+            EnsureStatus(
+                SecKeychainAddGenericPassword(
+                    IntPtr.Zero,
+                    checked((uint)serviceBytes.Length),
+                    serviceBytes.Pointer,
+                    checked((uint)accountBytes.Length),
+                    accountBytes.Pointer,
+                    checked((uint)passwordBytes.Length),
+                    passwordBytes.Pointer,
+                    out itemRef),
+                "add generic password");
+        }
+        else
+        {
+            EnsureStatus(status, "find generic password for update");
+            EnsureStatus(
+                SecKeychainItemModifyAttributesAndData(
+                    itemRef,
+                    IntPtr.Zero,
+                    checked((uint)passwordBytes.Length),
+                    passwordBytes.Pointer),
+                "update generic password");
+        }
+
+        try
+        {
+            SetAccess(itemRef, access);
+        }
+        finally
+        {
+            if (itemRef != IntPtr.Zero)
+            {
+                CFRelease(itemRef);
+            }
+        }
+    }
+
+    private T WithoutUserInteraction<T>(Func<T> operation)
+    {
+        lock (UserInteractionGate)
+        {
+            var getStatus = native.GetUserInteractionAllowed(out var previousState);
+            EnsureStatus(getStatus, "get user interaction setting");
+
+            var disableStatus = native.SetUserInteractionAllowed(0);
+            if (disableStatus != ErrSecSuccess)
+            {
+                var restoreAfterDisableFailureStatus = native.SetUserInteractionAllowed(previousState);
+                if (restoreAfterDisableFailureStatus != ErrSecSuccess)
+                {
+                    throw new InvalidOperationException(
+                        $"macOS Keychain disable user interaction failed with status {disableStatus}; "
+                        + $"restoring the previous setting also failed with status {restoreAfterDisableFailureStatus}.");
+                }
+
+                EnsureStatus(disableStatus, "disable user interaction");
+            }
+
+            try
+            {
+                return operation();
+            }
+            finally
+            {
+                EnsureStatus(native.SetUserInteractionAllowed(previousState), "restore user interaction setting");
+            }
+        }
+    }
+
+    private void WithoutUserInteraction(Action operation) =>
+        WithoutUserInteraction(
+            () =>
+            {
+                operation();
+                return true;
+            });
+
+    private static void SetAccess(IntPtr itemRef, MacOsKeychainAccess access)
+    {
+        using var executablePath = new UnmanagedUtf8(access.TrustedApplicationPath);
+        EnsureStatus(
+            SecTrustedApplicationCreateFromPath(executablePath.Pointer, out var trustedApplication),
+            "create trusted application");
+        try
+        {
+            var trustedApplications = CFArrayCreateMutable(IntPtr.Zero, 1, IntPtr.Zero);
+            if (trustedApplications == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("macOS Keychain trusted application list could not be created.");
+            }
+
+            try
+            {
+                CFArrayAppendValue(trustedApplications, trustedApplication);
+                EnsureStatus(
+                    SecAccessCreate(IntPtr.Zero, trustedApplications, out var keychainAccess),
+                    "create Keychain access");
+                try
+                {
+                    EnsureStatus(SecKeychainItemSetAccess(itemRef, keychainAccess), "set Keychain access");
+                }
+                finally
+                {
+                    if (keychainAccess != IntPtr.Zero)
+                    {
+                        CFRelease(keychainAccess);
+                    }
+                }
+            }
+            finally
+            {
+                CFRelease(trustedApplications);
+            }
+        }
+        finally
+        {
+            if (trustedApplication != IntPtr.Zero)
+            {
+                CFRelease(trustedApplication);
+            }
+        }
+    }
+
+    private static void EnsureStatus(int status, string operation)
+    {
+        if (status != ErrSecSuccess)
+        {
+            if (status == ErrSecInteractionNotAllowed)
+            {
+                throw new InvalidOperationException(
+                    $"macOS Keychain {operation} refused user interaction ({status}); the Device Node fails closed without showing UI.");
+            }
+
+            throw new InvalidOperationException($"macOS Keychain {operation} failed with status {status}.");
+        }
+    }
+
+    private sealed class SecurityFrameworkKeychainNative : IMacOsKeychainNative
+    {
+        public int GetUserInteractionAllowed(out byte state) => SecKeychainGetUserInteractionAllowed(out state);
+
+        public int SetUserInteractionAllowed(byte state) => SecKeychainSetUserInteractionAllowed(state);
+
+        public string? ReadGenericPassword(string service, string account) => ReadGenericPasswordNative(service, account);
+
+        public void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access) =>
+            WriteGenericPasswordNative(service, account, password, access);
+    }
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainFindGenericPassword")]
+    private static extern int SecKeychainFindGenericPassword(
+        IntPtr keychainOrArray,
+        uint serviceNameLength,
+        IntPtr serviceName,
+        uint accountNameLength,
+        IntPtr accountName,
+        out uint passwordLength,
+        out IntPtr passwordData,
+        out IntPtr itemRef);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainAddGenericPassword")]
+    private static extern int SecKeychainAddGenericPassword(
+        IntPtr keychain,
+        uint serviceNameLength,
+        IntPtr serviceName,
+        uint accountNameLength,
+        IntPtr accountName,
+        uint passwordLength,
+        IntPtr passwordData,
+        out IntPtr itemRef);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainItemModifyAttributesAndData")]
+    private static extern int SecKeychainItemModifyAttributesAndData(
+        IntPtr itemRef,
+        IntPtr attrList,
+        uint length,
+        IntPtr data);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainItemFreeContent")]
+    private static extern int SecKeychainItemFreeContent(IntPtr attrList, IntPtr data);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainItemSetAccess")]
+    private static extern int SecKeychainItemSetAccess(IntPtr itemRef, IntPtr access);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainGetUserInteractionAllowed")]
+    private static extern int SecKeychainGetUserInteractionAllowed(out byte state);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecKeychainSetUserInteractionAllowed")]
+    private static extern int SecKeychainSetUserInteractionAllowed(byte state);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecTrustedApplicationCreateFromPath")]
+    private static extern int SecTrustedApplicationCreateFromPath(IntPtr path, out IntPtr trustedApplication);
+
+    [DllImport(SecurityFramework, EntryPoint = "SecAccessCreate")]
+    private static extern int SecAccessCreate(IntPtr name, IntPtr trustedList, out IntPtr access);
+
+    [DllImport(CoreFoundation, EntryPoint = "CFArrayCreateMutable")]
+    private static extern IntPtr CFArrayCreateMutable(IntPtr allocator, nint capacity, IntPtr callbacks);
+
+    [DllImport(CoreFoundation, EntryPoint = "CFArrayAppendValue")]
+    private static extern void CFArrayAppendValue(IntPtr array, IntPtr value);
+
+    [DllImport(CoreFoundation, EntryPoint = "CFRelease")]
+    private static extern void CFRelease(IntPtr value);
+
+    private sealed class UnmanagedUtf8 : IDisposable
+    {
+        public UnmanagedUtf8(string value)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+            Pointer = Marshal.AllocHGlobal(bytes.Length + 1);
+            Marshal.Copy(bytes, 0, Pointer, bytes.Length);
+            Marshal.WriteByte(Pointer, bytes.Length, 0);
+            Length = bytes.Length;
+        }
+
+        public IntPtr Pointer { get; }
+
+        public int Length { get; }
+
+        public void Dispose() => Marshal.FreeHGlobal(Pointer);
+    }
+}
+
+/// <summary>
+/// Stores a Device identity in an owner-only JSON file. This is intentionally
+/// an explicit opt-in seam for isolated launchd smoke/CI environments where
+/// invoking the macOS <c>security</c> CLI can require interactive ACL consent.
+/// Production macOS configuration should leave <see cref="DeviceNodeOptions.CredentialFilePath"/>
+/// unset so the login Keychain remains the default secure store.
+/// </summary>
+public sealed class OwnerOnlyFileDeviceNodeIdentityStore(IOptions<DeviceNodeOptions> options) : IDeviceNodeIdentityStore
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly string path = ValidatePath(options.Value.CredentialFilePath);
+
+    public async Task<DeviceNodeIdentity?> LoadAsync(CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        EnsureOwnerOnlyPermissions(path);
+        await using var stream = File.OpenRead(path);
+        return await JsonSerializer.DeserializeAsync<DeviceNodeIdentity>(stream, JsonOptions, cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidDataException("The owner-only Device Node identity file is invalid.");
+    }
+
+    public async Task SaveAsync(DeviceNodeIdentity identity, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(Path.GetDirectoryName(path)!, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4_096,
+                FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                }
+
+                await JsonSerializer.SerializeAsync(stream, identity, JsonOptions, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(temporaryPath, path, overwrite: true);
+            EnsureOwnerOnlyPermissions(path);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+    }
+
+    private static string ValidatePath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !Path.IsPathFullyQualified(value))
+        {
+            throw new InvalidOperationException("DeviceNode:CredentialFilePath must be an explicit absolute path.");
+        }
+
+        var fullPath = Path.GetFullPath(value);
+        if (Path.GetPathRoot(fullPath) == fullPath)
+        {
+            throw new InvalidOperationException("DeviceNode:CredentialFilePath must not be a filesystem root.");
+        }
+
+        return fullPath;
+    }
+
+    private static void EnsureOwnerOnlyPermissions(string filePath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var mode = File.GetUnixFileMode(filePath);
+        var ownerReadWrite = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        if ((mode & ~ownerReadWrite) != 0 || (mode & ownerReadWrite) != ownerReadWrite)
+        {
+            throw new UnauthorizedAccessException("The Device Node identity file must be owner-readable and owner-writable only.");
+        }
+    }
 }

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Jarvis.Contracts;
+using Jarvis.Infrastructure.Resilience;
 using Microsoft.Extensions.Options;
 
 namespace Jarvis.DeviceNode;
@@ -19,6 +20,11 @@ public sealed class DeviceNodeOptions
     public string Platform { get; set; } = OperatingSystem.IsMacOS()
         ? "macos"
         : OperatingSystem.IsWindows() ? "windows" : "linux";
+    /// <summary>
+    /// Optional owner-only identity file used by isolated service smoke tests.
+    /// Production macOS installs leave this unset and use the login Keychain.
+    /// </summary>
+    public string? CredentialFilePath { get; set; }
     public string KeychainService { get; set; } = "com.hobocy.jarvis.device-node";
     public string KeychainAccount { get; set; } = Environment.UserName;
     public CapabilityEnvelopeOptions Capabilities { get; set; } = new();
@@ -109,6 +115,7 @@ public sealed class DeviceNodeHttpClient(
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", nodeOptions.DeviceCredential);
         request.Headers.Add("Idempotency-Key", idempotencyKey);
+        request.Options.Set(JarvisHttpResilience.AllowIdempotentRetry, true);
         if (!string.IsNullOrWhiteSpace(leaseOwner))
         {
             request.Headers.Add("X-Lease-Owner", leaseOwner);

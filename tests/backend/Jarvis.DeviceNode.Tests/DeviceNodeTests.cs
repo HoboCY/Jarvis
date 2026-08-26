@@ -3,6 +3,9 @@ using Jarvis.DeviceNode.Codex;
 using Jarvis.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http;
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Xunit;
@@ -17,6 +20,49 @@ public sealed class DeviceNodeTests
     public void DeviceNodeAssemblyMarkerIsAvailable()
     {
         Assert.NotNull(typeof(DeviceNodeAssemblyMarker).Assembly);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ControlPlaneRequestsCarryTheActiveCorrelationId()
+    {
+        using var activity = new Activity("device-node-test").Start();
+        activity!.SetTag("correlation.id", "01JARVIS.TEST-CORRELATION");
+        var inner = new RecordingHandler();
+        using var handler = new CorrelationIdHttpMessageHandler { InnerHandler = inner };
+        using var client = new HttpClient(handler);
+
+        using var response = await client.GetAsync("http://127.0.0.1/health");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("01JARVIS.TEST-CORRELATION", inner.Request!.Headers.GetValues("X-Correlation-ID").Single());
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task CorrelationIdIsGeneratedWhenTheCallHasNoActiveActivity()
+    {
+        var inner = new RecordingHandler();
+        using var handler = new CorrelationIdHttpMessageHandler { InnerHandler = inner };
+        using var client = new HttpClient(handler);
+
+        await client.GetAsync("http://127.0.0.1/health");
+
+        var correlationId = inner.Request!.Headers.GetValues("X-Correlation-ID").Single();
+        Assert.InRange(correlationId.Length, 20, 128);
+        Assert.DoesNotContain("Bearer", correlationId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class RecordingHandler : HttpMessageHandler
+    {
+        public HttpRequestMessage? Request { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Request = request;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                RequestMessage = request
+            });
+        }
     }
 
     [Fact]
@@ -161,6 +207,178 @@ public sealed class DeviceNodeTests
         Assert.Equal(registered.DeviceCredential, store.Saved?.DeviceCredential);
         Assert.Equal(registered.DeviceCredential, options.DeviceCredential);
         Assert.Equal(string.Empty, options.BootstrapBearer);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task OwnerOnlyIdentityStoreRoundTripsWithOwnerOnlyPermissions()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"jarvis-device-identity-{Guid.NewGuid():N}");
+        var path = Path.Combine(root, "identity.json");
+        var identity = new DeviceNodeIdentity(Guid.NewGuid(), "owner-only-device-credential");
+        try
+        {
+            var options = Options.Create(new DeviceNodeOptions { CredentialFilePath = path });
+            var store = new OwnerOnlyFileDeviceNodeIdentityStore(options);
+
+            await store.SaveAsync(identity);
+
+            var loaded = await store.LoadAsync();
+            Assert.Equal(identity, loaded);
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task KeychainIdentityStoreUsesOnlyTheDeviceExecutableAndNeverTheGenericSecurityCli()
+    {
+        var keychain = new RecordingKeychainApi();
+        var options = Options.Create(new DeviceNodeOptions
+        {
+            KeychainService = "jarvis-test-service",
+            KeychainAccount = "jarvis-test-account"
+        });
+        var store = new MacOsKeychainDeviceNodeIdentityStore(options, keychain, () => "/tmp/Jarvis.DeviceNode");
+        var identity = new DeviceNodeIdentity(Guid.NewGuid(), "keychain-device-credential");
+
+        await store.SaveAsync(identity);
+
+        Assert.NotNull(keychain.Access);
+        Assert.Equal("/tmp/Jarvis.DeviceNode", keychain.Access!.TrustedApplicationPath);
+        Assert.NotEqual("/usr/bin/security", keychain.Access.TrustedApplicationPath);
+        Assert.DoesNotContain("/usr/bin/security", keychain.SerializedValue ?? string.Empty, StringComparison.Ordinal);
+        Assert.Equal(identity, await store.LoadAsync());
+    }
+
+    [Theory]
+    [InlineData("/usr/bin/security")]
+    [InlineData("/usr/local/bin/dotnet")]
+    [InlineData("/tmp/Jarvis.DeviceNode.dll")]
+    public async System.Threading.Tasks.Task KeychainIdentityStoreRejectsNonDedicatedTrustedApplications(string processPath)
+    {
+        var store = new MacOsKeychainDeviceNodeIdentityStore(
+            Options.Create(new DeviceNodeOptions
+            {
+                KeychainService = "jarvis-test-service",
+                KeychainAccount = "jarvis-test-account"
+            }),
+            new RecordingKeychainApi(),
+            () => processPath);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.SaveAsync(new DeviceNodeIdentity(Guid.NewGuid(), "keychain-device-credential")));
+
+        Assert.Contains("Keychain", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task KeychainIdentityStoreSurfacesNativeErrorsThroughThePublicSeam()
+    {
+        var store = new MacOsKeychainDeviceNodeIdentityStore(
+            Options.Create(new DeviceNodeOptions
+            {
+                KeychainService = "jarvis-test-service",
+                KeychainAccount = "jarvis-test-account"
+            }),
+            new ThrowingKeychainApi());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => store.LoadAsync());
+
+        Assert.Equal("native keychain failure", exception.Message);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task KeychainIdentityStoreHonorsCallerCancellationBeforeNativeOperations()
+    {
+        var keychain = new RecordingKeychainApi();
+        var store = new MacOsKeychainDeviceNodeIdentityStore(
+            Options.Create(new DeviceNodeOptions
+            {
+                KeychainService = "jarvis-test-service",
+                KeychainAccount = "jarvis-test-account"
+            }),
+            keychain);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.LoadAsync(cancellation.Token));
+        Assert.Equal(0, keychain.ReadCount);
+    }
+
+    [Fact]
+    public void SecurityFrameworkKeychainCapturesAndRestoresTrueAndFalseInteractionStatesWithoutRealUi()
+    {
+        foreach (var previousState in new byte[] { 0, 1 })
+        {
+            var native = new RecordingKeychainNative { InteractionState = previousState };
+            var keychain = new SecurityFrameworkKeychainApi(native);
+
+            Assert.Null(keychain.ReadGenericPassword("service", "account"));
+            Assert.Equal(new byte[] { 0, previousState }, native.StateChanges);
+            Assert.Equal(1, native.ReadCount);
+        }
+    }
+
+    [Fact]
+    public void SecurityFrameworkKeychainFailsClosedWhenInteractionStateCannotBeRead()
+    {
+        var native = new RecordingKeychainNative { GetStatus = -50 };
+        var keychain = new SecurityFrameworkKeychainApi(native);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => keychain.ReadGenericPassword("service", "account"));
+
+        Assert.Contains("get user interaction", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(native.StateChanges);
+        Assert.Equal(0, native.ReadCount);
+    }
+
+    [Fact]
+    public void SecurityFrameworkKeychainFailsClosedWhenInteractionStateCannotBeDisabled()
+    {
+        var native = new RecordingKeychainNative { InteractionState = 1 };
+        native.SetStatuses.Enqueue(-51);
+        var keychain = new SecurityFrameworkKeychainApi(native);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => keychain.ReadGenericPassword("service", "account"));
+
+        Assert.Contains("disable user interaction", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(new byte[] { 0, 1 }, native.StateChanges);
+        Assert.Equal(0, native.ReadCount);
+    }
+
+    [Fact]
+    public void SecurityFrameworkKeychainRestoresInteractionAfterBusinessFailure()
+    {
+        var native = new RecordingKeychainNative { InteractionState = 1, ReadException = new InvalidOperationException("business failure") };
+        var keychain = new SecurityFrameworkKeychainApi(native);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => keychain.ReadGenericPassword("service", "account"));
+
+        Assert.Equal("business failure", exception.Message);
+        Assert.Equal(new byte[] { 0, 1 }, native.StateChanges);
+    }
+
+    [Fact]
+    public void SecurityFrameworkKeychainSurfacesInteractionRestoreFailure()
+    {
+        var native = new RecordingKeychainNative { InteractionState = 1 };
+        native.SetStatuses.Enqueue(0);
+        native.SetStatuses.Enqueue(-52);
+        var keychain = new SecurityFrameworkKeychainApi(native);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => keychain.ReadGenericPassword("service", "account"));
+
+        Assert.Contains("restore user interaction", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(new byte[] { 0, 1 }, native.StateChanges);
     }
 
     [Fact]
@@ -749,6 +967,77 @@ public sealed class DeviceNodeTests
         {
             Saved = value;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingKeychainApi : IMacOsKeychainApi
+    {
+        public MacOsKeychainAccess? Access { get; private set; }
+        public string? SerializedValue { get; private set; }
+        public int ReadCount { get; private set; }
+
+        public string? ReadGenericPassword(string service, string account)
+        {
+            ReadCount++;
+            return SerializedValue;
+        }
+
+        public void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access)
+        {
+            SerializedValue = password;
+            Access = access;
+        }
+    }
+
+    private sealed class ThrowingKeychainApi : IMacOsKeychainApi
+    {
+        public string? ReadGenericPassword(string service, string account) =>
+            throw new InvalidOperationException("native keychain failure");
+
+        public void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access) =>
+            throw new InvalidOperationException("native keychain failure");
+    }
+
+    private sealed class RecordingKeychainNative : IMacOsKeychainNative
+    {
+        public byte InteractionState { get; set; } = 1;
+        public int GetStatus { get; set; }
+        public Queue<int> SetStatuses { get; } = new();
+        public List<byte> StateChanges { get; } = [];
+        public Exception? ReadException { get; set; }
+        public int ReadCount { get; private set; }
+
+        public int GetUserInteractionAllowed(out byte state)
+        {
+            state = InteractionState;
+            return GetStatus;
+        }
+
+        public int SetUserInteractionAllowed(byte state)
+        {
+            StateChanges.Add(state);
+            var status = SetStatuses.Count > 0 ? SetStatuses.Dequeue() : 0;
+            if (status == 0)
+            {
+                InteractionState = state;
+            }
+
+            return status;
+        }
+
+        public string? ReadGenericPassword(string service, string account)
+        {
+            ReadCount++;
+            if (ReadException is not null)
+            {
+                throw ReadException;
+            }
+
+            return null;
+        }
+
+        public void WriteGenericPassword(string service, string account, string password, MacOsKeychainAccess access)
+        {
         }
     }
 

@@ -82,7 +82,8 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             ["OpenAI:SummarizerModel"] = "gpt-4.1-mini",
             ["OpenAI:AllowedVoices:0"] = "alloy",
             ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
-            ["OpenAI:ClientSecretLifetimeSeconds"] = "600"
+            ["OpenAI:ClientSecretLifetimeSeconds"] = "600",
+            ["Diagnostics:AllowTestServerLoopback"] = "true"
         };
         if (_workerDeviceId is not null)
         {

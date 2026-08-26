@@ -94,10 +94,7 @@
         }
       },
       "jarvis.domain": {
-        "type": "Project",
-        "dependencies": {
-          "Microsoft.NET.Test.Sdk": "[17.13.0, )"
-        }
+        "type": "Project"
       }
     }
   }

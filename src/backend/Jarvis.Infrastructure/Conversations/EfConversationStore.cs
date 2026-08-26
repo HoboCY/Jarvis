@@ -8,6 +8,7 @@ using Jarvis.Domain.Idempotency;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Idempotency;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using DomainConversationStatus = Jarvis.Domain.Conversations.ConversationStatus;
@@ -361,6 +362,7 @@ public sealed class EfConversationStore(
             payload
         }, JsonOptions);
         db.OutboxMessages.Add(OutboxMessage.Create(eventId, eventType, payloadJson, nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
     }
 
     private IdempotencyRecord CreateIdempotencyRecord(

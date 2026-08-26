@@ -18,10 +18,13 @@ using Jarvis.Infrastructure.Devices;
 using Jarvis.Infrastructure.Memory;
 using Jarvis.Infrastructure.Responses;
 using Jarvis.Infrastructure.Summaries;
+using Jarvis.Infrastructure.Resilience;
+using Jarvis.Infrastructure.Observability;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http;
 
 namespace Jarvis.Infrastructure;
@@ -33,6 +36,8 @@ public static class InfrastructureServiceCollectionExtensions
         IConfiguration configuration)
     {
         SQLitePCL.Batteries_V2.Init();
+
+        services.TryAddSingleton<IRuntimeStateObserver, RuntimeStateObserver>();
 
         services.AddSingleton(TimeProvider.System);
         services.AddDbContext<JarvisDbContext>((serviceProvider, options) =>
@@ -46,6 +51,18 @@ public static class InfrastructureServiceCollectionExtensions
             options.AddInterceptors(serviceProvider.GetServices<DbCommandInterceptor>());
         });
         services.AddSingleton<LocalUserIdentity>();
+        services.AddOptions<ResilienceOptions>()
+            .Bind(configuration.GetSection(ResilienceOptions.SectionName))
+            .Validate(options => options.MaxRetryAttempts is >= 0 and <= 5, "Resilience:MaxRetryAttempts must be between 0 and 5.")
+            .Validate(options => options.RetryBaseDelayMs > 0, "Resilience:RetryBaseDelayMs must be positive.")
+            .Validate(options => options.RetryMaxDelayMs >= options.RetryBaseDelayMs, "Resilience:RetryMaxDelayMs must not be less than RetryBaseDelayMs.")
+            .Validate(options => options.AttemptTimeoutMs > 0, "Resilience:AttemptTimeoutMs must be positive.")
+            .Validate(options => options.TotalTimeoutMs >= options.AttemptTimeoutMs, "Resilience:TotalTimeoutMs must not be less than AttemptTimeoutMs.")
+            .Validate(options => options.CircuitFailureRatio is > 0 and <= 1, "Resilience:CircuitFailureRatio must be greater than 0 and at most 1.")
+            .Validate(options => options.CircuitMinimumThroughput >= 2, "Resilience:CircuitMinimumThroughput must be at least 2.")
+            .Validate(options => options.CircuitSamplingDurationMs >= 501, "Resilience:CircuitSamplingDurationMs must be at least 501ms.")
+            .Validate(options => options.CircuitBreakDurationMs >= 501, "Resilience:CircuitBreakDurationMs must be at least 501ms.")
+            .ValidateOnStart();
         services.AddScoped<DatabaseInitializer>();
         services.AddOptions<IdempotencyOptions>()
             .Bind(configuration.GetSection(IdempotencyOptions.SectionName))
@@ -108,7 +125,9 @@ public static class InfrastructureServiceCollectionExtensions
             var options = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<OpenAiRealtimeOptions>>().Value;
             client.BaseAddress = new Uri(options.BaseUrl, UriKind.Absolute);
             client.Timeout = TimeSpan.FromSeconds(30);
-        });
+        })
+            .AddJarvisHttpResilience(serviceProvider =>
+                serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ResilienceOptions>>().Value);
         services.AddSingleton<IRealtimeSafetyIdentifierProvider, ConfiguredRealtimeSafetyIdentifierProvider>();
         services.AddScoped<IRealtimeStore, EfRealtimeStore>();
         services.AddScoped<RealtimeService>();

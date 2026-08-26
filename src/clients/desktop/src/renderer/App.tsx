@@ -19,6 +19,7 @@ import {
   DesktopApprovalFeed,
   type DesktopApproval
 } from "./approval-feed.js";
+import { parseDiagnostics, type DesktopDiagnostics } from "./diagnostics.js";
 
 type Message = {
   id: string;
@@ -198,6 +199,7 @@ export function App() {
   const [approvals, setApprovals] = useState<readonly DesktopApproval[]>([]);
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | undefined>();
   const [backendConnectionState, setBackendConnectionState] = useState("connecting");
+  const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | undefined>();
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
   const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
   const approvalFeed = useRef<DesktopApprovalFeed | undefined>(undefined);
@@ -231,6 +233,15 @@ export function App() {
     await current.refresh();
     if (approvalFeed.current === current) {
       setApprovals(current.approvals);
+    }
+  }
+
+  async function loadDiagnostics(): Promise<void> {
+    setError(undefined);
+    try {
+      setDiagnostics(parseDiagnostics(await window.jarvis.getDiagnostics()));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Diagnostics request failed.");
     }
   }
 
@@ -510,6 +521,17 @@ export function App() {
       <h1>Jarvis</h1>
       <p>Desktop voice and typed input share one persisted Conversation.</p>
       <p aria-live="polite">状态：{status}{device ? ` · ${device.name}` : ""}</p>
+      <button type="button" onClick={() => void loadDiagnostics()}>运行诊断</button>
+      {diagnostics ? (
+        <section aria-label="运行诊断">
+          <h2>运行诊断</h2>
+          <p>Backend {diagnostics.version} · uptime {diagnostics.uptimeSeconds}s · database {diagnostics.databaseAvailable ? "ok" : "unavailable"}</p>
+          <p>Tasks {Object.entries(diagnostics.tasksByStatus).map(([name, count]) => `${name}:${count}`).join(" · ") || "none"}</p>
+          <p>Approvals {diagnostics.pendingApprovals} · Notifications {diagnostics.unreadNotifications} · Outbox {diagnostics.pendingOutbox} · Devices {diagnostics.onlineDevices}</p>
+          <p>Workers {Object.entries(diagnostics.workers).map(([name, state]) => `${name}:${state}`).join(" · ") || "none"}</p>
+          <p>Circuits {Object.entries(diagnostics.circuits).map(([name, state]) => `${name}:${state}`).join(" · ") || "none"}</p>
+        </section>
+      ) : null}
       <div>
         <button type="button" onClick={() => void createConversation()}>新建会话</button>
         <input

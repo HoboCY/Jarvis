@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Scenario names intentionally use underscores so the executable test names match scenarios.json. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <ProjectReference Include="../backend/Jarvis.Api.IntegrationTests/Jarvis.Api.IntegrationTests.csproj" />
+    <ProjectReference Include="../../src/backend/Jarvis.DeviceNode/Jarvis.DeviceNode.csproj" />
+  </ItemGroup>
+</Project>

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Jarvis.Application.Devices;
+using Jarvis.Infrastructure.Observability;
 
 namespace Jarvis.DeviceNode.Codex;
 
@@ -188,6 +189,10 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 throw new InvalidOperationException("Codex app-server could not be started.");
             }
 
+            JarvisTelemetry.CodexProcessStarts.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("operation", "start")).ToArray());
+
             readTask = ReadStdoutAsync(process, CancellationToken.None);
             stderrTask = ReadStderrAsync(process, CancellationToken.None);
         }
@@ -221,49 +226,72 @@ public sealed class CodexAppServerClient : ICodexRuntime
     public async Task<CodexThreadHandle> ResumeThreadAsync(string threadId, CapabilityPolicy policy, string? cwd, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
-        await EnsureInitializedAsync(cancellationToken);
-        ValidateCwd(policy, cwd);
-        activePolicy = policy;
-        var parameters = new JsonObject
+        JarvisTelemetry.CodexThreadResumes.Add(
+            1,
+            JarvisTelemetry.BoundedTags(("operation", "resume")).ToArray());
+        try
         {
-            ["threadId"] = threadId,
-            ["cwd"] = cwd,
-            ["approvalPolicy"] = "on-request",
-            ["sandbox"] = policy.WriteFiles ? "workspace-write" : "read-only",
-            ["developerInstructions"] = BuildCapabilityInstructions(policy)
-        };
-        var response = await SendRequestAsync(CodexProtocolMethods.ThreadResume, parameters, cancellationToken);
-        return ParseThreadResponse(response);
+            await EnsureInitializedAsync(cancellationToken);
+            ValidateCwd(policy, cwd);
+            activePolicy = policy;
+            var parameters = new JsonObject
+            {
+                ["threadId"] = threadId,
+                ["cwd"] = cwd,
+                ["approvalPolicy"] = "on-request",
+                ["sandbox"] = policy.WriteFiles ? "workspace-write" : "read-only",
+                ["developerInstructions"] = BuildCapabilityInstructions(policy)
+            };
+            var response = await SendRequestAsync(CodexProtocolMethods.ThreadResume, parameters, cancellationToken);
+            return ParseThreadResponse(response);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            JarvisTelemetry.CodexThreadResumeFailures.Add(
+                1,
+                JarvisTelemetry.BoundedTags(("operation", "resume")).ToArray());
+            throw;
+        }
     }
 
     public async Task<CodexTurnHandle> StartTurnAsync(string threadId, string input, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
-        await EnsureInitializedAsync(cancellationToken);
-        // SandboxPolicy is the app-server's typed capability projection. The
-        // legacy sandbox mode on thread/start/resume remains for compatibility.
-        var parameters = new JsonObject
+        var startedAt = Stopwatch.GetTimestamp();
+        try
         {
-            ["threadId"] = threadId,
-            ["input"] = JsonSerializer.SerializeToNode(new[] { new { type = "text", text = input } }),
-            ["sandboxPolicy"] = activePolicy is { } policy
-                ? policy.WriteFiles
-                    ? JsonSerializer.SerializeToNode(new { type = "workspaceWrite", networkAccess = policy.Network, writableRoots = policy.AllowedRoots })
-                    : JsonSerializer.SerializeToNode(new { type = "readOnly", networkAccess = policy.Network })
-                : null
-        };
-        var response = await SendRequestAsync(CodexProtocolMethods.TurnStart, parameters, cancellationToken);
-        var responseObject = response.ValueKind == JsonValueKind.Object && response.TryGetProperty("turn", out var turn)
-            ? turn
-            : response;
-        var turnId = responseObject.TryGetProperty("id", out var id) ? id.GetString() : null;
-        if (string.IsNullOrWhiteSpace(turnId))
-        {
-            throw new InvalidDataException("Codex turn/start response did not contain turn.id.");
-        }
+            await EnsureInitializedAsync(cancellationToken);
+            // SandboxPolicy is the app-server's typed capability projection. The
+            // legacy sandbox mode on thread/start/resume remains for compatibility.
+            var parameters = new JsonObject
+            {
+                ["threadId"] = threadId,
+                ["input"] = JsonSerializer.SerializeToNode(new[] { new { type = "text", text = input } }),
+                ["sandboxPolicy"] = activePolicy is { } policy
+                    ? policy.WriteFiles
+                        ? JsonSerializer.SerializeToNode(new { type = "workspaceWrite", networkAccess = policy.Network, writableRoots = policy.AllowedRoots })
+                        : JsonSerializer.SerializeToNode(new { type = "readOnly", networkAccess = policy.Network })
+                    : null
+            };
+            var response = await SendRequestAsync(CodexProtocolMethods.TurnStart, parameters, cancellationToken);
+            var responseObject = response.ValueKind == JsonValueKind.Object && response.TryGetProperty("turn", out var turn)
+                ? turn
+                : response;
+            var turnId = responseObject.TryGetProperty("id", out var id) ? id.GetString() : null;
+            if (string.IsNullOrWhiteSpace(turnId))
+            {
+                throw new InvalidDataException("Codex turn/start response did not contain turn.id.");
+            }
 
-        return new CodexTurnHandle(threadId, turnId, response);
+            return new CodexTurnHandle(threadId, turnId, response);
+        }
+        finally
+        {
+            JarvisTelemetry.CodexTurnDuration.Record(
+                Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds,
+                JarvisTelemetry.BoundedTags(("operation", "start")).ToArray());
+        }
     }
 
     public async Task InterruptTurnAsync(string threadId, string turnId, CancellationToken cancellationToken = default)
@@ -410,6 +438,9 @@ public sealed class CodexAppServerClient : ICodexRuntime
                         }
                         else if (root.TryGetProperty("error", out var error) && pending.TryGetValue(requestId, out var failure))
                         {
+                            JarvisTelemetry.CodexProtocolErrors.Add(
+                                1,
+                                JarvisTelemetry.BoundedTags(("operation", "response")).ToArray());
                             failure.TrySetException(new InvalidOperationException($"Codex protocol error: {error.GetRawText()}"));
                         }
                         else if (root.TryGetProperty("method", out var method))
@@ -426,6 +457,9 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 }
                 catch (JsonException exception)
                 {
+                    JarvisTelemetry.CodexProtocolErrors.Add(
+                        1,
+                        JarvisTelemetry.BoundedTags(("operation", "json")).ToArray());
                     await events.Writer.WriteAsync(new CodexRuntimeEvent("protocol/error", JsonSerializer.SerializeToElement(new { error = exception.Message })), cancellationToken);
                 }
             }

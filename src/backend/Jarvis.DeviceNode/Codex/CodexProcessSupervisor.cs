@@ -1,4 +1,5 @@
 using Jarvis.Application.Devices;
+using Jarvis.Infrastructure.Observability;
 
 namespace Jarvis.DeviceNode.Codex;
 
@@ -104,6 +105,9 @@ public sealed class CodexProcessSupervisor
                 }
 
                 var recovering = new CodexSupervisorState(CodexSupervisorStatus.Recovering, nextAttempt, threadId, error);
+                JarvisTelemetry.CodexProcessRestarts.Add(
+                    1,
+                    JarvisTelemetry.BoundedTags(("operation", "recover")).ToArray());
                 Notify(onState, recovering);
                 await NotifyAsync(onStateAsync, recovering, cancellationToken).ConfigureAwait(false);
                 await Task.Delay(options.EffectiveRestartDelay, cancellationToken).ConfigureAwait(false);
