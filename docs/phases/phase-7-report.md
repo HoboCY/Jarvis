@@ -101,7 +101,8 @@ dotnet test ... --filter FullyQualifiedName~Phase7MobilePairingTests.RevokeAndRe
 pnpm install --frozen-lockfile -> passed
 pnpm typecheck -> passed (contracts, realtime-agent, api-client, Desktop, Mobile)
 pnpm lint -> passed
-pnpm test -> passed, 125/125 (contracts 4, realtime-agent 12, api-client 3, Mobile 49, Desktop 57)
+pnpm test -> passed, 130 individual tests (contracts 4, realtime-agent 12,
+  api-client 3, Mobile 49, Desktop 57 TS tests + 5 build/package tests)
 pnpm build -> passed (all 5 TS workspaces)
 pnpm --filter @jarvis/mobile bundle:android -> passed
 pnpm --filter @jarvis/mobile bundle:ios -> passed
@@ -114,7 +115,7 @@ pnpm check:codex-schema-canonical -> passed, 275 files
 pnpm test:codex-schema-canonical -> passed, 2/2
 pnpm check:secrets -> passed
 pnpm test:secret-scan -> passed, 1/1
-pnpm test:service-manifest -> passed, 10/10
+pnpm test:service-manifest -> passed, 14/14
 pnpm check:package-audit -> passed, 3 high advisories explicitly ignored as unfixable
 dotnet ef migrations has-pending-model-changes --project src/backend/Jarvis.Infrastructure/Jarvis.Infrastructure.csproj --startup-project src/backend/Jarvis.Api/Jarvis.Api.csproj --context Jarvis.Infrastructure.Data.JarvisDbContext -> passed, no pending model changes
 dotnet format Jarvis.sln --verify-no-changes -> passed
@@ -135,3 +136,8 @@ CI 已加入该 gate，以及 mobile typecheck/test、Android/iOS Metro bundle �
 仍有与 react-native-webrtc `AVAudioSession` singleton 的已知集成限制，且本地
 无法由 fake boundary 证明物理 route；fake native boundary、TestServer/SQLite
 和 Metro bundle 只证明应用代码边界，不替代这些 live gates。
+
+CI 已新增仅在 `main` push 运行的 Android JDK 17/SDK 37 `assembleDebug` 和
+macOS 15/CocoaPods iOS Simulator `xcodebuild` 门禁。工作流定义本身不是通过证据；
+只有 GitHub Actions 对相应提交的真实成功 run 才能关闭两个 native build gate，
+且仍不能替代 iOS/Android 物理设备和真实 OpenAI 音频验收。

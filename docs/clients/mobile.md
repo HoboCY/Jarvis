@@ -21,6 +21,30 @@ An Android Studio/JDK/Android SDK installation is required for
 `pnpm --filter @jarvis/mobile ios`. The Metro commands only validate the
 JavaScript bundle and do not replace those native build or device checks.
 
+The `main` CI workflow performs the two native compile gates independently:
+
+```sh
+cd src/clients/mobile/android
+./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+cd ../ios
+pod install
+xcodebuild \
+  -workspace JarvisMobile.xcworkspace \
+  -scheme JarvisMobile \
+  -configuration Debug \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+Android CI pins JDK 17, SDK/Build Tools 37.0.0 and NDK 27.1.12297006. The
+iOS gate uses the macOS 15 runner and an unsigned Simulator target. A workflow
+definition or Metro bundle is not proof that these builds passed; use the
+corresponding GitHub Actions run for the exact commit as the authoritative
+native-build evidence.
+
 ## Pairing and endpoint configuration
 
 1. In the Desktop app, open **Mobile 配对** and select **生成手机配对码**.
@@ -82,9 +106,10 @@ contain an unused browser transport symbol in the vendor bundle; the gate
 rejects invocation/global registration, while Mobile always injects its own
 transport.
 
-Native Gradle/Xcode builds, physical-device audio routing, and a real OpenAI
-account remain live gates when the required toolchains and devices are
-available. `react-native-incall-manager` has a known iOS audio-session
-singleton interaction with `react-native-webrtc`; iOS route selection is
-limited to its auto policy until that native integration is validated. Metro
-bundles and fake native-boundary tests are not substitutes for those checks.
+Native Gradle/Xcode builds remain unverified until the corresponding CI run is
+green. Physical-device audio routing and a real OpenAI account remain separate
+live gates even after compilation succeeds. `react-native-incall-manager` has
+a known iOS audio-session singleton interaction with `react-native-webrtc`;
+iOS route selection is limited to its auto policy until that native integration
+is validated. Metro bundles and fake native-boundary tests are not substitutes
+for those checks.
