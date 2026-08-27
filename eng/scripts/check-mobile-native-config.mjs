@@ -78,6 +78,20 @@ if (!androidSettings.includes("autolinkLibrariesFromCommand")
   || !androidBuild.includes("autolinkLibrariesWithApp")) {
   fail("Android Gradle configuration must keep React Native native-module autolinking enabled.");
 }
+const androidAppRoot = join(mobileRoot, "android/app");
+const androidMonorepoPaths = {
+  reactNativeDir: "../../../../../node_modules/react-native",
+  codegenDir: "../../../../../node_modules/@react-native/codegen",
+  cliFile: "../../../../../node_modules/react-native/cli.js"
+};
+for (const [setting, relativePath] of Object.entries(androidMonorepoPaths)) {
+  if (!androidBuild.includes(`${setting} = file("${relativePath}")`)) {
+    fail(`Android ${setting} must resolve from the app directory to the workspace node_modules.`);
+  }
+  if (!existsSync(resolve(androidAppRoot, relativePath))) {
+    fail(`Android ${setting} target does not exist: ${relativePath}.`);
+  }
+}
 
 const transport = await readFile(
   join(mobileRoot, "src/realtime/ReactNativeWebRTCTransport.ts"),
