@@ -97,6 +97,59 @@ public sealed class EfNotificationStore(
         }
     }
 
+    public async Task<NotificationUpdateStoreResult> ApplyActionAsync(
+        Guid userId,
+        Guid notificationId,
+        string actionId,
+        string idempotencyKey,
+        string requestHash,
+        CancellationToken cancellationToken)
+    {
+        var scope = $"notifications:{notificationId}:actions:{actionId}";
+        var existing = await FindIdempotencyRecordAsync(userId, scope, idempotencyKey, cancellationToken);
+        if (existing is not null)
+        {
+            var replay = Replay(existing, requestHash);
+            RecordDuplicateIfReplayed(replay, "action_replay");
+            return replay;
+        }
+
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await ApplyActionOnceAsync(
+                    userId,
+                    notificationId,
+                    actionId,
+                    scope,
+                    idempotencyKey,
+                    requestHash,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (attempt < MaxWriteAttempts && IsRecognizedWriteRace(exception))
+            {
+                db.ChangeTracker.Clear();
+                try
+                {
+                    existing = await FindIdempotencyRecordAsync(userId, scope, idempotencyKey, cancellationToken);
+                }
+                catch (Exception lookupException) when (IsRecognizedWriteRace(lookupException))
+                {
+                    existing = null;
+                }
+                if (existing is not null)
+                {
+                    var replay = Replay(existing, requestHash);
+                    RecordDuplicateIfReplayed(replay, "action_race_replay");
+                    return replay;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(10L * attempt), cancellationToken);
+            }
+        }
+    }
+
     private async Task<NotificationUpdateStoreResult> UpdateOnceAsync(
         Guid userId,
         Guid notificationId,
@@ -109,6 +162,12 @@ public sealed class EfNotificationStore(
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var nowMs = timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         await DeleteExpiredIdempotencyRecordAsync(userId, scope, idempotencyKey, nowMs, cancellationToken);
+        var existing = await FindIdempotencyRecordAsync(userId, scope, idempotencyKey, cancellationToken);
+        if (existing is not null)
+        {
+            return Replay(existing, requestHash);
+        }
+
         var notification = await db.Notifications.SingleOrDefaultAsync(
             item => item.Id == notificationId && item.UserId == userId,
             cancellationToken);
@@ -146,11 +205,85 @@ public sealed class EfNotificationStore(
                 title = notification.Title,
                 body = notification.Body,
                 type = notification.Type,
+                actionsJson = notification.ActionsJson,
                 dedupKey = notification.DedupKey,
                 action,
                 entityVersion = notification.Version
             }, nowMs);
         }
+
+        db.IdempotencyRecords.Add(IdempotencyRecord.Create(
+            userId,
+            scope,
+            idempotencyKey,
+            requestHash,
+            200,
+            JsonSerializer.Serialize(response, JsonOptions),
+            nowMs,
+            checked(nowMs + idempotencyOptions.Value.RetentionMs)));
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new(NotificationStoreResultKind.Updated, response);
+    }
+
+    private async Task<NotificationUpdateStoreResult> ApplyActionOnceAsync(
+        Guid userId,
+        Guid notificationId,
+        string actionId,
+        string scope,
+        string idempotencyKey,
+        string requestHash,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        var nowMs = timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+        await DeleteExpiredIdempotencyRecordAsync(userId, scope, idempotencyKey, nowMs, cancellationToken);
+        var existing = await FindIdempotencyRecordAsync(userId, scope, idempotencyKey, cancellationToken);
+        if (existing is not null)
+        {
+            return Replay(existing, requestHash);
+        }
+
+        var notification = await db.Notifications.SingleOrDefaultAsync(
+            item => item.Id == notificationId && item.UserId == userId,
+            cancellationToken);
+        if (notification is null)
+        {
+            return new(NotificationStoreResultKind.NotFound);
+        }
+
+        var actionResult = notification.ApplyAction(actionId, nowMs);
+        if (actionResult == NotificationActionResult.UnknownAction)
+        {
+            return new(NotificationStoreResultKind.Invalid, Detail: "The notification action is invalid.");
+        }
+
+        if (actionResult == NotificationActionResult.NotOffered)
+        {
+            return new(NotificationStoreResultKind.NotOffered, Detail: "This notification does not offer that action.");
+        }
+
+        if (actionResult == NotificationActionResult.InvalidState)
+        {
+            return new(NotificationStoreResultKind.Conflict, Detail: $"A notification in {notification.Status} cannot be actioned.");
+        }
+
+        var response = ToResponse(notification);
+        AddOutbox("notification.updated", new
+        {
+            userId,
+            notificationId = notification.Id,
+            taskId = notification.TaskId,
+            conversationId = notification.ConversationId,
+            status = JsonNamingPolicy.CamelCase.ConvertName(notification.Status.ToString()),
+            title = notification.Title,
+            body = notification.Body,
+            type = notification.Type,
+            actionsJson = notification.ActionsJson,
+            dedupKey = notification.DedupKey,
+            action = actionId,
+            entityVersion = notification.Version
+        }, nowMs);
 
         db.IdempotencyRecords.Add(IdempotencyRecord.Create(
             userId,

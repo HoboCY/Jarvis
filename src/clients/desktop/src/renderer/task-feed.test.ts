@@ -9,11 +9,21 @@ import {
   nonTerminalTaskStatuses,
   pendingUserInputFrom,
   notificationActionIdempotencyKey,
+  notificationActionsFrom,
   refreshFeedIfCurrent,
   refreshOnBackendConnectionState,
   type DesktopNotification,
   type DesktopTask
 } from "./task-feed.js";
+
+test("accepts only the exact allowlisted notification action projection", () => {
+  assert.deepEqual(notificationActionsFrom('["acknowledge"]'), ["acknowledge"]);
+  assert.deepEqual(notificationActionsFrom("[]"), []);
+  assert.deepEqual(notificationActionsFrom('["run-command"]'), []);
+  assert.deepEqual(notificationActionsFrom('["acknowledge","run-command"]'), []);
+  assert.deepEqual(notificationActionsFrom("not-json"), []);
+  assert.deepEqual(notificationActionsFrom(["acknowledge"]), []);
+});
 
 test("projects bounded user-input questions without accepting secret or provider fields", async () => {
   const projection = pendingUserInputFrom({
@@ -165,8 +175,9 @@ test("task events update only the fixed task projection and clear completed user
       entityVersion: 9
     }
   });
-  assert.equal(feed.tasks[0]?.status, "waitingForUserInput");
-  assert.equal(feed.tasks[0]?.pendingUserInput?.requestId, "reclaimed");
+  const reclaimedTask = feed.tasks[0];
+  assert.equal(reclaimedTask?.status, "waitingForUserInput");
+  assert.equal(reclaimedTask?.pendingUserInput?.requestId, "reclaimed");
   await feed.applyEvent({
     eventId: "task-input-recovery-stale",
     occurredAt: 5,
@@ -178,8 +189,9 @@ test("task events update only the fixed task projection and clear completed user
       entityVersion: 8
     }
   });
-  assert.equal(feed.tasks[0]?.status, "waitingForUserInput");
-  assert.equal(feed.tasks[0]?.pendingUserInput?.requestId, "reclaimed");
+  const taskAfterStaleRecovery = feed.tasks[0];
+  assert.equal(taskAfterStaleRecovery?.status, "waitingForUserInput");
+  assert.equal(taskAfterStaleRecovery?.pendingUserInput?.requestId, "reclaimed");
 });
 
 test("refreshes durable tasks and unread notifications and deduplicates notification events", async () => {
@@ -322,6 +334,77 @@ test("retries dismiss with the same notification action idempotency key after a 
     notificationActionIdempotencyKey("notification-dismiss-retry", "dismiss")
   ]);
   assert.deepEqual(feed.notifications, []);
+});
+
+test("acknowledges only an offered notification and retries with the same bounded key", async () => {
+  let failOnce = true;
+  const keys: string[] = [];
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined,
+    applyAction: async (_notificationId, actionId, key) => {
+      assert.equal(actionId, "acknowledge");
+      keys.push(key);
+      if (failOnce) {
+        failOnce = false;
+        throw new Error("response lost after commit");
+      }
+    }
+  });
+
+  await feed.applyEvent({
+    eventId: "notification-acknowledge-retry",
+    occurredAt: 1,
+    type: "notification.created",
+    payload: {
+      notificationId: "notification-acknowledge-retry",
+      status: "pending",
+      title: "完成",
+      body: "结果",
+      actionsJson: '["acknowledge"]'
+    }
+  });
+  await assert.rejects(() => feed.acknowledge("notification-acknowledge-retry"), /response lost/);
+  await feed.acknowledge("notification-acknowledge-retry");
+
+  assert.deepEqual(keys, [
+    notificationActionIdempotencyKey("notification-acknowledge-retry", "acknowledge"),
+    notificationActionIdempotencyKey("notification-acknowledge-retry", "acknowledge")
+  ]);
+  assert.ok(keys[0]!.length <= 200);
+  assert.deepEqual(feed.notifications, []);
+});
+
+test("fails closed when a notification does not offer acknowledge", async () => {
+  let calls = 0;
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined,
+    applyAction: async () => {
+      calls++;
+    }
+  });
+  await feed.applyEvent({
+    eventId: "notification-untrusted-action",
+    occurredAt: 1,
+    type: "notification.created",
+    payload: {
+      notificationId: "notification-untrusted-action",
+      status: "pending",
+      title: "不可信动作",
+      body: "",
+      actionsJson: '["run-command"]'
+    }
+  });
+
+  await assert.rejects(() => feed.acknowledge("notification-untrusted-action"), /does not offer/);
+  assert.equal(calls, 0);
 });
 
 test("deduplicates SignalR notification ids while delivering a pending notification once", async () => {

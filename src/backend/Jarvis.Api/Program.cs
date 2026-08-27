@@ -76,6 +76,7 @@ builder.Services.AddOpenApi(options =>
             or "MarkNotificationDelivered"
             or "MarkNotificationRead"
             or "DismissNotification"
+            or "ApplyNotificationAction"
             or "CreateMemoryFact"
             or "RetractMemoryFact")
         {

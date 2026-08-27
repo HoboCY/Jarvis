@@ -8,6 +8,7 @@ public enum NotificationStoreResultKind
     Replayed,
     Conflict,
     Invalid,
+    NotOffered,
     NotFound
 }
 
@@ -27,6 +28,14 @@ public interface INotificationStore
         Guid userId,
         Guid notificationId,
         string action,
+        string idempotencyKey,
+        string requestHash,
+        CancellationToken cancellationToken);
+
+    Task<NotificationUpdateStoreResult> ApplyActionAsync(
+        Guid userId,
+        Guid notificationId,
+        string actionId,
         string idempotencyKey,
         string requestHash,
         CancellationToken cancellationToken);

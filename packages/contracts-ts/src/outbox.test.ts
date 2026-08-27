@@ -43,6 +43,7 @@ test("decodes Phase 3 task and notification event envelopes", () => {
       severity: "success",
       title: "完成",
       body: "done",
+      actionsJson: "[\"acknowledge\"]",
       status: "pending",
       dedupKey: "task:1:completed",
       entityVersion: 0

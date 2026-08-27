@@ -11,6 +11,46 @@ export type MobileSignalREvent = {
   payload: unknown;
 };
 
+export type NotificationActionId = "acknowledge";
+
+export function notificationActionsFrom(value: unknown): readonly NotificationActionId[] {
+  if (typeof value !== "string" || value.length > 200) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      && parsed.length === 1
+      && parsed[0] === "acknowledge"
+      ? ["acknowledge"]
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function mobileNotificationActionIdempotencyKey(
+  notificationId: string,
+  actionId: NotificationActionId
+): string {
+  if (!notificationId) {
+    throw new Error("NotificationId is required.");
+  }
+
+  const prefix = `mobile-notification-${actionId}:`;
+  const directKey = `${prefix}${notificationId}`;
+  if (directKey.length <= 200) {
+    return directKey;
+  }
+
+  let hash = 2_166_136_261;
+  for (const character of notificationId) {
+    hash = Math.imul(hash ^ character.codePointAt(0)!, 16_777_619);
+  }
+  return `${prefix}${notificationId.slice(0, 150)}:${(hash >>> 0).toString(16)}`;
+}
+
 export interface MobileFeedBackend {
   listTasks: (query?: { cursor?: string; limit?: number }) => Promise<{
     items: MobileFeedEntity[];
@@ -19,6 +59,7 @@ export interface MobileFeedBackend {
   listUnreadNotifications: () => Promise<MobileFeedEntity[]>;
   listPendingApprovals: () => Promise<MobileFeedEntity[]>;
   updateNotification?: (notificationId: string, action: "delivered" | "read" | "dismiss", idempotencyKey: string) => Promise<MobileFeedEntity>;
+  applyNotificationAction?: (notificationId: string, actionId: NotificationActionId, idempotencyKey: string) => Promise<MobileFeedEntity>;
   decideApproval?: (approvalId: string, decision: "approve" | "deny", scope: "once" | "taskSession", idempotencyKey: string) => Promise<MobileFeedEntity>;
 }
 
@@ -46,7 +87,8 @@ export class MobileTaskNotificationFeed {
   }
 
   public get notifications(): readonly MobileFeedEntity[] {
-    return [...this.notificationById.values()];
+    return [...this.notificationById.values()]
+      .filter(item => item.status === "pending" || item.status === "delivered");
   }
 
   public get approvals(): readonly MobileFeedEntity[] {
@@ -126,6 +168,24 @@ export class MobileTaskNotificationFeed {
     }
     const updated = await this.backend.updateNotification(notificationId, action, idempotencyKey);
     this.upsert(this.notificationById, updated);
+    this.notify();
+    return updated;
+  }
+
+  public async acknowledgeNotification(notificationId: string): Promise<MobileFeedEntity> {
+    const notification = this.notificationById.get(notificationId);
+    if (!notificationActionsFrom(notification?.actionsJson).includes("acknowledge")) {
+      throw new Error("This notification does not offer acknowledge.");
+    }
+    if (!this.backend.applyNotificationAction) {
+      throw new Error("Notification actions are not configured.");
+    }
+
+    const updated = await this.backend.applyNotificationAction(
+      notificationId,
+      "acknowledge",
+      mobileNotificationActionIdempotencyKey(notificationId, "acknowledge"));
+    this.notificationById.delete(notificationId);
     this.notify();
     return updated;
   }

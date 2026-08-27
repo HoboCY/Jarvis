@@ -38,8 +38,28 @@ export type DesktopNotification = {
   status: string;
   title: string;
   body: string;
+  actions?: readonly NotificationActionId[];
   [key: string]: unknown;
 };
+
+export type NotificationActionId = "acknowledge";
+
+export function notificationActionsFrom(value: unknown): readonly NotificationActionId[] {
+  if (typeof value !== "string" || value.length > 200) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      && parsed.length === 1
+      && parsed[0] === "acknowledge"
+      ? ["acknowledge"]
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 export type DesktopTaskPage = {
   items: readonly DesktopTask[];
@@ -210,6 +230,7 @@ export type DesktopTaskFeedBackend = {
   markDelivered: (notificationId: string, idempotencyKey: string) => Promise<unknown>;
   markRead: (notificationId: string, idempotencyKey: string) => Promise<unknown>;
   dismiss: (notificationId: string, idempotencyKey: string) => Promise<unknown>;
+  applyAction?: (notificationId: string, actionId: NotificationActionId, idempotencyKey: string) => Promise<unknown>;
 };
 
 export async function collectTaskPages(
@@ -298,7 +319,7 @@ export function notificationDeliveredIdempotencyKey(notificationId: string): str
 
 export function notificationActionIdempotencyKey(
   notificationId: string,
-  action: "delivered" | "read" | "dismiss"
+  action: "delivered" | "read" | "dismiss" | NotificationActionId
 ): string {
   if (!notificationId) {
     throw new Error("NotificationId is required.");
@@ -593,7 +614,10 @@ export class DesktopTaskNotificationFeed {
       id,
       status,
       title: stringValue(payload.title) ?? previous?.title ?? "Jarvis",
-      body: stringValue(payload.body) ?? previous?.body ?? ""
+      body: stringValue(payload.body) ?? previous?.body ?? "",
+      actions: Object.hasOwn(payload, "actionsJson")
+        ? notificationActionsFrom(payload.actionsJson)
+        : previous?.actions ?? []
     });
     if (status === "pending") {
       await this.markDeliveredIfPending(id);
@@ -607,6 +631,22 @@ export class DesktopTaskNotificationFeed {
 
   public async dismiss(notificationId: string): Promise<void> {
     await this.backend.dismiss(notificationId, notificationActionIdempotencyKey(notificationId, "dismiss"));
+    this.deleteNotification(notificationId);
+  }
+
+  public async acknowledge(notificationId: string): Promise<void> {
+    const notification = this.notificationById.get(notificationId);
+    if (!notification?.actions?.includes("acknowledge")) {
+      throw new Error("This notification does not offer acknowledge.");
+    }
+    if (!this.backend.applyAction) {
+      throw new Error("Notification actions are not configured.");
+    }
+
+    await this.backend.applyAction(
+      notificationId,
+      "acknowledge",
+      notificationActionIdempotencyKey(notificationId, "acknowledge"));
     this.deleteNotification(notificationId);
   }
 

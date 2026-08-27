@@ -47,6 +47,14 @@ public static class NotificationEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status409Conflict);
 
+        group.MapPost("/{notificationId:guid}/actions/{actionId}", ApplyActionAsync)
+            .WithName("ApplyNotificationAction")
+            .Produces<NotificationResponse>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+
         return endpoints;
     }
 
@@ -118,6 +126,34 @@ public static class NotificationEndpoints
             NotificationOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "Notification not found", "The notification does not exist or is not owned by this user."),
             NotificationOperationStatus.Conflict => Problem(StatusCodes.Status409Conflict, "Notification state conflict", result.Detail),
             _ => Problem(StatusCodes.Status500InternalServerError, "Unexpected result", "The notification could not be updated.")
+        };
+    }
+
+    private static async Task<IResult> ApplyActionAsync(
+        Guid notificationId,
+        string actionId,
+        HttpContext httpContext,
+        NotificationService service,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(httpContext, out var userId))
+        {
+            return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "Authentication is required.");
+        }
+
+        var result = await service.ApplyActionAsync(
+            userId,
+            notificationId,
+            actionId,
+            httpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(),
+            cancellationToken);
+        return result.Status switch
+        {
+            NotificationOperationStatus.Succeeded or NotificationOperationStatus.Replayed => TypedResults.Ok(result.Value),
+            NotificationOperationStatus.Invalid => Problem(StatusCodes.Status400BadRequest, "Invalid notification action", result.Detail),
+            NotificationOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "Notification not found", "The notification does not exist or is not owned by this user."),
+            NotificationOperationStatus.Conflict => Problem(StatusCodes.Status409Conflict, "Notification action conflict", result.Detail),
+            _ => Problem(StatusCodes.Status500InternalServerError, "Unexpected result", "The notification action could not be applied.")
         };
     }
 

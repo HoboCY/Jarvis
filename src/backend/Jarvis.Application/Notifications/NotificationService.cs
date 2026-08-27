@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Jarvis.Contracts;
+using Jarvis.Domain.Notifications;
 
 namespace Jarvis.Application.Notifications;
 
@@ -87,6 +88,64 @@ public sealed class NotificationService(INotificationStore store)
             NotificationStoreResultKind.NotFound => new(NotificationOperationStatus.NotFound),
             NotificationStoreResultKind.Invalid => Invalid<NotificationResponse>(result.Detail ?? "Invalid notification update."),
             _ => new(NotificationOperationStatus.Conflict, Detail: result.Detail ?? "The notification update conflicts with its current state.")
+        };
+    }
+
+    public async Task<NotificationOperation<NotificationResponse>> ApplyActionAsync(
+        Guid userId,
+        Guid notificationId,
+        string? actionId,
+        string? idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        if (notificationId == Guid.Empty)
+        {
+            return Invalid<NotificationResponse>("notificationId is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(actionId))
+        {
+            return Invalid<NotificationResponse>("actionId is required.");
+        }
+
+        if (actionId.Length > NotificationActionPolicy.MaxActionIdLength)
+        {
+            return Invalid<NotificationResponse>("actionId is too long.");
+        }
+
+        if (!NotificationActionPolicy.IsAllowedAction(actionId))
+        {
+            return Invalid<NotificationResponse>("The notification action is invalid.");
+        }
+
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            return Invalid<NotificationResponse>("The Idempotency-Key header is required.");
+        }
+
+        var key = idempotencyKey.Trim();
+        if (key.Length > 200)
+        {
+            return Invalid<NotificationResponse>("The Idempotency-Key header is too long.");
+        }
+
+        var requestHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"POST:/api/v1/notifications/{notificationId:D}/actions/{actionId}")));
+        var result = await store.ApplyActionAsync(
+            userId,
+            notificationId,
+            actionId,
+            key,
+            requestHash,
+            cancellationToken);
+        return result.Kind switch
+        {
+            NotificationStoreResultKind.Updated => new(NotificationOperationStatus.Succeeded, result.Response),
+            NotificationStoreResultKind.Replayed => new(NotificationOperationStatus.Replayed, result.Response),
+            NotificationStoreResultKind.NotFound => new(NotificationOperationStatus.NotFound),
+            NotificationStoreResultKind.Invalid => Invalid<NotificationResponse>(result.Detail ?? "Invalid notification action."),
+            NotificationStoreResultKind.NotOffered => new(NotificationOperationStatus.Conflict, Detail: result.Detail),
+            _ => new(NotificationOperationStatus.Conflict, Detail: result.Detail ?? "The notification action conflicts with its current state.")
         };
     }
 

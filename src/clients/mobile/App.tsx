@@ -5,7 +5,11 @@ import { createRealtimeAgent } from "@jarvis/realtime-agent";
 import { MobileApiError, MobileApiSession } from "./src/session/MobileApiSession";
 import { KeychainMobileApiBaseUrlStore, KeychainMobileCredentialStore, type MobileApiBaseUrlStore } from "./src/session/keychainCredentialStore";
 import { MobileConversationController } from "./src/conversation/MobileConversationController";
-import { MobileTaskNotificationFeed, type MobileFeedEntity } from "./src/feed/MobileTaskNotificationFeed";
+import {
+  MobileTaskNotificationFeed,
+  notificationActionsFrom,
+  type MobileFeedEntity
+} from "./src/feed/MobileTaskNotificationFeed";
 import { MobileLogoutCoordinator } from "./src/session/MobileLogoutCoordinator";
 import { MobileSignalRConnection, createProductionMobileSignalRConnection } from "./src/realtime/MobileSignalRConnection";
 import { MobileRealtimeConversationBridge } from "./src/realtime/MobileRealtimeConversationBridge";
@@ -53,6 +57,10 @@ function createServices(): MobileServices {
     updateNotification: async (notificationId, action, idempotencyKey) => {
       return session.postJson<MobileFeedEntity>(`/api/v1/notifications/${encodeURIComponent(notificationId)}/${action}`, {}, idempotencyKey);
     },
+    applyNotificationAction: (notificationId, actionId, idempotencyKey) => session.postJson<MobileFeedEntity>(
+      `/api/v1/notifications/${encodeURIComponent(notificationId)}/actions/${encodeURIComponent(actionId)}`,
+      {},
+      idempotencyKey),
     decideApproval: (approvalId, decision, scope, idempotencyKey) => session.postJson<MobileFeedEntity>(
       `/api/v1/approvals/${encodeURIComponent(approvalId)}/decision`,
       { decision, scope, clientRequestId: idempotencyKey },
@@ -380,6 +388,15 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  async function acknowledgeNotification(notificationId: string): Promise<void> {
+    try {
+      await services.feed.acknowledgeNotification(notificationId);
+      syncFeedState();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "通知动作失败");
+    }
+  }
+
   async function decideApproval(approvalId: string, decision: "approve" | "deny"): Promise<void> {
     try {
       await services.feed.decideApproval(
@@ -568,7 +585,6 @@ export default function App(): React.JSX.Element {
         ))}
         <Text>通知中心</Text>
         {services.feed.notifications
-          .filter(notification => notification.status !== "read" && notification.status !== "dismissed")
           .map(notification => (
             <View key={notification.id} style={styles.taskRow}>
               <View style={styles.feedText}>
@@ -576,6 +592,9 @@ export default function App(): React.JSX.Element {
                 <Text>{typeof notification.body === "string" ? notification.body : ""}</Text>
               </View>
               <View style={styles.row}>
+                {notificationActionsFrom(notification.actionsJson).includes("acknowledge") ? (
+                  <Button title="确认已处理" onPress={() => void acknowledgeNotification(notification.id)} />
+                ) : null}
                 <Button title="已读" onPress={() => void updateNotification(notification.id, "read")} />
                 <Button title="忽略" onPress={() => void updateNotification(notification.id, "dismiss")} />
               </View>

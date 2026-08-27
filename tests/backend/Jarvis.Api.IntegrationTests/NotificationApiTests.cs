@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Jarvis.Domain.Notifications;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Tasks;
 using Microsoft.EntityFrameworkCore;
@@ -178,6 +179,175 @@ public sealed class NotificationApiTests : IClassFixture<TestApplicationFactory>
                 && item.IdempotencyKey == "notification-concurrent-delivered"));
     }
 
+    [Fact]
+    public async Task TerminalTaskNotificationCanBeAcknowledgedIdempotently()
+    {
+        using var isolatedFactory = new TestApplicationFactory(
+            databasePath: null,
+            deleteDatabaseOnDispose: true,
+            outboxPublisher: null);
+        using var client = isolatedFactory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", isolatedFactory.Token);
+        var conversationId = await CreateConversationAsync(client);
+        var taskId = await CreateTaskAsync(client, conversationId);
+
+        await using (var workerScope = isolatedFactory.Services.CreateAsyncScope())
+        {
+            Assert.True(await workerScope.ServiceProvider.GetRequiredService<FakeDelayWorker>().ProcessOneAsync());
+        }
+
+        var unread = await client.GetFromJsonAsync<JsonElement>("/api/v1/notifications?status=unread");
+        var notification = unread.GetProperty("items")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("taskId").GetGuid() == taskId);
+        var notificationId = notification.GetProperty("id").GetGuid();
+        Assert.Equal("[\"acknowledge\"]", notification.GetProperty("actionsJson").GetString());
+
+        using (var invalid = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/v1/notifications/{notificationId}/actions/run-command"))
+        {
+            invalid.Headers.Add("Idempotency-Key", "notification-invalid-action");
+            using var invalidResponse = await client.SendAsync(invalid);
+            Assert.Equal(System.Net.HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+        }
+
+        using (var acknowledge = AcknowledgeRequest(notificationId, "notification-acknowledge"))
+        using (var acknowledged = await client.SendAsync(acknowledge))
+        {
+            acknowledged.EnsureSuccessStatusCode();
+            var value = await acknowledged.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("actioned", value.GetProperty("status").GetString());
+        }
+
+        using (var replay = AcknowledgeRequest(notificationId, "notification-acknowledge"))
+        using (var replayed = await client.SendAsync(replay))
+        {
+            replayed.EnsureSuccessStatusCode();
+            var value = await replayed.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("actioned", value.GetProperty("status").GetString());
+        }
+
+        using (var secondAction = AcknowledgeRequest(notificationId, "notification-acknowledge-again"))
+        using (var conflict = await client.SendAsync(secondAction))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Conflict, conflict.StatusCode);
+        }
+
+        var afterAction = await client.GetFromJsonAsync<JsonElement>("/api/v1/notifications?status=unread");
+        Assert.Empty(afterAction.GetProperty("items").EnumerateArray());
+
+        Guid notOfferedNotificationId;
+        await using (var setupScope = isolatedFactory.Services.CreateAsyncScope())
+        {
+            var setupDb = setupScope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+            var userId = await setupDb.Users.Select(item => item.Id).SingleAsync();
+            var notOffered = Jarvis.Domain.Notifications.Notification.Create(
+                Guid.CreateVersion7(),
+                userId,
+                conversationId,
+                taskId,
+                "task.needsUserInput",
+                NotificationSeverity.Info,
+                "Input required",
+                "Use the dedicated task user-input endpoint.",
+                $"notification-action-not-offered:{Guid.CreateVersion7():N}",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            notOfferedNotificationId = notOffered.Id;
+            setupDb.Notifications.Add(notOffered);
+            await setupDb.SaveChangesAsync();
+        }
+
+        using (var notOffered = AcknowledgeRequest(notOfferedNotificationId, "notification-action-not-offered"))
+        using (var conflict = await client.SendAsync(notOffered))
+        {
+            Assert.Equal(System.Net.HttpStatusCode.Conflict, conflict.StatusCode);
+        }
+
+        await using var verificationScope = isolatedFactory.Services.CreateAsyncScope();
+        var db = verificationScope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+        var persisted = await db.Notifications.AsNoTracking().SingleAsync(item => item.Id == notificationId);
+        Assert.Equal(NotificationStatus.Actioned, persisted.Status);
+        Assert.Equal(1, persisted.Version);
+        Assert.Equal(
+            1,
+            await db.IdempotencyRecords.CountAsync(item =>
+                item.Scope == $"notifications:{notificationId}:actions:acknowledge"
+                && item.IdempotencyKey == "notification-acknowledge"));
+        Assert.Equal(
+            1,
+            await db.OutboxMessages.CountAsync(item =>
+                item.EventType == "notification.updated"
+                && item.PayloadJson.Contains("\"action\":\"acknowledge\"")));
+        var createdPayloads = await db.OutboxMessages
+            .Where(item => item.EventType == "notification.created")
+            .Select(item => item.PayloadJson)
+            .ToArrayAsync();
+        Assert.Contains(createdPayloads, payloadJson =>
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return document.RootElement.GetProperty("payload").GetProperty("actionsJson").GetString()
+                == "[\"acknowledge\"]";
+        });
+    }
+
+    [Fact]
+    public async Task ConcurrentAcknowledgeWithSameKeyHasOneDurableResult()
+    {
+        using var isolatedFactory = new TestApplicationFactory(
+            databasePath: null,
+            deleteDatabaseOnDispose: true,
+            outboxPublisher: null);
+        using var firstClient = isolatedFactory.CreateClient();
+        using var secondClient = isolatedFactory.CreateClient();
+        firstClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", isolatedFactory.Token);
+        secondClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", isolatedFactory.Token);
+        var conversationId = await CreateConversationAsync(firstClient);
+        var taskId = await CreateTaskAsync(firstClient, conversationId);
+
+        await using (var workerScope = isolatedFactory.Services.CreateAsyncScope())
+        {
+            Assert.True(await workerScope.ServiceProvider.GetRequiredService<FakeDelayWorker>().ProcessOneAsync());
+        }
+
+        var unread = await firstClient.GetFromJsonAsync<JsonElement>("/api/v1/notifications?status=unread");
+        var notificationId = unread.GetProperty("items")
+            .EnumerateArray()
+            .Single(item => item.GetProperty("taskId").GetGuid() == taskId)
+            .GetProperty("id")
+            .GetGuid();
+
+        async Task<HttpResponseMessage> AcknowledgeAsync(HttpClient client)
+        {
+            using var request = AcknowledgeRequest(notificationId, "notification-concurrent-acknowledge");
+            return await client.SendAsync(request);
+        }
+
+        var responses = await Task.WhenAll(
+            AcknowledgeAsync(firstClient),
+            AcknowledgeAsync(secondClient));
+        var details = await Task.WhenAll(responses.Select(async response =>
+            (response.StatusCode, Body: await response.Content.ReadAsStringAsync())));
+        Assert.All(details, detail => Assert.Equal(
+            System.Net.HttpStatusCode.OK,
+            detail.StatusCode));
+        foreach (var response in responses)
+        {
+            response.Dispose();
+        }
+
+        await using var verificationScope = isolatedFactory.Services.CreateAsyncScope();
+        var db = verificationScope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+        var persisted = await db.Notifications.AsNoTracking().SingleAsync(item => item.Id == notificationId);
+        Assert.Equal(NotificationStatus.Actioned, persisted.Status);
+        Assert.Equal(1, persisted.Version);
+        Assert.Equal(
+            1,
+            await db.IdempotencyRecords.CountAsync(item =>
+                item.Scope == $"notifications:{notificationId}:actions:acknowledge"
+                && item.IdempotencyKey == "notification-concurrent-acknowledge"));
+    }
+
     private static async Task<Guid> CreateConversationAsync(HttpClient client)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/conversations")
@@ -189,6 +359,15 @@ public sealed class NotificationApiTests : IClassFixture<TestApplicationFactory>
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return document.RootElement.GetProperty("id").GetGuid();
+    }
+
+    private static HttpRequestMessage AcknowledgeRequest(Guid notificationId, string idempotencyKey)
+    {
+        var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/api/v1/notifications/{notificationId}/actions/acknowledge");
+        request.Headers.Add("Idempotency-Key", idempotencyKey);
+        return request;
     }
 
     private static async Task<Guid> CreateTaskAsync(HttpClient client, Guid conversationId)

@@ -100,6 +100,8 @@ const jarvisApi = {
     ipcRenderer.invoke("backend:readNotification", input) as Promise<unknown>,
   dismissNotification: (input: { notificationId: string; idempotencyKey: string }): Promise<unknown> =>
     ipcRenderer.invoke("backend:dismissNotification", input) as Promise<unknown>,
+  applyNotificationAction: (input: { notificationId: string; actionId: "acknowledge"; idempotencyKey: string }): Promise<unknown> =>
+    ipcRenderer.invoke("backend:applyNotificationAction", input) as Promise<unknown>,
   getApprovals: (): Promise<unknown> =>
     ipcRenderer.invoke("backend:getApprovals") as Promise<unknown>,
   decideApproval: (input: {

@@ -37,6 +37,7 @@ export interface NotificationCreatedPayload {
   severity: string;
   title: string;
   body: string;
+  actionsJson: string;
   status: "pending" | "delivered";
   dedupKey: string;
   entityVersion: number;
@@ -44,7 +45,7 @@ export interface NotificationCreatedPayload {
 
 export interface NotificationUpdatedPayload extends Omit<NotificationCreatedPayload, "status"> {
   status: "pending" | "delivered" | "read" | "actioned" | "dismissed";
-  action: "delivered" | "read" | "dismiss";
+  action: "delivered" | "read" | "dismiss" | "acknowledge";
 }
 
 export function decodeSignalREventEnvelope(

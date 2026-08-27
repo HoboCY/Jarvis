@@ -695,6 +695,18 @@ if (!app.requestSingleInstanceLock()) {
           requiredString(input.idempotencyKey, "idempotencyKey"));
       });
     }
+    ipcMain.handle("backend:applyNotificationAction", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const actionId = requiredString(input.actionId, "actionId");
+      if (actionId !== "acknowledge") {
+        throw new Error("Invalid notification action.");
+      }
+      return requestBackend(
+        `${notificationApiPath}/${encodeURIComponent(requiredString(input.notificationId, "notificationId"))}/actions/${actionId}`,
+        "POST",
+        {},
+        requiredString(input.idempotencyKey, "idempotencyKey"));
+    });
     ipcMain.handle("backend:getApprovals", () =>
       requestBackend(`${approvalApiPath}?status=pending`, "GET"));
     ipcMain.handle("backend:decideApproval", (_event, value: unknown) => {

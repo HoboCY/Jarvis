@@ -2,13 +2,29 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   MobileTaskNotificationFeed,
+  mobileNotificationActionIdempotencyKey,
+  notificationActionsFrom,
   type MobileFeedBackend,
   type MobileFeedEntity,
   type MobileSignalREvent
 } from "./MobileTaskNotificationFeed.js";
 
+test("mobile notification actions fail closed and use a stable bounded key", () => {
+  assert.deepEqual(notificationActionsFrom('["acknowledge"]'), ["acknowledge"]);
+  assert.deepEqual(notificationActionsFrom("[]"), []);
+  assert.deepEqual(notificationActionsFrom('["run-command"]'), []);
+  assert.deepEqual(notificationActionsFrom('["acknowledge","run-command"]'), []);
+  assert.deepEqual(notificationActionsFrom({ action: "acknowledge" }), []);
+
+  const longId = "n".repeat(500);
+  const first = mobileNotificationActionIdempotencyKey(longId, "acknowledge");
+  assert.equal(first, mobileNotificationActionIdempotencyKey(longId, "acknowledge"));
+  assert.ok(first.length <= 200);
+});
+
 class FakeFeedBackend implements MobileFeedBackend {
   public taskCalls = 0;
+  public applyNotificationAction?: MobileFeedBackend["applyNotificationAction"];
   public readonly tasks: MobileFeedEntity[] = [
     { id: "task-active", status: "running", entityVersion: 2 },
     { id: "task-done", status: "completed", entityVersion: 4 }
@@ -59,13 +75,72 @@ test("MobileTaskNotificationFeed deduplicates event ids and keeps the newest ent
     eventId: "event-2",
     payload: { id: "notification-2", status: "read", entityVersion: 2, title: "new" }
   }), true);
-  assert.equal(feed.notifications[0]!.status, "read");
-  assert.equal(feed.notifications[0]!.title, "new");
+  assert.deepEqual(feed.notifications, []);
   assert.equal(feed.acceptEvent({
     ...event,
     eventId: "event-3",
     payload: { id: "notification-2", status: "pending", entityVersion: 1, title: "old" }
   }), false);
+});
+
+test("MobileTaskNotificationFeed acknowledges only an offered action with retry-stable identity", async () => {
+  const keys: string[] = [];
+  let failOnce = true;
+  const backend = new FakeFeedBackend();
+  backend.notifications.splice(0);
+  backend.applyNotificationAction = async (_notificationId, actionId, idempotencyKey) => {
+    assert.equal(actionId, "acknowledge");
+    keys.push(idempotencyKey);
+    if (failOnce) {
+      failOnce = false;
+      throw new Error("response lost after commit");
+    }
+    return { id: "notification-action", status: "actioned", entityVersion: 2 };
+  };
+  const feed = new MobileTaskNotificationFeed(backend);
+  assert.equal(feed.acceptEvent({
+    eventId: "notification-action-created",
+    type: "notification.created",
+    payload: {
+      notificationId: "notification-action",
+      status: "pending",
+      entityVersion: 1,
+      actionsJson: '["acknowledge"]'
+    }
+  }), true);
+
+  await assert.rejects(() => feed.acknowledgeNotification("notification-action"), /response lost/);
+  await feed.acknowledgeNotification("notification-action");
+
+  assert.deepEqual(keys, [
+    mobileNotificationActionIdempotencyKey("notification-action", "acknowledge"),
+    mobileNotificationActionIdempotencyKey("notification-action", "acknowledge")
+  ]);
+  assert.deepEqual(feed.notifications, []);
+});
+
+test("MobileTaskNotificationFeed does not invoke untrusted notification actions", async () => {
+  let calls = 0;
+  const backend = new FakeFeedBackend();
+  backend.notifications.splice(0);
+  backend.applyNotificationAction = async () => {
+    calls++;
+    return { id: "notification-untrusted", status: "actioned" };
+  };
+  const feed = new MobileTaskNotificationFeed(backend);
+  assert.equal(feed.acceptEvent({
+    eventId: "notification-untrusted-created",
+    type: "notification.created",
+    payload: {
+      notificationId: "notification-untrusted",
+      status: "pending",
+      entityVersion: 1,
+      actionsJson: '["run-command"]'
+    }
+  }), true);
+
+  await assert.rejects(() => feed.acknowledgeNotification("notification-untrusted"), /does not offer/);
+  assert.equal(calls, 0);
 });
 
 test("MobileTaskNotificationFeed follows task cursors until all non-terminal tasks are recovered", async () => {

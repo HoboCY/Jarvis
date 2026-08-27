@@ -17,6 +17,30 @@ public enum NotificationStatus
     Dismissed
 }
 
+public enum NotificationActionResult
+{
+    Applied,
+    UnknownAction,
+    NotOffered,
+    InvalidState
+}
+
+public static class NotificationActionPolicy
+{
+    public const string Acknowledge = "acknowledge";
+    public const int MaxActionIdLength = 64;
+    public const string AcknowledgeActionsJson = "[\"acknowledge\"]";
+    public const string NoActionsJson = "[]";
+
+    public static bool IsAllowedAction(string? actionId) =>
+        string.Equals(actionId, Acknowledge, StringComparison.Ordinal);
+
+    public static string ActionsJsonForType(string type) =>
+        type is "task.completed" or "task.failed" or "task.cancelled"
+            ? AcknowledgeActionsJson
+            : NoActionsJson;
+}
+
 public sealed class Notification
 {
     private Notification()
@@ -46,7 +70,7 @@ public sealed class Notification
         Title = title;
         Body = body;
         DedupKey = dedupKey;
-        ActionsJson = "[]";
+        ActionsJson = NotificationActionPolicy.ActionsJsonForType(type);
         Status = NotificationStatus.Pending;
         CreatedAtMs = nowMs;
     }
@@ -168,6 +192,39 @@ public sealed class Notification
         ActionedAtMs = nowMs;
         Version++;
         return true;
+    }
+
+    public NotificationActionResult ApplyAction(string actionId, long nowMs)
+    {
+        if (!NotificationActionPolicy.IsAllowedAction(actionId))
+        {
+            return NotificationActionResult.UnknownAction;
+        }
+
+        // ActionsJson is persisted with the notification. Re-check the durable
+        // projection so a generic endpoint cannot infer an action from Type alone.
+        if (!string.Equals(ActionsJson, NotificationActionPolicy.AcknowledgeActionsJson, StringComparison.Ordinal)
+            || !string.Equals(
+                ActionsJson,
+                NotificationActionPolicy.ActionsJsonForType(Type),
+                StringComparison.Ordinal))
+        {
+            return NotificationActionResult.NotOffered;
+        }
+
+        if (Status is NotificationStatus.Actioned or NotificationStatus.Dismissed)
+        {
+            return NotificationActionResult.InvalidState;
+        }
+
+        if (Status is not (NotificationStatus.Pending or NotificationStatus.Delivered or NotificationStatus.Read))
+        {
+            return NotificationActionResult.InvalidState;
+        }
+
+        return MarkActioned(nowMs)
+            ? NotificationActionResult.Applied
+            : NotificationActionResult.InvalidState;
     }
 
     public bool MarkDismissed(long nowMs)

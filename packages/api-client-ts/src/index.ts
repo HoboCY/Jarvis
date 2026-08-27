@@ -54,6 +54,7 @@ export type NotificationListResponse =
   paths["/api/v1/notifications"]["get"]["responses"][200]["content"]["application/json"];
 export type NotificationResponse =
   paths["/api/v1/notifications/{notificationId}/read"]["post"]["responses"][200]["content"]["application/json"];
+export type NotificationActionId = "acknowledge";
 export type DeviceListResponse =
   paths["/api/v1/devices"]["get"]["responses"][200]["content"]["application/json"];
 export type MobilePairingRequest =
@@ -325,6 +326,21 @@ export async function dismissNotification(
   options: ApiRequestOptions = {}
 ): Promise<NotificationResponse> {
   return updateNotification(baseUrl, notificationId, "dismiss", idempotencyKey, options);
+}
+
+export async function applyNotificationAction(
+  baseUrl: string,
+  notificationId: string,
+  actionId: NotificationActionId,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<NotificationResponse> {
+  return requestJson(
+    new URL(`/api/v1/notifications/${encodeURIComponent(notificationId)}/actions/${encodeURIComponent(actionId)}`, baseUrl),
+    {},
+    idempotencyKey,
+    options
+  ) as Promise<NotificationResponse>;
 }
 
 export async function createMemoryFact(

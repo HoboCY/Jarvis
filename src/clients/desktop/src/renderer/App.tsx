@@ -14,7 +14,8 @@ import {
   refreshOnBackendConnectionState,
   type DesktopNotification,
   type DesktopTask,
-  desktopTaskFrom
+  desktopTaskFrom,
+  notificationActionsFrom
 } from "./task-feed.js";
 import {
   DesktopApprovalFeed,
@@ -155,7 +156,8 @@ function notificationFrom(value: unknown): DesktopNotification {
     id: String(item.id),
     status: String(item.status),
     title: String(item.title),
-    body: String(item.body)
+    body: String(item.body),
+    actions: notificationActionsFrom(item.actionsJson)
   };
 }
 
@@ -210,6 +212,11 @@ function createTaskFeed(): DesktopTaskNotificationFeed {
     }),
     dismiss: (notificationId, idempotencyKey) => window.jarvis.dismissNotification({
       notificationId,
+      idempotencyKey
+    }),
+    applyAction: (notificationId, actionId, idempotencyKey) => window.jarvis.applyNotificationAction({
+      notificationId,
+      actionId,
       idempotencyKey
     })
   });
@@ -698,6 +705,16 @@ export function App() {
         <aside role="dialog" aria-label="Notification popup" aria-live="polite">
           <h2>{popupNotification.title}</h2>
           <p>{popupNotification.body}</p>
+          {popupNotification.actions?.includes("acknowledge") ? (
+            <button
+              type="button"
+              onClick={() => void feed.current?.acknowledge(popupNotification.id).then(() => {
+                setNotifications(feed.current?.notifications ?? []);
+              }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification action failed."))}
+            >
+              确认已处理
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => void feed.current?.read(popupNotification.id).then(() => {
@@ -801,6 +818,16 @@ export function App() {
               <li key={notification.id}>
                 <strong>{notification.title}</strong>
                 <p>{notification.body}</p>
+                {notification.actions?.includes("acknowledge") ? (
+                  <button
+                    type="button"
+                    onClick={() => void feed.current?.acknowledge(notification.id).then(() => {
+                      setNotifications(feed.current?.notifications ?? []);
+                    }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification action failed."))}
+                  >
+                    确认已处理
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => void feed.current?.read(notification.id).then(() => {

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { createMemoryFact, listTasks, phase0HealthUrl, retractMemoryFact } from "./index.js";
+import { applyNotificationAction, createMemoryFact, listTasks, phase0HealthUrl, retractMemoryFact } from "./index.js";
 
 test("builds the generated Phase 0 endpoint path", () => {
   assert.equal(phase0HealthUrl("http://127.0.0.1:5000"), "http://127.0.0.1:5000/api/v1/phase0/health");
@@ -60,4 +60,28 @@ test("uses the authenticated memory endpoints with stable idempotency headers", 
   assert.equal(requests[0]!.headers.get("Idempotency-Key"), "remember-call-1");
   assert.equal(requests[1]!.url, "http://127.0.0.1:5000/api/v1/memory-facts/00000000-0000-7000-8000-000000000002/retract");
   assert.equal(requests[1]!.headers.get("Idempotency-Key"), "retract-call-1");
+});
+
+test("invokes an allowlisted notification action with its stable idempotency key", async () => {
+  let request: Request | undefined;
+  await applyNotificationAction(
+    "http://127.0.0.1:5000",
+    "notification/one",
+    "acknowledge",
+    "notification-acknowledge:notification-one",
+    {
+      fetcher: async (input, init) => {
+        request = new Request(input, init);
+        return new Response(JSON.stringify({ id: "notification/one", status: "actioned" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+  );
+
+  assert.equal(
+    request?.url,
+    "http://127.0.0.1:5000/api/v1/notifications/notification%2Fone/actions/acknowledge");
+  assert.equal(request?.headers.get("Idempotency-Key"), "notification-acknowledge:notification-one");
 });

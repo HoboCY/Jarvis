@@ -476,6 +476,7 @@ public sealed class EfTaskStore(
             title,
             body,
             status = "pending",
+            actionsJson = notification.ActionsJson,
             dedupKey,
             entityVersion = notification.Version
         }, nowMs);

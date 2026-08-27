@@ -90,6 +90,7 @@ interface Window {
     markNotificationDelivered: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
     markNotificationRead: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
     dismissNotification: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
+    applyNotificationAction: (input: { notificationId: string; actionId: "acknowledge"; idempotencyKey: string }) => Promise<unknown>;
     getApprovals: () => Promise<unknown>;
     decideApproval: (input: {
       approvalId: string;

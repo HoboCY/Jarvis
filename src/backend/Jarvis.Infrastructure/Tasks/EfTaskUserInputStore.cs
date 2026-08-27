@@ -770,6 +770,7 @@ public sealed class EfTaskUserInputStore(
             title = notification.Title,
             body = notification.Body,
             status = "pending",
+            actionsJson = notification.ActionsJson,
             dedupKey,
             entityVersion = notification.Version
         }, nowMs);
