@@ -101,8 +101,8 @@ dotnet test ... --filter FullyQualifiedName~Phase7MobilePairingTests.RevokeAndRe
 pnpm install --frozen-lockfile -> passed
 pnpm typecheck -> passed (contracts, realtime-agent, api-client, Desktop, Mobile)
 pnpm lint -> passed
-pnpm test -> passed, 130 individual tests (contracts 4, realtime-agent 12,
-  api-client 3, Mobile 49, Desktop 57 TS tests + 5 build/package tests)
+pnpm test -> passed, 131 individual tests (contracts 4, realtime-agent 12,
+  api-client 3, Mobile 49, Desktop 57 TS tests + 6 build/package tests)
 pnpm build -> passed (all 5 TS workspaces)
 pnpm --filter @jarvis/mobile bundle:android -> passed
 pnpm --filter @jarvis/mobile bundle:ios -> passed

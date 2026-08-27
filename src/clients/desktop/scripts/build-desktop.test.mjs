@@ -1,10 +1,12 @@
 import { strict as assert } from "node:assert";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
-import { relative } from "node:path";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { assertBundleImports } from "./assert-package.mjs";
+import { resolveRendererDependencies } from "./renderer-dependencies.mjs";
 
 const desktopRoot = new URL("../", import.meta.url);
 const distRoot = new URL("../dist/", import.meta.url);
@@ -85,4 +87,38 @@ test("desktop build metadata removes unused API client and pins esbuild", async 
   const packageJson = JSON.parse(await readFile(new URL("package.json", desktopRoot), "utf8"));
   assert.equal(packageJson.dependencies?.["@jarvis/api-client-ts"], undefined);
   assert.equal(packageJson.devDependencies?.esbuild, "0.25.0");
+});
+
+test("renderer dependency resolution supports a hoisted react-dom package", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "jarvis-renderer-dependencies-"));
+  const fixtureDesktopRoot = join(fixtureRoot, "src/clients/desktop");
+  const desktopReactRoot = join(fixtureDesktopRoot, "node_modules/react");
+  const hoistedReactDomRoot = join(fixtureRoot, "node_modules/react-dom");
+
+  try {
+    await Promise.all([
+      mkdir(desktopReactRoot, { recursive: true }),
+      mkdir(hoistedReactDomRoot, { recursive: true })
+    ]);
+    await Promise.all([
+      writeFile(join(fixtureDesktopRoot, "package.json"), "{}\n"),
+      writeFile(join(desktopReactRoot, "index.js"), "module.exports = {};\n"),
+      writeFile(join(desktopReactRoot, "jsx-runtime.js"), "module.exports = {};\n"),
+      writeFile(join(hoistedReactDomRoot, "client.js"), "module.exports = {};\n")
+    ]);
+
+    const dependencies = resolveRendererDependencies(fixtureDesktopRoot);
+
+    assert.equal(dependencies.get("react"), await realpath(join(desktopReactRoot, "index.js")));
+    assert.equal(
+      dependencies.get("react/jsx-runtime"),
+      await realpath(join(desktopReactRoot, "jsx-runtime.js"))
+    );
+    assert.equal(
+      dependencies.get("react-dom/client"),
+      await realpath(join(hoistedReactDomRoot, "client.js"))
+    );
+  } finally {
+    await rm(fixtureRoot, { force: true, recursive: true });
+  }
 });

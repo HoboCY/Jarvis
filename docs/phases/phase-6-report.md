@@ -29,8 +29,8 @@ dotnet ef migrations has-pending-model-changes ...                            PA
 
 pnpm typecheck                                                               PASS
 pnpm lint                                                                    PASS
-pnpm --filter @jarvis/desktop test                                             PASS (57 TS tests + 5 build tests)
-pnpm test                                                                      PASS (recursive: contracts 4 + realtime 12 + api-client 3 + Desktop 57 + build 5 + Mobile 49; 130 individual tests)
+pnpm --filter @jarvis/desktop test                                             PASS (57 TS tests + 6 build tests)
+pnpm test                                                                      PASS (recursive: contracts 4 + realtime 12 + api-client 3 + Desktop 57 + build 6 + Mobile 49; 131 individual tests)
 pnpm build                                                                   PASS
 pnpm generate:openapi && pnpm check:openapi                                  PASS (byte-for-byte stable)
 pnpm check:codex-schema && pnpm check:codex-schema-canonical                 PASS (275 schema files)

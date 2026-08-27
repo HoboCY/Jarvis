@@ -1,10 +1,10 @@
-import { realpathSync } from "node:fs";
 import { mkdir, copyFile, rm } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { assertBuildMetafiles } from "./assert-package.mjs";
+import { resolveRendererDependencies } from "./renderer-dependencies.mjs";
 
 const scriptsRoot = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptsRoot, "..");
@@ -19,19 +19,13 @@ const nodeBuiltins = [
   ])
 ];
 
-const reactRoot = realpathSync(join(desktopRoot, "node_modules/react"));
-const reactDomRoot = realpathSync(join(desktopRoot, "node_modules/react-dom"));
+const rendererDependencies = resolveRendererDependencies(desktopRoot);
 
 const rendererDependencyPlugin = {
   name: "jarvis-renderer-dependencies",
   setup(esbuild) {
-    const aliases = new Map([
-      ["react", join(reactRoot, "index.js")],
-      ["react/jsx-runtime", join(reactRoot, "jsx-runtime.js")],
-      ["react-dom/client", join(reactDomRoot, "client.js")]
-    ]);
     esbuild.onResolve({ filter: /^(?:react|react\/jsx-runtime|react-dom\/client)$/ }, args => {
-      const target = aliases.get(args.path);
+      const target = rendererDependencies.get(args.path);
       return target ? { path: target } : undefined;
     });
   }
