@@ -148,6 +148,15 @@ public sealed class RealtimeApiTests
             "realtime-ended");
         Assert.Equal(HttpStatusCode.OK, ended.StatusCode);
 
+        using var repeatedRotation = await PostAsync(
+            client,
+            $"/api/v1/realtime/sessions/{secret.RealtimeSessionId}/ended",
+            new RealtimeSessionEndedRequest("duplicate rotation", RealtimeSessionStatusValue.Rotated),
+            "realtime-rotated-with-another-key");
+        Assert.Equal(HttpStatusCode.OK, repeatedRotation.StatusCode);
+        var repeatedRotationBody = await repeatedRotation.Content.ReadFromJsonAsync<RealtimeSessionResponse>();
+        Assert.Equal("idle rotation", repeatedRotationBody!.EndReason);
+
         var detail = await client.GetFromJsonAsync<ConversationResponse>(
             $"/api/v1/conversations/{conversation.Id}");
         Assert.NotNull(detail);
@@ -173,6 +182,13 @@ public sealed class RealtimeApiTests
             "ek_test_ephemeral",
             string.Join("\n", await db.OutboxMessages.Select(message => message.PayloadJson).ToListAsync()),
             StringComparison.Ordinal);
+        var invalidations = await db.OutboxMessages
+            .Where(message => message.EventType == "realtime.sessionInvalidated")
+            .Select(message => message.PayloadJson)
+            .ToListAsync();
+        Assert.Equal(2, invalidations.Count);
+        Assert.Contains(invalidations, payload => payload.Contains(secret.RealtimeSessionId.ToString(), StringComparison.Ordinal));
+        Assert.Contains(invalidations, payload => payload.Contains(rotatedSecret.RealtimeSessionId.ToString(), StringComparison.Ordinal));
     }
 
     [Fact]

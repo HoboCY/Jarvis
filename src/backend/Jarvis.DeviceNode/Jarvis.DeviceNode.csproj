@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
     <ProjectReference Include="../Jarvis.Application/Jarvis.Application.csproj" />
     <ProjectReference Include="../Jarvis.Infrastructure/Jarvis.Infrastructure.csproj" />
     <ProjectReference Include="../Jarvis.Contracts/Jarvis.Contracts.csproj" />

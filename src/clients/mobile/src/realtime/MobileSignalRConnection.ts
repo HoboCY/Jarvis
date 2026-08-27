@@ -53,7 +53,9 @@ export class MobileSignalRConnection {
       "notification.created",
       "notification.updated",
       "approval.required",
-      "approval.resolved"
+      "approval.resolved",
+      "conversation.summaryUpdated",
+      "realtime.sessionInvalidated"
     ]) {
       connection.on(eventType, value => this.accept(value));
     }

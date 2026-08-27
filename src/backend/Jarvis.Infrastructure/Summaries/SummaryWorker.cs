@@ -116,6 +116,7 @@ public sealed class SummaryWorker(
                     type = "conversation.summaryUpdated",
                     payload = new
                     {
+                        userId = conversation.UserId,
                         conversationId,
                         summaryId = summary.Id,
                         fromSequence = summary.FromSequence,

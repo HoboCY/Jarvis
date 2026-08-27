@@ -717,6 +717,7 @@ public sealed class EfRealtimeStore(
             return Conflict("The external realtime session identity is already attached to another session.");
         }
 
+        var previousStatus = session.Status;
         try
         {
             update(session);
@@ -727,6 +728,7 @@ public sealed class EfRealtimeStore(
         }
 
         var response = ToResponse(session);
+        var lifecycleChanged = session.Status != previousStatus;
         db.IdempotencyRecords.Add(CreateIdempotencyRecord(
             userId,
             scope,
@@ -734,27 +736,38 @@ public sealed class EfRealtimeStore(
             requestHash,
             JsonSerializer.Serialize(response, JsonOptions),
             nowMs));
-        var eventType = typeof(TRequest) == typeof(RealtimeSessionConnectedRequest)
-            ? "realtime.session.connected"
-            : "realtime.session.ended";
-        var eventId = Guid.CreateVersion7();
-        var occurredAtMs = nowMs;
-        db.OutboxMessages.Add(OutboxMessage.Create(
-            eventId,
-            eventType,
-            JsonSerializer.Serialize(new
-            {
+        if (lifecycleChanged)
+        {
+            var eventType = typeof(TRequest) == typeof(RealtimeSessionConnectedRequest)
+                ? "realtime.session.connected"
+                : "realtime.sessionInvalidated";
+            var eventId = Guid.CreateVersion7();
+            var occurredAtMs = nowMs;
+            db.OutboxMessages.Add(OutboxMessage.Create(
                 eventId,
-                occurredAt = occurredAtMs,
-                type = eventType,
-                payload = new { userId, sessionId }
-            },
-            JsonOptions),
-            occurredAtMs));
-        JarvisTelemetry.RecordOutboxEnqueued(eventType);
+                eventType,
+                JsonSerializer.Serialize(new
+                {
+                    eventId,
+                    occurredAt = occurredAtMs,
+                    type = eventType,
+                    payload = new
+                    {
+                        userId,
+                        sessionId,
+                        conversationId = session.ConversationId,
+                        status = response.Status,
+                        reason = response.EndReason
+                    }
+                },
+                JsonOptions),
+                occurredAtMs));
+            JarvisTelemetry.RecordOutboxEnqueued(eventType);
+        }
+
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        if (request is RealtimeSessionConnectedRequest)
+        if (lifecycleChanged && request is RealtimeSessionConnectedRequest)
         {
             JarvisTelemetry.RealtimeSessionsConnected.Add(
                 1,
@@ -763,7 +776,7 @@ public sealed class EfRealtimeStore(
                 Math.Max(0, nowMs - session.StartedAtMs),
                 JarvisTelemetry.BoundedTags(("session.status", "connected")).ToArray());
         }
-        else if (request is RealtimeSessionEndedRequest endedRequest)
+        else if (lifecycleChanged && request is RealtimeSessionEndedRequest endedRequest)
         {
             var status = endedRequest.Status.ToString().ToLowerInvariant();
             if (endedRequest.Status == RealtimeSessionStatusValue.Rotated)

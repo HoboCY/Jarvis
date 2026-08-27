@@ -453,7 +453,9 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
     "notification.created",
     "notification.updated",
     "approval.required",
-    "approval.resolved"
+    "approval.resolved",
+    "conversation.summaryUpdated",
+    "realtime.sessionInvalidated"
   ]) {
     connection.on(eventType, envelope => {
       if (!isSignalREnvelope(envelope)) {

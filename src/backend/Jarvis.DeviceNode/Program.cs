@@ -60,9 +60,13 @@ builder.Services.AddSingleton<IDeviceNodeIdentityStore>(serviceProvider =>
 builder.Services.AddSingleton<DeviceNodeBootstrapper>();
 builder.Services.AddSingleton<IDeviceNodeControlPlane>(serviceProvider =>
     serviceProvider.GetRequiredService<DeviceNodeHttpClient>());
+builder.Services.AddSingleton<IDeviceNodeWakeSignal>(serviceProvider =>
+    new DeviceNodeWakeSignal(serviceProvider.GetRequiredService<TimeProvider>()));
+builder.Services.AddSingleton<IDeviceNodeHubConnectionFactory, SignalRDeviceNodeHubConnectionFactory>();
 builder.Services.AddSingleton<IDeviceApprovalDecisionWaiter, PollingApprovalDecisionWaiter>();
 builder.Services.AddSingleton<IDeviceUserInputWaiter, PollingUserInputWaiter>();
 builder.Services.AddHostedService<DeviceNodeBootstrapHostedService>();
+builder.Services.AddHostedService<DeviceNodeSignalRHostedService>();
 builder.Services.AddHostedService<DeviceNodeWorker>();
 using var host = builder.Build();
 

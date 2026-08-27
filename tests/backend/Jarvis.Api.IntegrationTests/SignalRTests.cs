@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Jarvis.Application.Outbox;
 using Jarvis.Contracts;
+using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.EntityFrameworkCore;
@@ -66,7 +67,7 @@ public sealed class SignalRTests : IClassFixture<TestApplicationFactory>
     }
 
     [Fact]
-    public async Task RegisteredDeviceReceivesTaskAvailableHintForItsUserButStillClaimsOverHttp()
+    public async Task RegisteredDeviceReceivesAvailableAndCancellationHintsButStillClaimsOverHttp()
     {
         using var ui = _factory.CreateClient();
         ui.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _factory.Token);
@@ -93,8 +94,16 @@ public sealed class SignalRTests : IClassFixture<TestApplicationFactory>
             })
             .Build();
         var available = new TaskCompletionSource<OutboxEventEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationRequested = new TaskCompletionSource<OutboxEventEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var taskUpdatedOnDeviceHub = new TaskCompletionSource<OutboxEventEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationOnClientHub = new TaskCompletionSource<OutboxEventEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
         connection.On<OutboxEventEnvelope>("task.available", envelope => available.TrySetResult(envelope));
+        connection.On<OutboxEventEnvelope>("task.cancellationRequested", envelope => cancellationRequested.TrySetResult(envelope));
+        connection.On<OutboxEventEnvelope>("task.updated", envelope => taskUpdatedOnDeviceHub.TrySetResult(envelope));
+        await using var clientConnection = CreateConnection(includeToken: true);
+        clientConnection.On<OutboxEventEnvelope>("task.cancellationRequested", envelope => cancellationOnClientHub.TrySetResult(envelope));
         await connection.StartAsync();
+        await clientConnection.StartAsync();
 
         ui.DefaultRequestHeaders.Remove("Idempotency-Key");
         ui.DefaultRequestHeaders.Add("Idempotency-Key", $"device-hub-conversation-{Guid.NewGuid():N}");
@@ -134,6 +143,91 @@ public sealed class SignalRTests : IClassFixture<TestApplicationFactory>
             JsonOptions)).Content.ReadFromJsonAsync<DeviceTaskClaimResponse>(JsonOptions);
         Assert.True(claim!.Claimed);
         Assert.Equal(accepted!.TaskId, claim.Task!.Id);
+        var taskUpdateEventId = Guid.CreateVersion7();
+        var taskUpdateAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var userId = await db.Users.Select(item => item.Id).SingleAsync();
+        var assignedTaskUpdate = OutboxMessage.Create(
+            taskUpdateEventId,
+            "task.updated",
+            JsonSerializer.Serialize(new
+            {
+                eventId = taskUpdateEventId,
+                occurredAt = taskUpdateAt,
+                type = "task.updated",
+                payload = new
+                {
+                    userId,
+                    deviceId = device.DeviceId,
+                    taskId = accepted.TaskId,
+                    status = "running",
+                    eventType = "task.claimed",
+                    occurredAt = taskUpdateAt,
+                    entityVersion = 1
+                }
+            }, JsonOptions),
+            taskUpdateAt);
+        await scope.ServiceProvider.GetRequiredService<IOutboxPublisher>()
+            .PublishAsync(assignedTaskUpdate, CancellationToken.None);
+        await AssertNoEventAsync(taskUpdatedOnDeviceHub.Task);
+
+        ui.DefaultRequestHeaders.Remove("Idempotency-Key");
+        ui.DefaultRequestHeaders.Add("Idempotency-Key", $"device-hub-cancel-{Guid.NewGuid():N}");
+        (await ui.PostAsJsonAsync($"/api/v1/tasks/{accepted.TaskId:D}/cancel", new { }, JsonOptions))
+            .EnsureSuccessStatusCode();
+        db.ChangeTracker.Clear();
+        var cancellationOutbox = Assert.Single(
+            await db.OutboxMessages.Where(item => item.EventType == "task.cancellationRequested").ToListAsync(),
+            item => item.PayloadJson.Contains(accepted.TaskId.ToString(), StringComparison.Ordinal));
+        await scope.ServiceProvider.GetRequiredService<IOutboxPublisher>()
+            .PublishAsync(cancellationOutbox, CancellationToken.None);
+
+        var cancellationHint = await cancellationRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("task.cancellationRequested", cancellationHint.Type);
+        await AssertNoEventAsync(cancellationOnClientHub.Task);
+    }
+
+    [Fact]
+    public async Task SummaryUpdateWithUserIdentityIsPublishedToClientHub()
+    {
+        await using var connection = CreateConnection(includeToken: true);
+        var received = new TaskCompletionSource<OutboxEventEnvelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.On<OutboxEventEnvelope>("conversation.summaryUpdated", envelope => received.TrySetResult(envelope));
+        await connection.StartAsync();
+
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+        var userId = await db.Users.Select(item => item.Id).SingleAsync();
+        var eventId = Guid.CreateVersion7();
+        var conversationId = Guid.CreateVersion7();
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var outbox = OutboxMessage.Create(
+            eventId,
+            "conversation.summaryUpdated",
+            JsonSerializer.Serialize(new
+            {
+                eventId,
+                occurredAt = nowMs,
+                type = "conversation.summaryUpdated",
+                payload = new
+                {
+                    userId,
+                    conversationId,
+                    summaryId = Guid.CreateVersion7(),
+                    fromSequence = 1,
+                    toSequence = 2,
+                    entityVersion = 1
+                }
+            }, JsonOptions),
+            nowMs);
+
+        await scope.ServiceProvider.GetRequiredService<IOutboxPublisher>()
+            .PublishAsync(outbox, CancellationToken.None);
+
+        var envelope = await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("conversation.summaryUpdated", envelope.Type);
+        Assert.Equal(
+            conversationId,
+            ((JsonElement)envelope.Payload).GetProperty("conversationId").GetGuid());
     }
 
     private HubConnection CreateConnection(bool includeToken)
@@ -150,6 +244,12 @@ public sealed class SignalRTests : IClassFixture<TestApplicationFactory>
                     }
                 })
             .Build();
+    }
+
+    private static async Task AssertNoEventAsync(Task eventTask)
+    {
+        var timeout = Task.Delay(TimeSpan.FromMilliseconds(500));
+        Assert.Same(timeout, await Task.WhenAny(eventTask, timeout));
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);

@@ -5,8 +5,11 @@ export {
 } from "./outbox.js";
 export type {
   ConversationCreatedPayload,
+  ConversationSummaryUpdatedPayload,
+  DeviceTaskCancellationRequestedPayload,
   NotificationCreatedPayload,
   NotificationUpdatedPayload,
+  RealtimeSessionInvalidatedPayload,
   SignalREventEnvelope,
   TaskUpdatedPayload,
   TypedMessageCreatedPayload,

@@ -33,9 +33,13 @@ public sealed class Phase5SummaryWorkerTests
         Assert.Equal(1, summary.FromSequence);
         Assert.Equal(2, summary.ToSequence);
         Assert.Equal("摘要：用户讨论了测试。", summary.Summary);
-        Assert.Contains(
+        var outbox = Assert.Single(
             await db.OutboxMessages.Where(item => item.EventType == "conversation.summaryUpdated").ToListAsync(),
             item => item.PayloadJson.Contains(summary.Id.ToString(), StringComparison.Ordinal));
+        using var outboxDocument = JsonDocument.Parse(outbox.PayloadJson);
+        Assert.Equal(
+            conversation.UserId,
+            outboxDocument.RootElement.GetProperty("payload").GetProperty("userId").GetGuid());
         Assert.Equal(1, provider.Calls);
     }
 

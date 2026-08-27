@@ -420,6 +420,20 @@ public sealed class EfTaskStore(
             }
 
             AddTaskEventAndOutbox(task, "task.cancellationRequested", nowMs);
+            if (task.Status == DomainTaskStatus.CancellationRequested
+                && task.AssignedDeviceId is Guid assignedDeviceId)
+            {
+                AddOutbox("task.cancellationRequested", new
+                {
+                    userId = task.UserId,
+                    deviceId = assignedDeviceId,
+                    conversationId = task.ConversationId,
+                    taskId = task.Id,
+                    status = "cancellationRequested",
+                    occurredAt = nowMs,
+                    entityVersion = task.Version
+                }, nowMs);
+            }
             if (task.Status == DomainTaskStatus.Cancelled)
             {
                 AddTerminalNotification(task, "task.cancelled", NotificationSeverity.Info, "后台任务已取消", "Queued task was cancelled before execution.", nowMs);

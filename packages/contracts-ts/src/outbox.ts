@@ -28,6 +28,33 @@ export interface TaskUpdatedPayload {
   entityVersion: number;
 }
 
+export interface ConversationSummaryUpdatedPayload {
+  userId: string;
+  conversationId: string;
+  summaryId: string;
+  fromSequence: number;
+  toSequence: number;
+  entityVersion: number;
+}
+
+export interface DeviceTaskCancellationRequestedPayload {
+  userId: string;
+  deviceId: string;
+  conversationId: string;
+  taskId: string;
+  status: "cancellationRequested";
+  occurredAt: number;
+  entityVersion: number;
+}
+
+export interface RealtimeSessionInvalidatedPayload {
+  userId: string;
+  sessionId: string;
+  conversationId: string;
+  status: "rotated" | "disconnected" | "failed";
+  reason: string | null;
+}
+
 export interface NotificationCreatedPayload {
   userId: string;
   notificationId: string;

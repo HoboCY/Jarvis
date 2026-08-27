@@ -29,17 +29,19 @@ public sealed class FailClosedApprovalDecisionWaiter : IDeviceApprovalDecisionWa
 public sealed class PollingApprovalDecisionWaiter(
     IDeviceNodeControlPlane controlPlane,
     IOptions<DeviceNodeOptions> options,
-    TimeProvider timeProvider) : IDeviceApprovalDecisionWaiter
+    TimeProvider timeProvider,
+    IDeviceNodeWakeSignal? wakeSignal = null) : IDeviceApprovalDecisionWaiter
 {
     private readonly DeviceNodeOptions nodeOptions = options.Value;
+    private readonly IDeviceNodeWakeSignal wakeSignal = wakeSignal ?? new DeviceNodeWakeSignal(timeProvider);
 
     public async Task<DeviceApprovalResolution?> WaitAsync(Guid taskId, Guid approvalId, CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(
-            TimeSpan.FromMilliseconds(Math.Max(100, nodeOptions.PollingIntervalMs)),
-            timeProvider);
-        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        while (!cancellationToken.IsCancellationRequested)
         {
+            await wakeSignal.WaitAsync(
+                TimeSpan.FromMilliseconds(Math.Max(100, nodeOptions.PollingIntervalMs)),
+                cancellationToken).ConfigureAwait(false);
             var status = await controlPlane.GetApprovalAsync(taskId, approvalId, cancellationToken).ConfigureAwait(false);
             if (status.Status == ApprovalStatusValue.Approved)
             {
@@ -138,13 +140,15 @@ public sealed partial class DeviceNodeWorker(
     ILogger<DeviceNodeWorker> logger,
     IDeviceApprovalDecisionWaiter? approvalWaiter = null,
     TimeProvider? timeProvider = null,
-    IDeviceUserInputWaiter? userInputWaiter = null) : BackgroundService
+    IDeviceUserInputWaiter? userInputWaiter = null,
+    IDeviceNodeWakeSignal? wakeSignal = null) : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly DeviceNodeOptions nodeOptions = options.Value;
     private readonly IDeviceApprovalDecisionWaiter approvalWaiter = approvalWaiter ?? new FailClosedApprovalDecisionWaiter();
     private readonly IDeviceUserInputWaiter userInputWaiter = userInputWaiter ?? new FailClosedUserInputWaiter();
     private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
+    private readonly IDeviceNodeWakeSignal wakeSignal = wakeSignal ?? new DeviceNodeWakeSignal(timeProvider ?? TimeProvider.System);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -188,7 +192,9 @@ public sealed partial class DeviceNodeWorker(
                 }
                 else
                 {
-                    await Task.Delay(Math.Max(25, nodeOptions.PollingIntervalMs), stoppingToken).ConfigureAwait(false);
+                    await wakeSignal.WaitAsync(
+                        TimeSpan.FromMilliseconds(Math.Max(25, nodeOptions.PollingIntervalMs)),
+                        stoppingToken).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -198,7 +204,9 @@ public sealed partial class DeviceNodeWorker(
             catch (Exception exception)
             {
                 LogWorkerLoopFailure(logger, exception);
-                await Task.Delay(Math.Max(25, nodeOptions.PollingIntervalMs), stoppingToken).ConfigureAwait(false);
+                await wakeSignal.WaitAsync(
+                    TimeSpan.FromMilliseconds(Math.Max(25, nodeOptions.PollingIntervalMs)),
+                    stoppingToken).ConfigureAwait(false);
             }
         }
     }
@@ -1069,11 +1077,11 @@ public sealed partial class DeviceNodeWorker(
         Action markCancellationRequested,
         CancellationTokenSource turnCancellation)
     {
-        using var timer = new PeriodicTimer(
-            TimeSpan.FromMilliseconds(Math.Max(250, nodeOptions.PollingIntervalMs)),
-            timeProvider);
-        while (await timer.WaitForNextTickAsync(turnCancellation.Token).ConfigureAwait(false))
+        while (!turnCancellation.IsCancellationRequested)
         {
+            await wakeSignal.WaitAsync(
+                TimeSpan.FromMilliseconds(Math.Max(250, nodeOptions.PollingIntervalMs)),
+                turnCancellation.Token).ConfigureAwait(false);
             var task = await controlPlane.GetTaskAsync(taskId, turnCancellation.Token).ConfigureAwait(false);
             if (task.Status != TaskStatusValue.CancellationRequested)
             {

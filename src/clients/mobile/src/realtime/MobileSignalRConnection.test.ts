@@ -49,8 +49,16 @@ test("MobileSignalRConnection forwards foreground events and refreshes after rec
   const client = new MobileSignalRConnection("https://jarvis.test", () => connection, feed);
 
   await client.connect();
+  assert.equal(connection.handlers.has("conversation.summaryUpdated"), true);
+  assert.equal(connection.handlers.has("realtime.sessionInvalidated"), true);
   connection.emit("notification.created", { eventId: "event-1", occurredAt: 1, type: "notification.created", payload: {} });
-  assert.equal(feed.events, 1);
+  connection.emit("conversation.summaryUpdated", {
+    eventId: "event-2",
+    occurredAt: 2,
+    type: "conversation.summaryUpdated",
+    payload: { conversationId: "conversation-1", summaryId: "summary-1", entityVersion: 2 }
+  });
+  assert.equal(feed.events, 2);
   connection.reconnectHandlers[0]!();
   await client.whenIdle();
   assert.equal(feed.recoveries, 1);
