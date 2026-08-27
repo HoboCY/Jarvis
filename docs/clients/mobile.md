@@ -107,10 +107,13 @@ contain an unused browser transport symbol in the vendor bundle; the gate
 rejects invocation/global registration, while Mobile always injects its own
 transport.
 
-Native Gradle/Xcode builds remain unverified until the corresponding CI run is
-green. Physical-device audio routing and a real OpenAI account remain separate
-live gates even after compilation succeeds. `react-native-incall-manager` has
-a known iOS audio-session singleton interaction with `react-native-webrtc`;
-iOS route selection is limited to its auto policy until that native integration
-is validated. Metro bundles and fake native-boundary tests are not substitutes
-for those checks.
+Native Gradle/Xcode compilation is proven for commit
+`957c3882a2734a70e905ce4db21d8602a71ba894` by
+[GitHub Actions CI #14](https://github.com/HoboCY/Jarvis/actions/runs/33040068363):
+the Android debug APK and unsigned iOS Simulator app both built and were
+uploaded as workflow artifacts. Physical-device audio routing and a real
+OpenAI account remain separate live gates. `react-native-incall-manager` has a
+known iOS audio-session singleton interaction with `react-native-webrtc`; iOS
+route selection is limited to its auto policy until that native integration is
+validated. Metro bundles, Simulator compilation and fake native-boundary tests
+are not substitutes for those checks.

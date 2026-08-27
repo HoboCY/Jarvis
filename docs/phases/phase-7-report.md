@@ -127,17 +127,18 @@ git diff --check -> passed
 CI 已加入该 gate，以及 mobile typecheck/test、Android/iOS Metro bundle 和
 `check:mobile-native-config -- --require-bundles`。
 
+提交 `957c3882a2734a70e905ce4db21d8602a71ba894` 的
+[GitHub Actions CI #14](https://github.com/HoboCY/Jarvis/actions/runs/33040068363)
+已提供真实原生编译证据：Android JDK 17/SDK 37/NDK 27.1
+`assembleDebug` 与 macOS 15/CocoaPods iOS Simulator `xcodebuild` 均成功，且分别
+上传 `jarvis-phase7-android-debug` 和 `jarvis-phase7-ios-simulator-debug` 产物。
+
 ## 未验证 live gates
 
-当前开发机没有完整 Xcode、CocoaPods、JDK 或 Android SDK，因此没有假装通过
-`Gradle assembleDebug`、`xcodebuild` 或物理设备测试。真实 iOS/Android 麦克风、
-扬声器/耳机切换、前后台恢复、真实 OpenAI Realtime 账号、证书和公共 HTTPS
-部署仍需具备工具链、设备和凭据后执行。`react-native-incall-manager` 在 iOS
-仍有与 react-native-webrtc `AVAudioSession` singleton 的已知集成限制，且本地
-无法由 fake boundary 证明物理 route；fake native boundary、TestServer/SQLite
-和 Metro bundle 只证明应用代码边界，不替代这些 live gates。
-
-CI 已新增仅在 `main` push 运行的 Android JDK 17/SDK 37 `assembleDebug` 和
-macOS 15/CocoaPods iOS Simulator `xcodebuild` 门禁。工作流定义本身不是通过证据；
-只有 GitHub Actions 对相应提交的真实成功 run 才能关闭两个 native build gate，
-且仍不能替代 iOS/Android 物理设备和真实 OpenAI 音频验收。
+当前开发机没有完整 Xcode、CocoaPods、JDK 或 Android SDK；原生编译由上述精确
+提交的 CI 成功 run 证明，本地未重复声称。真实 iOS/Android 麦克风、扬声器/耳机
+切换、前后台恢复、真实 OpenAI Realtime 账号、证书和公共 HTTPS 部署仍需具备
+工具链、物理设备和凭据后执行。`react-native-incall-manager` 在 iOS 仍有与
+`react-native-webrtc` `AVAudioSession` singleton 的已知集成限制，且 CI
+Simulator 构建无法证明物理 route；fake native boundary、TestServer/SQLite、
+Metro bundle 和原生编译均不替代这些 live gates。
