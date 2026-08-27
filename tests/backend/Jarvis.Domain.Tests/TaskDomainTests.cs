@@ -117,6 +117,13 @@ public sealed class TaskDomainTests
         Assert.Equal(DomainTaskStatus.Recovering, approvalRecovery.Status);
         Assert.Null(approvalRecovery.LeaseOwner);
 
+        var userInputRecovery = CreateRunningTask();
+        userInputRecovery.WaitForUserInput(350);
+        Assert.True(userInputRecovery.RenewLease("worker", 700, 400));
+        Assert.True(userInputRecovery.MarkRecovering(701));
+        Assert.Equal(DomainTaskStatus.Recovering, userInputRecovery.Status);
+        Assert.Null(userInputRecovery.LeaseOwner);
+
         var recoveryFailure = CreateRunningTask();
         recoveryFailure.MarkRecovering(400);
         Assert.True(recoveryFailure.MarkFailed("recovery_error", "recovery failed", 500));
@@ -130,7 +137,6 @@ public sealed class TaskDomainTests
         {
             DomainTaskStatus.Assigned,
             DomainTaskStatus.WaitingForApproval,
-            DomainTaskStatus.WaitingForUserInput,
             DomainTaskStatus.Recovering
         })
         {
@@ -160,7 +166,6 @@ public sealed class TaskDomainTests
             DomainTaskStatus.Queued,
             DomainTaskStatus.Assigned,
             DomainTaskStatus.WaitingForApproval,
-            DomainTaskStatus.WaitingForUserInput,
             DomainTaskStatus.CancellationRequested,
             DomainTaskStatus.Recovering,
             DomainTaskStatus.Succeeded,
@@ -178,7 +183,6 @@ public sealed class TaskDomainTests
             DomainTaskStatus.Queued,
             DomainTaskStatus.Assigned,
             DomainTaskStatus.WaitingForApproval,
-            DomainTaskStatus.WaitingForUserInput,
             DomainTaskStatus.CancellationRequested,
             DomainTaskStatus.Succeeded,
             DomainTaskStatus.Failed,
@@ -300,7 +304,6 @@ public sealed class TaskDomainTests
         foreach (var status in new[]
         {
             DomainTaskStatus.Queued,
-            DomainTaskStatus.WaitingForUserInput,
             DomainTaskStatus.CancellationRequested,
             DomainTaskStatus.Succeeded,
             DomainTaskStatus.Failed,
@@ -372,6 +375,79 @@ public sealed class TaskDomainTests
         Assert.Equal(NotificationStatus.Actioned, notification.Status);
         Assert.Throws<InvalidOperationException>(() => notification.MarkDelivered(500));
         Assert.Throws<InvalidOperationException>(() => notification.MarkDismissed(600));
+    }
+
+    [Fact]
+    public void TaskExecutionCanWaitForAndResumeUserInput()
+    {
+        var execution = TaskExecution.Create(
+            Guid.CreateVersion7(),
+            Guid.CreateVersion7(),
+            WorkerKind.Responses,
+            100);
+
+        execution.Start(200);
+        Assert.True(execution.WaitForUserInput(300));
+        Assert.Equal(TaskExecutionStatus.WaitingForUserInput, execution.Status);
+
+        Assert.True(execution.Resume(400));
+        Assert.Equal(TaskExecutionStatus.Running, execution.Status);
+    }
+
+    [Fact]
+    public void TaskExecutionRejectsUserInputTransitionsFromIllegalStates()
+    {
+        var assigned = TaskExecution.Create(
+            Guid.CreateVersion7(),
+            Guid.CreateVersion7(),
+            WorkerKind.Responses,
+            100);
+
+        Assert.Throws<InvalidOperationException>(() => assigned.WaitForUserInput(200));
+        assigned.Start(300);
+        assigned.WaitForUserInput(400);
+        Assert.Throws<InvalidOperationException>(() => assigned.WaitForUserInput(500));
+        assigned.Resume(600);
+        Assert.Throws<InvalidOperationException>(() => assigned.Resume(700));
+    }
+
+    [Fact]
+    public void WaitingForUserInputCanFailClosedAndRequestCancellation()
+    {
+        var failed = CreateRunningTask();
+        failed.WaitForUserInput(400);
+
+        Assert.True(failed.MarkFailed("user_input_expired", "The answer deadline elapsed.", 500));
+        Assert.Equal(DomainTaskStatus.Failed, failed.Status);
+
+        var cancellation = CreateRunningTask();
+        cancellation.WaitForUserInput(400);
+
+        Assert.True(cancellation.RequestCancellation(500));
+        Assert.Equal(DomainTaskStatus.CancellationRequested, cancellation.Status);
+    }
+
+    [Fact]
+    public void RecoveryWithDurableUserInputReturnsTaskAndExecutionToWaiting()
+    {
+        var task = CreateRunningTask();
+        task.WaitForUserInput(400);
+        Assert.True(task.MarkRecovering(500));
+
+        var execution = TaskExecution.Create(
+            Guid.CreateVersion7(),
+            task.Id,
+            Guid.CreateVersion7(),
+            WorkerKind.Codex,
+            300);
+        execution.Start(350);
+        execution.WaitForUserInput(400);
+        Assert.True(execution.MarkRecovering(500));
+
+        Assert.True(task.ResumeWaitingForUserInputFromRecovery(600));
+        Assert.True(execution.ResumeWaitingForUserInputFromRecovery(600));
+        Assert.Equal(DomainTaskStatus.WaitingForUserInput, task.Status);
+        Assert.Equal(TaskExecutionStatus.WaitingForUserInput, execution.Status);
     }
 
     private static Jarvis.Domain.Tasks.Task CreateTask() => Jarvis.Domain.Tasks.Task.Create(

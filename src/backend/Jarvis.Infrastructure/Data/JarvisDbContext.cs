@@ -35,6 +35,8 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
 
     public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
 
+    public DbSet<TaskUserInputRequest> TaskUserInputRequests => Set<TaskUserInputRequest>();
+
     public DbSet<Approval> Approvals => Set<Approval>();
 
     public DbSet<Notification> Notifications => Set<Notification>();
@@ -275,6 +277,34 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
                 .HasForeignKey(execution => execution.DeviceId)
                 .OnDelete(DeleteBehavior.Restrict);
             ConfigureVersion(entity.Property(execution => execution.Version));
+        });
+
+        modelBuilder.Entity<TaskUserInputRequest>(entity =>
+        {
+            entity.ToTable("TaskUserInputRequests");
+            entity.HasKey(request => request.Id);
+            entity.Property(request => request.RequestId).HasMaxLength(200).IsRequired();
+            entity.Property(request => request.RequestIdIsString).IsRequired();
+            entity.Property(request => request.ItemId).HasMaxLength(500).IsRequired();
+            entity.Property(request => request.ThreadId).HasMaxLength(500).IsRequired();
+            entity.Property(request => request.TurnId).HasMaxLength(500).IsRequired();
+            entity.Property(request => request.QuestionsJson).HasMaxLength(100_000).IsRequired();
+            entity.Property(request => request.AnswersJson).HasMaxLength(100_000);
+            entity.HasIndex(request => new { request.DeviceId, request.ExecutionId, request.RequestIdIsString, request.RequestId }).IsUnique();
+            entity.HasIndex(request => new { request.TaskId, request.Status, request.CreatedAtMs });
+            entity.HasOne<Jarvis.Domain.Tasks.Task>()
+                .WithMany()
+                .HasForeignKey(request => request.TaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<TaskExecution>()
+                .WithMany()
+                .HasForeignKey(request => request.ExecutionId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne<Device>()
+                .WithMany()
+                .HasForeignKey(request => request.DeviceId)
+                .OnDelete(DeleteBehavior.Restrict);
+            ConfigureVersion(entity.Property(request => request.Version));
         });
 
         modelBuilder.Entity<Approval>(entity =>

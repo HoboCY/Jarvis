@@ -247,7 +247,8 @@ public sealed record TaskResponse(
     long? CompletedAtMs,
     TaskExecutionResponse? Execution = null,
     IReadOnlyList<ArtifactManifestEntry>? Artifacts = null,
-    CapabilityEnvelopeContract? CapabilityEnvelope = null);
+    CapabilityEnvelopeContract? CapabilityEnvelope = null,
+    TaskUserInputResponse? PendingUserInput = null);
 
 [JsonConverter(typeof(CamelCaseEnumConverter<TaskExecutionStatusValue>))]
 public enum TaskExecutionStatusValue
@@ -258,7 +259,8 @@ public enum TaskExecutionStatusValue
     Recovering,
     Succeeded,
     Failed,
-    Cancelled
+    Cancelled,
+    WaitingForUserInput
 }
 
 public sealed record TaskExecutionResponse(
@@ -452,6 +454,83 @@ public sealed record DeviceTaskLeaseRenewResponse(
     bool Renewed,
     long? LeaseExpiresAtMs,
     TaskStatusValue Status);
+
+[JsonConverter(typeof(CamelCaseEnumConverter<TaskUserInputStatusValue>))]
+public enum TaskUserInputStatusValue
+{
+    Pending,
+    Answered,
+    Cleared,
+    Expired
+}
+
+public sealed record TaskUserInputOption(
+    string Description,
+    string Label);
+
+public sealed record TaskUserInputQuestion(
+    string Header,
+    string Id,
+    string Question,
+    bool IsOther = false,
+    bool IsSecret = false,
+    IReadOnlyList<TaskUserInputOption>? Options = null);
+
+/// <summary>
+/// Safe task projection for UI clients. It never contains a submitted answer.
+/// </summary>
+public sealed record TaskUserInputResponse(
+    string RequestId,
+    string ItemId,
+    string ThreadId,
+    string TurnId,
+    IReadOnlyList<TaskUserInputQuestion> Questions,
+    TaskUserInputStatusValue Status = TaskUserInputStatusValue.Pending,
+    long? ExpiresAtMs = null,
+    bool RequestIdIsString = true);
+
+public sealed record TaskUserInputAnswer(IReadOnlyList<string> Answers);
+
+public sealed record TaskUserInputSubmissionRequest(
+    string RequestId,
+    IReadOnlyDictionary<string, TaskUserInputAnswer> Answers,
+    Guid? ExecutionId = null,
+    bool RequestIdIsString = true);
+
+public sealed record TaskUserInputSubmissionResponse(
+    Guid TaskId,
+    Guid ExecutionId,
+    string RequestId,
+    bool Accepted,
+    TaskStatusValue Status,
+    TaskExecutionStatusValue ExecutionStatus);
+
+/// <summary>
+/// Device-only request projection of the pinned Codex item/tool/requestUserInput params.
+/// RequestId is the JSON-RPC request id normalized to text by the adapter.
+/// </summary>
+public sealed record DeviceTaskUserInputRequest(
+    Guid ExecutionId,
+    string RequestId,
+    string ItemId,
+    IReadOnlyList<TaskUserInputQuestion> Questions,
+    string ThreadId,
+    string TurnId,
+    long? AutoResolutionMs = null,
+    bool RequestIdIsString = true);
+
+public sealed record DeviceTaskUserInputResponse(
+    Guid TaskId,
+    Guid ExecutionId,
+    string RequestId,
+    string ItemId,
+    string ThreadId,
+    string TurnId,
+    IReadOnlyList<TaskUserInputQuestion> Questions,
+    TaskUserInputStatusValue Status,
+    IReadOnlyDictionary<string, TaskUserInputAnswer>? Answers = null,
+    long? ExpiresAtMs = null,
+    bool RequestIdIsString = true);
 
 public sealed record NotificationResponse(
     Guid Id,

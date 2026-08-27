@@ -62,6 +62,21 @@ const jarvisApi = {
   }): Promise<unknown> => ipcRenderer.invoke("backend:delegateTask", input) as Promise<unknown>,
   getTaskStatus: (taskId: string): Promise<unknown> =>
     ipcRenderer.invoke("backend:getTaskStatus", { taskId }) as Promise<unknown>,
+  submitTaskUserInput: (input: {
+    taskId: string;
+    requestId: string;
+    executionId?: string;
+    requestIdIsString?: boolean;
+    answers: Record<string, { answers: string[] }>;
+    idempotencyKey: string;
+  }): Promise<{
+    taskId: string;
+    executionId: string;
+    requestId: string;
+    accepted: boolean;
+    status: "queued" | "assigned" | "running" | "waitingForApproval" | "waitingForUserInput" | "recovering" | "cancellationRequested" | "succeeded" | "failed" | "cancelled";
+    executionStatus: "assigned" | "running" | "waitingForApproval" | "recovering" | "succeeded" | "failed" | "cancelled" | "waitingForUserInput";
+  }> => ipcRenderer.invoke("backend:submitTaskUserInput", input),
   cancelTask: (input: { taskId: string; idempotencyKey: string }): Promise<unknown> =>
     ipcRenderer.invoke("backend:cancelTask", input) as Promise<unknown>,
   rememberFact: (input: {

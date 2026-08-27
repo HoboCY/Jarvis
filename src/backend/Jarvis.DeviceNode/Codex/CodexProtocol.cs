@@ -4,6 +4,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Jarvis.Application.Devices;
+using Jarvis.Application.Tasks;
+using Jarvis.Contracts;
 using Jarvis.Infrastructure.Observability;
 
 namespace Jarvis.DeviceNode.Codex;
@@ -17,6 +19,8 @@ public static class CodexProtocolMethods
     public const string TurnStart = "turn/start";
     public const string TurnInterrupt = "turn/interrupt";
     public const string ProcessExited = "process/exited";
+    public const string ServerRequestResolved = "serverRequest/resolved";
+    public const string ToolRequestUserInput = "item/tool/requestUserInput";
 
     public static readonly IReadOnlySet<string> ServerApprovalRequests = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -24,6 +28,194 @@ public static class CodexProtocolMethods
         "item/fileChange/requestApproval",
         "item/permissions/requestApproval"
     };
+}
+
+/// <summary>
+/// Parses only the pinned 0.146.0 ToolRequestUserInputParams shape and builds
+/// the exact ToolRequestUserInputResponse envelope expected by Codex.
+/// </summary>
+public static class CodexUserInputProtocol
+{
+    public static bool TryParse(
+        string requestId,
+        Guid executionId,
+        JsonElement parameters,
+        long nowMs,
+        out DeviceTaskUserInputRequest request,
+        out string error)
+        => TryParse(requestId, true, executionId, parameters, nowMs, out request, out error);
+
+    public static bool TryParse(
+        string requestId,
+        bool requestIdIsString,
+        Guid executionId,
+        JsonElement parameters,
+        long nowMs,
+        out DeviceTaskUserInputRequest request,
+        out string error)
+    {
+        request = default!;
+        error = string.Empty;
+        if (parameters.ValueKind != JsonValueKind.Object)
+        {
+            error = "ToolRequestUserInputParams must be an object.";
+            return false;
+        }
+
+        if (!TryGetRequiredString(parameters, "itemId", out var itemId)
+            || !TryGetRequiredString(parameters, "threadId", out var threadId)
+            || !TryGetRequiredString(parameters, "turnId", out var turnId)
+            || !parameters.TryGetProperty("questions", out var questionsElement)
+            || questionsElement.ValueKind != JsonValueKind.Array)
+        {
+            error = "ToolRequestUserInputParams is missing a required field.";
+            return false;
+        }
+
+        var questions = new List<TaskUserInputQuestion>();
+        foreach (var questionElement in questionsElement.EnumerateArray())
+        {
+            if (questionElement.ValueKind != JsonValueKind.Object
+                || !TryGetRequiredString(questionElement, "header", out var header)
+                || !TryGetRequiredString(questionElement, "id", out var id)
+                || !TryGetRequiredString(questionElement, "question", out var question))
+            {
+                error = "ToolRequestUserInputQuestion is invalid.";
+                return false;
+            }
+
+            if (!TryGetOptionalBoolean(questionElement, "isOther", out var isOther)
+                || !TryGetOptionalBoolean(questionElement, "isSecret", out var isSecret))
+            {
+                error = "ToolRequestUserInputQuestion boolean fields are invalid.";
+                return false;
+            }
+
+            IReadOnlyList<TaskUserInputOption>? options = null;
+            if (questionElement.TryGetProperty("options", out var optionsElement))
+            {
+                if (optionsElement.ValueKind == JsonValueKind.Array)
+                {
+                    var parsedOptions = new List<TaskUserInputOption>();
+                    foreach (var optionElement in optionsElement.EnumerateArray())
+                    {
+                        if (optionElement.ValueKind != JsonValueKind.Object
+                            || !TryGetRequiredString(optionElement, "description", out var description)
+                            || !TryGetRequiredString(optionElement, "label", out var label))
+                        {
+                            error = "ToolRequestUserInputOption is invalid.";
+                            return false;
+                        }
+
+                        parsedOptions.Add(new TaskUserInputOption(description, label));
+                    }
+
+                    options = parsedOptions;
+                }
+                else if (optionsElement.ValueKind != JsonValueKind.Null)
+                {
+                    error = "ToolRequestUserInputQuestion.options must be an array or null.";
+                    return false;
+                }
+            }
+
+            questions.Add(new TaskUserInputQuestion(header, id, question, isOther, isSecret, options));
+        }
+
+        long? autoResolutionMs = null;
+        if (parameters.TryGetProperty("autoResolutionMs", out var autoResolutionElement))
+        {
+            if (autoResolutionElement.ValueKind == JsonValueKind.Number)
+            {
+                if (!autoResolutionElement.TryGetInt64(out var parsed) || parsed < 0)
+                {
+                    error = "autoResolutionMs must be a non-negative uint64 within the supported bound.";
+                    return false;
+                }
+
+                autoResolutionMs = parsed;
+            }
+            else if (autoResolutionElement.ValueKind != JsonValueKind.Null)
+            {
+                error = "autoResolutionMs must be an integer or null.";
+                return false;
+            }
+        }
+
+        var candidate = new DeviceTaskUserInputRequest(
+            executionId,
+            requestId,
+            itemId,
+            questions,
+            threadId,
+            turnId,
+            autoResolutionMs,
+            requestIdIsString);
+        if (!TaskUserInputValidation.TryValidateRequest(candidate, nowMs, out error))
+        {
+            return false;
+        }
+
+        request = candidate with
+        {
+            RequestId = requestId.Trim(),
+            ItemId = itemId.Trim(),
+            ThreadId = threadId.Trim(),
+            TurnId = turnId.Trim(),
+            Questions = questions.Select(NormalizeQuestion).ToArray()
+        };
+        return true;
+    }
+
+    public static object CreateResponse(IReadOnlyDictionary<string, TaskUserInputAnswer> answers) => new
+    {
+        answers = answers.ToDictionary(
+            pair => pair.Key,
+            pair => new { answers = pair.Value.Answers },
+            StringComparer.Ordinal)
+    };
+
+    private static TaskUserInputQuestion NormalizeQuestion(TaskUserInputQuestion question) => question with
+    {
+        Header = question.Header.Trim(),
+        Id = question.Id.Trim(),
+        Question = question.Question.Trim(),
+        Options = question.Options?.Select(option => option with
+        {
+            Label = option.Label.Trim(),
+            Description = option.Description.Trim()
+        }).ToArray()
+    };
+
+    private static bool TryGetRequiredString(JsonElement element, string name, out string value)
+    {
+        value = string.Empty;
+        if (!element.TryGetProperty(name, out var property)
+            || property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = property.GetString() ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static bool TryGetOptionalBoolean(JsonElement element, string name, out bool value)
+    {
+        value = false;
+        if (!element.TryGetProperty(name, out var property))
+        {
+            return true;
+        }
+
+        if (property.ValueKind == JsonValueKind.True)
+        {
+            value = true;
+            return true;
+        }
+
+        return property.ValueKind == JsonValueKind.False;
+    }
 }
 
 public sealed record CodexRuntimeOptions(
@@ -65,13 +257,14 @@ public sealed record CodexThreadHandle(string ThreadId, JsonElement RawResponse)
 
 public sealed record CodexTurnHandle(string ThreadId, string TurnId, JsonElement RawResponse);
 
-public sealed record CodexServerRequest(string RequestId, string Method, JsonElement Params);
+public sealed record CodexServerRequest(string RequestId, string Method, JsonElement Params, bool RequestIdIsString = true);
 
 public sealed record CodexRuntimeEvent(
     string Method,
     JsonElement? Params = null,
     string? RequestId = null,
-    bool IsRequest = false);
+    bool IsRequest = false,
+    bool RequestIdIsString = true);
 
 public sealed class CodexProcessExitedEventArgs(int? exitCode, string stderrSummary) : EventArgs
 {
@@ -346,7 +539,7 @@ public sealed class CodexAppServerClient : ICodexRuntime
     public Task RespondToServerRequestAsync(CodexServerRequest request, object result, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return SendResponseAsync(request.RequestId, result, cancellationToken);
+        return SendResponseAsync(request.RequestId, request.RequestIdIsString, result, cancellationToken);
     }
 
     public async ValueTask DisposeAsync()
@@ -408,7 +601,7 @@ public sealed class CodexAppServerClient : ICodexRuntime
     {
         var id = Interlocked.Increment(ref requestNumber).ToString(System.Globalization.CultureInfo.InvariantCulture);
         var waiter = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!pending.TryAdd(id, waiter))
+        if (!pending.TryAdd(RequestKey(id, requestIdIsString: false), waiter))
         {
             throw new InvalidOperationException("Codex request id collision.");
         }
@@ -423,13 +616,13 @@ public sealed class CodexAppServerClient : ICodexRuntime
         }
         finally
         {
-            pending.TryRemove(id, out _);
+            pending.TryRemove(RequestKey(id, requestIdIsString: false), out _);
         }
     }
 
     private Task SendNotificationAsync(string method, object? parameters, CancellationToken cancellationToken) => SendJsonAsync(new { method, @params = parameters }, cancellationToken);
 
-    private async Task SendResponseAsync(string requestId, object result, CancellationToken cancellationToken) => await SendJsonAsync(new { id = ParseRequestId(requestId), result }, cancellationToken);
+    private async Task SendResponseAsync(string requestId, bool requestIdIsString, object result, CancellationToken cancellationToken) => await SendJsonAsync(new { id = ParseRequestId(requestId, requestIdIsString), result }, cancellationToken);
 
     private async Task SendJsonAsync(object value, CancellationToken cancellationToken)
     {
@@ -465,11 +658,12 @@ public sealed class CodexAppServerClient : ICodexRuntime
                     if (root.TryGetProperty("id", out var idElement))
                     {
                         var requestId = RequestIdText(idElement);
-                        if (root.TryGetProperty("result", out var result) && pending.TryGetValue(requestId, out var success))
+                        var requestKey = RequestKey(requestId.Text, requestId.IsString);
+                        if (root.TryGetProperty("result", out var result) && pending.TryGetValue(requestKey, out var success))
                         {
                             success.TrySetResult(result.Clone());
                         }
-                        else if (root.TryGetProperty("error", out var error) && pending.TryGetValue(requestId, out var failure))
+                        else if (root.TryGetProperty("error", out var error) && pending.TryGetValue(requestKey, out var failure))
                         {
                             JarvisTelemetry.CodexProtocolErrors.Add(
                                 1,
@@ -479,7 +673,7 @@ public sealed class CodexAppServerClient : ICodexRuntime
                         else if (root.TryGetProperty("method", out var method))
                         {
                             var @params = root.TryGetProperty("params", out var requestParams) ? requestParams.Clone() : default;
-                            await events.Writer.WriteAsync(new CodexRuntimeEvent(method.GetString() ?? string.Empty, @params, requestId, true), cancellationToken);
+                            await events.Writer.WriteAsync(new CodexRuntimeEvent(method.GetString() ?? string.Empty, @params, requestId.Text, true, requestId.IsString), cancellationToken);
                         }
                     }
                     else if (root.TryGetProperty("method", out var notificationMethod))
@@ -594,9 +788,35 @@ public sealed class CodexAppServerClient : ICodexRuntime
         return new CodexThreadHandle(threadId, response);
     }
 
-    private static object ParseRequestId(string requestId) => long.TryParse(requestId, out var number) ? number : requestId;
+    private static object ParseRequestId(string requestId, bool requestIdIsString)
+    {
+        if (requestIdIsString)
+        {
+            return requestId;
+        }
 
-    private static string RequestIdText(JsonElement id) => id.ValueKind == JsonValueKind.String ? id.GetString() ?? string.Empty : id.GetRawText();
+        // The adapter keeps the original JSON token text. Serializing a parsed
+        // JsonElement preserves a numeric id without accidentally turning it
+        // into a JSON-RPC string (including numbers outside Int64).
+        try
+        {
+            using var document = JsonDocument.Parse(requestId);
+            return document.RootElement.ValueKind == JsonValueKind.Number
+                ? document.RootElement.Clone()
+                : requestId;
+        }
+        catch (JsonException)
+        {
+            return requestId;
+        }
+    }
+
+    private static (string Text, bool IsString) RequestIdText(JsonElement id) => id.ValueKind == JsonValueKind.String
+        ? (id.GetString() ?? string.Empty, true)
+        : (id.GetRawText(), false);
+
+    private static string RequestKey(string requestId, bool requestIdIsString) =>
+        $"{(requestIdIsString ? 's' : 'n')}:{requestId}";
 
     private static void ValidateCwd(CapabilityPolicy policy, string? cwd)
     {

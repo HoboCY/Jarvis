@@ -107,6 +107,61 @@ public interface ITaskStore
         CancellationToken cancellationToken);
 }
 
+public enum TaskUserInputOperationStatus
+{
+    Succeeded,
+    Replayed,
+    Conflict,
+    StateConflict,
+    Invalid,
+    NotFound,
+    Unauthorized
+}
+
+public sealed record TaskUserInputOperation<T>(
+    TaskUserInputOperationStatus Status,
+    T? Value = default,
+    string? Detail = null);
+
+public interface ITaskUserInputStore
+{
+    Task<TaskUserInputOperation<DeviceTaskUserInputResponse>> CreateDeviceRequestAsync(
+        Guid deviceId,
+        Guid taskId,
+        DeviceTaskUserInputRequest request,
+        string leaseOwner,
+        string idempotencyKey,
+        CancellationToken cancellationToken);
+
+    Task<TaskUserInputOperation<DeviceTaskUserInputResponse>> GetDeviceRequestAsync(
+        Guid deviceId,
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string leaseOwner,
+        CancellationToken cancellationToken);
+
+    Task<TaskUserInputOperation<DeviceTaskUserInputResponse>> ResolveDeviceRequestAsync(
+        Guid deviceId,
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string leaseOwner,
+        string idempotencyKey,
+        CancellationToken cancellationToken);
+
+    Task<TaskUserInputOperation<TaskUserInputSubmissionResponse>> SubmitAsync(
+        Guid userId,
+        Guid taskId,
+        TaskUserInputSubmissionRequest request,
+        string idempotencyKey,
+        CancellationToken cancellationToken);
+
+    Task<TaskUserInputResponse?> GetPendingAsync(Guid taskId, CancellationToken cancellationToken);
+}
+
 public sealed record FakeWorkItem(
     Guid TaskId,
     string Goal,

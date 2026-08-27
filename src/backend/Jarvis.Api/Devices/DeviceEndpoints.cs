@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Jarvis.Api.Authentication;
 using Jarvis.Application.Devices;
+using Jarvis.Application.Tasks;
 using Jarvis.Contracts;
 
 namespace Jarvis.Api.Devices;
@@ -65,6 +66,26 @@ public static class DeviceEndpoints
             .Produces<DeviceApprovalResponse>(StatusCodes.Status201Created)
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+        tasks.MapPost("/{taskId:guid}/user-input", CreateUserInputAsync)
+            .WithName("CreateDeviceTaskUserInput")
+            .Produces<DeviceTaskUserInputResponse>(StatusCodes.Status201Created)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+        tasks.MapGet("/{taskId:guid}/user-input/{requestId}", GetUserInputAsync)
+            .WithName("GetDeviceTaskUserInput")
+            .Produces<DeviceTaskUserInputResponse>()
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status404NotFound);
+        tasks.MapPost("/{taskId:guid}/user-input/{requestId}/resolved", ResolveUserInputAsync)
+            .WithName("ResolveDeviceTaskUserInput")
+            .Produces<DeviceTaskUserInputResponse>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status409Conflict);
         tasks.MapGet("/{taskId:guid}", GetTaskAsync)
             .WithName("GetDeviceTask")
@@ -293,6 +314,98 @@ public static class DeviceEndpoints
             DeviceOperationStatus.Succeeded => TypedResults.Ok(result.Value),
             DeviceOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "Approval not found", result.Detail),
             _ => Problem(StatusCodes.Status400BadRequest, "Invalid approval", result.Detail)
+        };
+    }
+
+    private static async Task<IResult> CreateUserInputAsync(
+        Guid taskId,
+        HttpContext httpContext,
+        DeviceCoordinationService service,
+        DeviceTaskUserInputRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDeviceId(httpContext, out var deviceId))
+        {
+            return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "A device credential is required.");
+        }
+
+        var result = await service.CreateUserInputAsync(
+            deviceId,
+            taskId,
+            request,
+            LeaseOwner(httpContext),
+            IdempotencyKey(httpContext),
+            cancellationToken);
+        return result.Status switch
+        {
+            TaskUserInputOperationStatus.Succeeded => Results.Created($"/api/v1/device-tasks/{taskId:D}/user-input/{result.Value!.RequestId}", result.Value),
+            TaskUserInputOperationStatus.Replayed => Results.Ok(result.Value),
+            TaskUserInputOperationStatus.Invalid => Problem(StatusCodes.Status400BadRequest, "Invalid user-input request", result.Detail),
+            TaskUserInputOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "Task execution not found", result.Detail),
+            TaskUserInputOperationStatus.Unauthorized => Problem(StatusCodes.Status403Forbidden, "Device disabled", result.Detail),
+            TaskUserInputOperationStatus.StateConflict or TaskUserInputOperationStatus.Conflict
+                => Problem(StatusCodes.Status409Conflict, "User-input request conflict", result.Detail),
+            _ => Problem(StatusCodes.Status500InternalServerError, "User-input request failed", result.Detail)
+        };
+    }
+
+    private static async Task<IResult> GetUserInputAsync(
+        Guid taskId,
+        string requestId,
+        HttpContext httpContext,
+        DeviceCoordinationService service,
+        Guid? executionId,
+        bool? requestIdIsString,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDeviceId(httpContext, out var deviceId))
+        {
+            return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "A device credential is required.");
+        }
+
+        var result = await service.GetUserInputAsync(deviceId, taskId, executionId ?? Guid.Empty, requestId, requestIdIsString ?? true, LeaseOwner(httpContext), cancellationToken);
+        return result.Status switch
+        {
+            TaskUserInputOperationStatus.Succeeded => TypedResults.Ok(result.Value),
+            TaskUserInputOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "User-input request not found", result.Detail),
+            TaskUserInputOperationStatus.Invalid => Problem(StatusCodes.Status400BadRequest, "Invalid user-input request identity", result.Detail),
+            TaskUserInputOperationStatus.StateConflict => Problem(StatusCodes.Status409Conflict, "User-input request conflict", result.Detail),
+            _ => Problem(StatusCodes.Status500InternalServerError, "User-input request lookup failed", result.Detail)
+        };
+    }
+
+    private static async Task<IResult> ResolveUserInputAsync(
+        Guid taskId,
+        string requestId,
+        HttpContext httpContext,
+        DeviceCoordinationService service,
+        Guid? executionId,
+        bool? requestIdIsString,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetDeviceId(httpContext, out var deviceId))
+        {
+            return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "A device credential is required.");
+        }
+
+        var result = await service.ResolveUserInputAsync(
+            deviceId,
+            taskId,
+            executionId ?? Guid.Empty,
+            requestId,
+            requestIdIsString ?? true,
+            LeaseOwner(httpContext),
+            IdempotencyKey(httpContext),
+            cancellationToken);
+        return result.Status switch
+        {
+            TaskUserInputOperationStatus.Succeeded or TaskUserInputOperationStatus.Replayed => TypedResults.Ok(result.Value),
+            TaskUserInputOperationStatus.Invalid => Problem(StatusCodes.Status400BadRequest, "Invalid user-input resolution", result.Detail),
+            TaskUserInputOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "User-input request not found", result.Detail),
+            TaskUserInputOperationStatus.StateConflict or TaskUserInputOperationStatus.Conflict
+                => Problem(StatusCodes.Status409Conflict, "User-input resolution conflict", result.Detail),
+            TaskUserInputOperationStatus.Unauthorized => Problem(StatusCodes.Status403Forbidden, "Device disabled", result.Detail),
+            _ => Problem(StatusCodes.Status500InternalServerError, "User-input resolution failed", result.Detail)
         };
     }
 

@@ -81,6 +81,74 @@ public sealed class DeviceNodeTests
     }
 
     [Fact]
+    public void UserInputProtocolParsesPinnedParamsAndEmitsOnlyThePinnedResponseEnvelope()
+    {
+        var requestId = "99";
+        var executionId = Guid.NewGuid();
+        using var parameters = JsonDocument.Parse("""
+            {
+              "itemId": "item-user-input",
+              "questions": [
+                {
+                  "header": "Choice",
+                  "id": "q1",
+                  "question": "Which option?",
+                  "isOther": false,
+                  "isSecret": false,
+                  "options": [
+                    { "description": "First option", "label": "A" },
+                    { "description": "Second option", "label": "B" }
+                  ]
+                }
+              ],
+              "threadId": "thread-user-input",
+              "turnId": "turn-user-input",
+              "autoResolutionMs": 60000
+            }
+            """);
+
+        Assert.True(CodexUserInputProtocol.TryParse(
+            requestId,
+            executionId,
+            parameters.RootElement,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            out var request,
+            out var error), error);
+        Assert.Equal(executionId, request.ExecutionId);
+        Assert.Equal(requestId, request.RequestId);
+        Assert.Single(request.Questions);
+        Assert.Equal("A", request.Questions[0].Options![0].Label);
+
+        using var response = JsonDocument.Parse(JsonSerializer.Serialize(
+            CodexUserInputProtocol.CreateResponse(new Dictionary<string, TaskUserInputAnswer>
+            {
+                ["q1"] = new(["A"])
+            }),
+            JsonOptions));
+        Assert.Equal(["answers"], response.RootElement.EnumerateObject().Select(property => property.Name));
+        var answer = response.RootElement.GetProperty("answers").GetProperty("q1");
+        Assert.Equal(["answers"], answer.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("A", answer.GetProperty("answers")[0].GetString());
+
+        using var secretParameters = JsonDocument.Parse("""
+            {
+              "itemId": "item-user-input",
+              "questions": [{ "header": "Secret", "id": "q1", "question": "Password?", "isSecret": true }],
+              "threadId": "thread-user-input",
+              "turnId": "turn-user-input"
+            }
+            """);
+        Assert.False(CodexUserInputProtocol.TryParse(
+            requestId,
+            executionId,
+            secretParameters.RootElement,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            out _,
+            out var secretError));
+        Assert.Contains("secret", secretError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void TaskPermissionProfileBuildsNativeConfigOverridesForTheEffectivePolicy()
     {
         var root = Path.Combine(Path.GetTempPath(), $"jarvis-profile-root-{Guid.NewGuid():N}");
@@ -889,6 +957,530 @@ done
     }
 
     [Fact]
+    public async System.Threading.Tasks.Task FakeJsonlUserInputBridgeAnswersTheOriginalRequestAndCompletesTheSameTurn()
+    {
+        var root = Directory.CreateTempSubdirectory("jarvis-fake-codex-user-input-");
+        var script = Path.Combine(root.FullName, "fake-codex.sh");
+        var requestsPath = Path.Combine(root.FullName, "requests.jsonl");
+        var scriptContents = """
+            #!/bin/sh
+            profile_id=""
+            for argument in "$@"; do
+              case "$argument" in
+                default_permissions=*) profile_id=$(echo "$argument" | sed 's/^default_permissions="//; s/"$//');;
+              esac
+            done
+            while IFS= read -r line; do
+              echo "$line" >> '__REQUESTS_PATH__'
+              if echo "$line" | grep -q '"method":"initialize"'; then echo '{"id":1,"result":{}}'; fi
+              if echo "$line" | grep -q '"method":"thread/start"'; then printf '{"id":2,"result":{"thread":{"id":"thread-input"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id"; fi
+              if echo "$line" | grep -q '"method":"turn/start"'; then echo '{"id":3,"result":{"turn":{"id":"turn-input"}}}'; echo '{"id":"001","method":"item/tool/requestUserInput","params":{"itemId":"item-input","questions":[{"header":"Choice","id":"q1","question":"Choose one","options":[{"description":"The first option","label":"A"},{"description":"The second option","label":"B"}]}],"threadId":"thread-input","turnId":"turn-input","autoResolutionMs":60000}}'; fi
+              if echo "$line" | grep -q '"id":"001","result":{"answers":{"q1":{"answers":'; then echo '{"id":99,"method":"item/tool/requestUserInput","params":{"itemId":"item-input-number","questions":[{"header":"Choice","id":"q1","question":"Choose one","options":[{"description":"The first option","label":"A"},{"description":"The second option","label":"B"}]}],"threadId":"thread-input","turnId":"turn-input","autoResolutionMs":60000}}'; fi
+              if echo "$line" | grep -q '"id":99,"result":{"answers":{"q1":{"answers":'; then echo '{"method":"turn/completed","params":{"status":"completed","summary":"input completion","artifacts":[]}}'; fi
+            done
+            """;
+        scriptContents = scriptContents.Replace("__REQUESTS_PATH__", requestsPath, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(script, scriptContents);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        try
+        {
+            var taskRoot = Directory.CreateDirectory(Path.Combine(root.FullName, "task-root")).FullName;
+            var taskId = Guid.NewGuid();
+            var executionId = Guid.NewGuid();
+            var deviceId = Guid.NewGuid();
+            var task = new TaskResponse(
+                taskId,
+                Guid.NewGuid(),
+                null,
+                "ask for one bounded choice",
+                null,
+                ["localFiles"],
+                [],
+                deviceId,
+                deviceId,
+                WorkerKindValue.Codex,
+                TaskStatusValue.Running,
+                0,
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1,
+                1,
+                1,
+                null);
+            var execution = new TaskExecutionResponse(
+                executionId,
+                taskId,
+                deviceId,
+                WorkerKindValue.Codex,
+                null,
+                null,
+                null,
+                TaskExecutionStatusValue.Running,
+                "{}",
+                null,
+                [],
+                1,
+                null,
+                1);
+            var claim = new DeviceTaskClaimResponse(
+                true,
+                task,
+                execution,
+                "input-owner",
+                30_000,
+                new CapabilityEnvelopeContract(ReadFiles: true, AllowedRoots: [taskRoot]));
+            var controlPlane = new RecordingControlPlane
+            {
+                UserInputAnswerAfterPolls = 1,
+                UserInputAnswers = new Dictionary<string, TaskUserInputAnswer>
+                {
+                    ["q1"] = new(["A"])
+                }
+            };
+            var options = Options.Create(new DeviceNodeOptions
+            {
+                CodexBinaryPath = script,
+                CodexArguments = [],
+                CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
+                HeartbeatIntervalMs = 30_000,
+                PollingIntervalMs = 25,
+                MaxRestartAttempts = 0,
+                Capabilities = new CapabilityEnvelopeOptions
+                {
+                    ReadFiles = true,
+                    AllowedRoots = [root.FullName]
+                }
+            });
+            var worker = new DeviceNodeWorker(
+                options,
+                controlPlane,
+                NullLogger<DeviceNodeWorker>.Instance,
+                timeProvider: TimeProvider.System,
+                userInputWaiter: new PollingUserInputWaiter(controlPlane, options, TimeProvider.System));
+
+            await worker.ExecuteClaimAsync(
+                claim,
+                Jarvis.Application.Devices.CapabilityPolicy.Create(options.Value.Capabilities.ToEnvelope()),
+                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+
+            var completed = Assert.Single(controlPlane.Events, item => item.EventType == "task.completed");
+            Assert.Equal("input completion", completed.ResultSummary);
+            Assert.True(controlPlane.UserInputPollCount > 0);
+            var responseLines = (await File.ReadAllLinesAsync(requestsPath))
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Where(item => item.TryGetProperty("result", out _))
+                .ToArray();
+            var stringResponse = Assert.Single(responseLines, item =>
+                item.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.String
+                && id.GetString() == "001");
+            var numericResponse = Assert.Single(responseLines, item =>
+                item.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.Number
+                && id.GetInt32() == 99);
+            foreach (var responseLine in new[] { stringResponse, numericResponse })
+            {
+                Assert.Equal(["id", "result"], responseLine.EnumerateObject().Select(property => property.Name));
+                var result = responseLine.GetProperty("result");
+                Assert.Equal(["answers"], result.EnumerateObject().Select(property => property.Name));
+                var questionAnswer = result.GetProperty("answers").GetProperty("q1");
+                Assert.Equal(["answers"], questionAnswer.EnumerateObject().Select(property => property.Name));
+                Assert.Equal("A", questionAnswer.GetProperty("answers")[0].GetString());
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task FakeJsonlResolvedUserInputFailsClosedWithoutSendingAnAnswer()
+    {
+        var root = Directory.CreateTempSubdirectory("jarvis-fake-codex-user-input-resolved-");
+        var script = Path.Combine(root.FullName, "fake-codex.sh");
+        var requestsPath = Path.Combine(root.FullName, "requests.jsonl");
+        var scriptContents = """
+            #!/bin/sh
+            profile_id=""
+            for argument in "$@"; do
+              case "$argument" in
+                default_permissions=*) profile_id=$(echo "$argument" | sed 's/^default_permissions="//; s/"$//');;
+              esac
+            done
+            while IFS= read -r line; do
+              echo "$line" >> '__REQUESTS_PATH__'
+              if echo "$line" | grep -q '"method":"initialize"'; then echo '{"id":1,"result":{}}'; fi
+              if echo "$line" | grep -q '"method":"thread/start"'; then printf '{"id":2,"result":{"thread":{"id":"thread-resolved"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id"; fi
+              if echo "$line" | grep -q '"method":"turn/start"'; then echo '{"id":3,"result":{"turn":{"id":"turn-resolved"}}}'; echo '{"id":99,"method":"item/tool/requestUserInput","params":{"itemId":"item-resolved","questions":[{"header":"Choice","id":"q1","question":"Choose one"}],"threadId":"thread-resolved","turnId":"turn-resolved"}}'; echo '{"method":"serverRequest/resolved","params":{"threadId":"thread-resolved","requestId":99}}'; fi
+            done
+            """.Replace("__REQUESTS_PATH__", requestsPath, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(script, scriptContents);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        try
+        {
+            var taskRoot = Directory.CreateDirectory(Path.Combine(root.FullName, "task-root")).FullName;
+            var taskId = Guid.NewGuid();
+            var executionId = Guid.NewGuid();
+            var deviceId = Guid.NewGuid();
+            var task = new TaskResponse(
+                taskId,
+                Guid.NewGuid(),
+                null,
+                "fail closed after Codex resolves input",
+                null,
+                ["localFiles"],
+                [],
+                deviceId,
+                deviceId,
+                WorkerKindValue.Codex,
+                TaskStatusValue.Running,
+                0,
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1,
+                1,
+                1,
+                null);
+            var execution = new TaskExecutionResponse(
+                executionId,
+                taskId,
+                deviceId,
+                WorkerKindValue.Codex,
+                null,
+                null,
+                null,
+                TaskExecutionStatusValue.Running,
+                "{}",
+                null,
+                [],
+                1,
+                null,
+                1);
+            var claim = new DeviceTaskClaimResponse(
+                true,
+                task,
+                execution,
+                "resolved-owner",
+                30_000,
+                new CapabilityEnvelopeContract(ReadFiles: true, AllowedRoots: [taskRoot]));
+            var controlPlane = new RecordingControlPlane
+            {
+                UserInputAnswerAfterPolls = 1,
+                UserInputAnswers = new Dictionary<string, TaskUserInputAnswer>
+                {
+                    ["q1"] = new(["A"])
+                }
+            };
+            var options = Options.Create(new DeviceNodeOptions
+            {
+                CodexBinaryPath = script,
+                CodexArguments = [],
+                CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
+                HeartbeatIntervalMs = 30_000,
+                PollingIntervalMs = 25,
+                MaxRestartAttempts = 0,
+                Capabilities = new CapabilityEnvelopeOptions
+                {
+                    ReadFiles = true,
+                    AllowedRoots = [root.FullName]
+                }
+            });
+            var worker = new DeviceNodeWorker(
+                options,
+                controlPlane,
+                NullLogger<DeviceNodeWorker>.Instance,
+                timeProvider: TimeProvider.System,
+                userInputWaiter: new PollingUserInputWaiter(controlPlane, options, TimeProvider.System));
+
+            await worker.ExecuteClaimAsync(
+                claim,
+                Jarvis.Application.Devices.CapabilityPolicy.Create(options.Value.Capabilities.ToEnvelope()),
+                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+
+            Assert.Equal(TaskUserInputStatusValue.Cleared, controlPlane.UserInputResponse?.Status);
+            var responseLines = (await File.ReadAllLinesAsync(requestsPath))
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Where(item => item.TryGetProperty("result", out _))
+                .ToArray();
+            Assert.DoesNotContain(responseLines, item =>
+                item.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.Number
+                && id.GetInt32() == 99);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task FakeJsonlCancellationWinsTheInputRaceWithoutSendingAnAnswer()
+    {
+        var root = Directory.CreateTempSubdirectory("jarvis-fake-codex-user-input-cancel-");
+        var script = Path.Combine(root.FullName, "fake-codex.sh");
+        var requestsPath = Path.Combine(root.FullName, "requests.jsonl");
+        var scriptContents = """
+            #!/bin/sh
+            profile_id=""
+            for argument in "$@"; do
+              case "$argument" in
+                default_permissions=*) profile_id=$(echo "$argument" | sed 's/^default_permissions="//; s/"$//');;
+              esac
+            done
+            while IFS= read -r line; do
+              echo "$line" >> '__REQUESTS_PATH__'
+              if echo "$line" | grep -q '"method":"initialize"'; then echo '{"id":1,"result":{}}'; fi
+              if echo "$line" | grep -q '"method":"thread/start"'; then printf '{"id":2,"result":{"thread":{"id":"thread-cancel"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id"; fi
+              if echo "$line" | grep -q '"method":"turn/start"'; then echo '{"id":3,"result":{"turn":{"id":"turn-cancel"}}}'; echo '{"id":99,"method":"item/tool/requestUserInput","params":{"itemId":"item-cancel","questions":[{"header":"Choice","id":"q1","question":"Choose one"}],"threadId":"thread-cancel","turnId":"turn-cancel"}}'; fi
+              if echo "$line" | grep -q '"method":"turn/interrupt"'; then echo '{"id":4,"result":{}}'; fi
+            done
+            """.Replace("__REQUESTS_PATH__", requestsPath, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(script, scriptContents);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        try
+        {
+            var taskRoot = Directory.CreateDirectory(Path.Combine(root.FullName, "task-root")).FullName;
+            var taskId = Guid.NewGuid();
+            var executionId = Guid.NewGuid();
+            var deviceId = Guid.NewGuid();
+            var task = new TaskResponse(
+                taskId,
+                Guid.NewGuid(),
+                null,
+                "cancel after Codex asks for input",
+                null,
+                ["localFiles"],
+                [],
+                deviceId,
+                deviceId,
+                WorkerKindValue.Codex,
+                TaskStatusValue.Running,
+                0,
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1,
+                1,
+                1,
+                null);
+            var execution = new TaskExecutionResponse(
+                executionId,
+                taskId,
+                deviceId,
+                WorkerKindValue.Codex,
+                null,
+                null,
+                null,
+                TaskExecutionStatusValue.Running,
+                "{}",
+                null,
+                [],
+                1,
+                null,
+                1);
+            var claim = new DeviceTaskClaimResponse(
+                true,
+                task,
+                execution,
+                "cancel-owner",
+                30_000,
+                new CapabilityEnvelopeContract(ReadFiles: true, AllowedRoots: [taskRoot]));
+            var controlPlane = new RecordingControlPlane
+            {
+                CancelUserInputAfterPolls = 1
+            };
+            var options = Options.Create(new DeviceNodeOptions
+            {
+                CodexBinaryPath = script,
+                CodexArguments = [],
+                CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
+                HeartbeatIntervalMs = 30_000,
+                PollingIntervalMs = 25,
+                MaxRestartAttempts = 0,
+                Capabilities = new CapabilityEnvelopeOptions
+                {
+                    ReadFiles = true,
+                    AllowedRoots = [root.FullName]
+                }
+            });
+            var worker = new DeviceNodeWorker(
+                options,
+                controlPlane,
+                NullLogger<DeviceNodeWorker>.Instance,
+                timeProvider: TimeProvider.System,
+                userInputWaiter: new PollingUserInputWaiter(controlPlane, options, TimeProvider.System));
+
+            await worker.ExecuteClaimAsync(
+                claim,
+                Jarvis.Application.Devices.CapabilityPolicy.Create(options.Value.Capabilities.ToEnvelope()),
+                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+
+            Assert.True(controlPlane.CancellationRequested);
+            Assert.Contains(controlPlane.Events, item => item.EventType == "task.cancelled");
+            var responseLines = (await File.ReadAllLinesAsync(requestsPath))
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Where(item => item.TryGetProperty("result", out _))
+                .ToArray();
+            Assert.DoesNotContain(responseLines, item =>
+                item.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.Number
+                && id.GetInt32() == 99);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task FakeJsonlLeaseLossWinsTheInputRaceWithoutSendingAnAnswer()
+    {
+        var root = Directory.CreateTempSubdirectory("jarvis-fake-codex-user-input-lease-loss-");
+        var script = Path.Combine(root.FullName, "fake-codex.sh");
+        var requestsPath = Path.Combine(root.FullName, "requests.jsonl");
+        var scriptContents = """
+            #!/bin/sh
+            profile_id=""
+            for argument in "$@"; do
+              case "$argument" in
+                default_permissions=*) profile_id=$(echo "$argument" | sed 's/^default_permissions="//; s/"$//');;
+              esac
+            done
+            while IFS= read -r line; do
+              echo "$line" >> '__REQUESTS_PATH__'
+              if echo "$line" | grep -q '"method":"initialize"'; then echo '{"id":1,"result":{}}'; fi
+              if echo "$line" | grep -q '"method":"thread/start"'; then printf '{"id":2,"result":{"thread":{"id":"thread-lease-loss"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id"; fi
+              if echo "$line" | grep -q '"method":"turn/start"'; then echo '{"id":3,"result":{"turn":{"id":"turn-lease-loss"}}}'; echo '{"id":99,"method":"item/tool/requestUserInput","params":{"itemId":"item-lease-loss","questions":[{"header":"Choice","id":"q1","question":"Choose one"}],"threadId":"thread-lease-loss","turnId":"turn-lease-loss"}}'; fi
+            done
+            """.Replace("__REQUESTS_PATH__", requestsPath, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(script, scriptContents);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        try
+        {
+            var taskRoot = Directory.CreateDirectory(Path.Combine(root.FullName, "task-root")).FullName;
+            var taskId = Guid.NewGuid();
+            var executionId = Guid.NewGuid();
+            var deviceId = Guid.NewGuid();
+            var task = new TaskResponse(
+                taskId,
+                Guid.NewGuid(),
+                null,
+                "fail closed after a lease loss",
+                null,
+                ["localFiles"],
+                [],
+                deviceId,
+                deviceId,
+                WorkerKindValue.Codex,
+                TaskStatusValue.Running,
+                0,
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1,
+                1,
+                1,
+                null);
+            var execution = new TaskExecutionResponse(
+                executionId,
+                taskId,
+                deviceId,
+                WorkerKindValue.Codex,
+                null,
+                null,
+                null,
+                TaskExecutionStatusValue.Running,
+                "{}",
+                null,
+                [],
+                1,
+                null,
+                1);
+            var claim = new DeviceTaskClaimResponse(
+                true,
+                task,
+                execution,
+                "lease-loss-owner",
+                30_000,
+                new CapabilityEnvelopeContract(ReadFiles: true, AllowedRoots: [taskRoot]));
+            var controlPlane = new RecordingControlPlane
+            {
+                FailLeaseRenewal = true
+            };
+            var options = Options.Create(new DeviceNodeOptions
+            {
+                CodexBinaryPath = script,
+                CodexArguments = [],
+                CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
+                HeartbeatIntervalMs = 750,
+                PollingIntervalMs = 25,
+                MaxRestartAttempts = 0,
+                Capabilities = new CapabilityEnvelopeOptions
+                {
+                    ReadFiles = true,
+                    AllowedRoots = [root.FullName]
+                }
+            });
+            var worker = new DeviceNodeWorker(
+                options,
+                controlPlane,
+                NullLogger<DeviceNodeWorker>.Instance,
+                timeProvider: TimeProvider.System,
+                userInputWaiter: new PollingUserInputWaiter(controlPlane, options, TimeProvider.System));
+
+            await worker.ExecuteClaimAsync(
+                claim,
+                Jarvis.Application.Devices.CapabilityPolicy.Create(options.Value.Capabilities.ToEnvelope()),
+                new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
+
+            Assert.Contains(controlPlane.Events, item => item.EventType == "task.failed");
+            var responseLines = (await File.ReadAllLinesAsync(requestsPath))
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone())
+                .Where(item => item.TryGetProperty("result", out _))
+                .ToArray();
+            Assert.DoesNotContain(responseLines, item =>
+                item.TryGetProperty("id", out var id)
+                && id.ValueKind == JsonValueKind.Number
+                && id.GetInt32() == 99);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async System.Threading.Tasks.Task ExecuteClaimFailsClosedWhenTaskCapabilityEnvelopeIsMissing()
     {
         var root = Directory.CreateTempSubdirectory("jarvis-missing-capability-envelope-");
@@ -1382,6 +1974,13 @@ done
         public int ApprovalPollCount { get; private set; }
         public ConcurrentQueue<DeviceTaskEventRequest> Events { get; } = new();
         public DeviceApprovalRequest? CreatedApproval { get; private set; }
+        public int UserInputAnswerAfterPolls { get; set; }
+        public int UserInputPollCount { get; private set; }
+        public int CancelUserInputAfterPolls { get; set; }
+        public bool FailLeaseRenewal { get; set; }
+        public bool CancellationRequested { get; private set; }
+        public IReadOnlyDictionary<string, TaskUserInputAnswer>? UserInputAnswers { get; set; }
+        public DeviceTaskUserInputResponse? UserInputResponse { get; private set; }
 
         public System.Threading.Tasks.Task<DeviceHeartbeatResponse> HeartbeatAsync(DeviceHeartbeatRequest request, string idempotencyKey, CancellationToken cancellationToken) =>
             System.Threading.Tasks.Task.FromResult(new DeviceHeartbeatResponse(Guid.NewGuid(), DeviceStatusValue.Online, 0, request.Capabilities ?? [], 1));
@@ -1392,8 +1991,50 @@ done
         public System.Threading.Tasks.Task<DeviceActiveTaskListResponse> ListActiveAsync(CancellationToken cancellationToken) =>
             System.Threading.Tasks.Task.FromResult(new DeviceActiveTaskListResponse([]));
 
-        public System.Threading.Tasks.Task<TaskResponse> GetTaskAsync(Guid taskId, CancellationToken cancellationToken) =>
-            System.Threading.Tasks.Task.FromResult(new TaskResponse(taskId, Guid.NewGuid(), null, "goal", null, [], [], null, null, WorkerKindValue.Codex, TaskStatusValue.Running, 0, 1, null, null, null, null, null, 1, 0, 0, null));
+        public System.Threading.Tasks.Task<TaskResponse> GetTaskAsync(Guid taskId, CancellationToken cancellationToken)
+        {
+            var pending = UserInputResponse is null
+                ? null
+                : new TaskUserInputResponse(
+                    UserInputResponse.RequestId,
+                    UserInputResponse.ItemId,
+                    UserInputResponse.ThreadId,
+                    UserInputResponse.TurnId,
+                    UserInputResponse.Questions,
+                    TaskUserInputStatusValue.Pending,
+                    UserInputResponse.ExpiresAtMs,
+                    UserInputResponse.RequestIdIsString);
+            return System.Threading.Tasks.Task.FromResult(new TaskResponse(
+                taskId,
+                Guid.NewGuid(),
+                null,
+                "goal",
+                null,
+                [],
+                [],
+                null,
+                null,
+                WorkerKindValue.Codex,
+                pending is null ? TaskStatusValue.Running : TaskStatusValue.WaitingForUserInput,
+                0,
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                1,
+                0,
+                0,
+                null,
+                null,
+                null,
+                null,
+                pending) with
+            {
+                Status = CancellationRequested ? TaskStatusValue.CancellationRequested : (pending is null ? TaskStatusValue.Running : TaskStatusValue.WaitingForUserInput)
+            });
+        }
 
         public System.Threading.Tasks.Task<DeviceApprovalStatusResponse> GetApprovalAsync(Guid taskId, Guid approvalId, CancellationToken cancellationToken)
         {
@@ -1403,7 +2044,7 @@ done
         }
 
         public System.Threading.Tasks.Task<DeviceTaskLeaseRenewResponse> RenewLeaseAsync(Guid taskId, DeviceTaskLeaseRenewRequest request, string idempotencyKey, CancellationToken cancellationToken) =>
-            System.Threading.Tasks.Task.FromResult(new DeviceTaskLeaseRenewResponse(taskId, true, 1, TaskStatusValue.Running));
+            System.Threading.Tasks.Task.FromResult(new DeviceTaskLeaseRenewResponse(taskId, !FailLeaseRenewal, 1, TaskStatusValue.Running));
 
         public System.Threading.Tasks.Task<DeviceTaskEventResponse> AppendEventAsync(Guid taskId, DeviceTaskEventRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken)
         {
@@ -1415,6 +2056,73 @@ done
         {
             CreatedApproval = request;
             return System.Threading.Tasks.Task.FromResult(new DeviceApprovalResponse(Guid.NewGuid(), ApprovalStatusValue.Pending));
+        }
+
+        public System.Threading.Tasks.Task<DeviceTaskUserInputResponse> CreateUserInputAsync(Guid taskId, DeviceTaskUserInputRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken)
+        {
+            if (UserInputResponse is null
+                || !string.Equals(UserInputResponse.RequestId, request.RequestId, StringComparison.Ordinal)
+                || UserInputResponse.RequestIdIsString != request.RequestIdIsString)
+            {
+                UserInputResponse = new DeviceTaskUserInputResponse(
+                    taskId,
+                    request.ExecutionId,
+                    request.RequestId,
+                    request.ItemId,
+                    request.ThreadId,
+                    request.TurnId,
+                    request.Questions,
+                    TaskUserInputStatusValue.Pending,
+                    null,
+                    request.AutoResolutionMs,
+                    request.RequestIdIsString);
+            }
+
+            return System.Threading.Tasks.Task.FromResult(UserInputResponse);
+        }
+
+        public System.Threading.Tasks.Task<DeviceTaskUserInputResponse> GetUserInputAsync(Guid taskId, Guid executionId, string requestId, bool requestIdIsString, string leaseOwner, CancellationToken cancellationToken)
+        {
+            UserInputPollCount++;
+            if (CancelUserInputAfterPolls > 0 && UserInputPollCount >= CancelUserInputAfterPolls)
+            {
+                CancellationRequested = true;
+            }
+
+            if (UserInputResponse is not null
+                && UserInputResponse.Status == TaskUserInputStatusValue.Pending
+                && UserInputAnswerAfterPolls > 0
+                && UserInputPollCount >= UserInputAnswerAfterPolls)
+            {
+                UserInputResponse = UserInputResponse with
+                {
+                    Status = TaskUserInputStatusValue.Answered,
+                    Answers = UserInputAnswers
+                };
+            }
+
+            if (CancellationRequested && UserInputResponse is not null)
+            {
+                return System.Threading.Tasks.Task.FromResult(UserInputResponse with { Status = TaskUserInputStatusValue.Cleared, Answers = null });
+            }
+
+            return System.Threading.Tasks.Task.FromResult(UserInputResponse ?? new DeviceTaskUserInputResponse(
+                taskId,
+                executionId,
+                requestId,
+                "item",
+                "thread",
+                "turn",
+                [],
+                TaskUserInputStatusValue.Pending));
+        }
+
+        public System.Threading.Tasks.Task<DeviceTaskUserInputResponse> ResolveUserInputAsync(Guid taskId, Guid executionId, string requestId, bool requestIdIsString, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken)
+        {
+            UserInputResponse = UserInputResponse is null
+                ? new DeviceTaskUserInputResponse(taskId, executionId, requestId, "item", "thread", "turn", [], TaskUserInputStatusValue.Cleared, null, null, requestIdIsString)
+                : UserInputResponse with { Status = TaskUserInputStatusValue.Cleared, Answers = null };
+            return System.Threading.Tasks.Task.FromResult(UserInputResponse);
         }
     }
 

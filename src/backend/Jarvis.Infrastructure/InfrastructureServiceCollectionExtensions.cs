@@ -96,7 +96,9 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddScoped<ApprovalService>();
         services.AddScoped<EfTaskStore>();
         services.AddScoped<ITaskStore>(serviceProvider => serviceProvider.GetRequiredService<EfTaskStore>());
+        services.AddScoped<ITaskUserInputStore, EfTaskUserInputStore>();
         services.AddScoped<TaskService>();
+        services.AddScoped<TaskUserInputService>();
         services.AddScoped<INotificationStore, EfNotificationStore>();
         services.AddScoped<NotificationService>();
         services.AddScoped<FakeDelayWorker>();

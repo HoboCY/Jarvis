@@ -2,9 +2,35 @@ export type DesktopTask = {
   id: string;
   status: string;
   goal?: string;
+  executionId?: string;
   progressSummary?: string | null;
   resultSummary?: string | null;
+  entityVersion?: number;
+  pendingUserInput?: DesktopPendingUserInput;
   [key: string]: unknown;
+};
+
+export type DesktopPendingUserInputOption = {
+  label: string;
+  description: string;
+};
+
+export type DesktopPendingUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  options: readonly DesktopPendingUserInputOption[] | null;
+};
+
+export type DesktopPendingUserInput = {
+  requestId: string;
+  requestIdIsString: boolean;
+  itemId: string;
+  threadId: string;
+  turnId: string;
+  questions: readonly DesktopPendingUserInputQuestion[];
+  expiresAtMs: number | null;
 };
 
 export type DesktopNotification = {
@@ -21,6 +47,143 @@ export type DesktopTaskPage = {
 };
 
 export type DesktopTaskPageResult = DesktopTaskPage | readonly DesktopTask[];
+
+export function pendingUserInputFrom(value: unknown): DesktopPendingUserInput | undefined {
+  const item = record(value);
+  if (!item
+    || typeof item.requestId !== "string"
+    || item.requestId.trim().length === 0
+    || item.requestId.length > 200
+    || item.requestIdIsString !== undefined && typeof item.requestIdIsString !== "boolean"
+    || typeof item.itemId !== "string"
+    || item.itemId.trim().length === 0
+    || item.itemId.length > 500
+    || typeof item.threadId !== "string"
+    || item.threadId.trim().length === 0
+    || item.threadId.length > 500
+    || typeof item.turnId !== "string"
+    || item.turnId.trim().length === 0
+    || item.turnId.length > 500
+    || item.status !== undefined && item.status !== "pending"
+    || !Array.isArray(item.questions)
+    || item.questions.length < 1
+    || item.questions.length > 3) {
+    return undefined;
+  }
+
+  const questions: DesktopPendingUserInputQuestion[] = [];
+  const questionIds = new Set<string>();
+  for (const questionValue of item.questions) {
+    const question = record(questionValue);
+    if (!question
+      || typeof question.id !== "string"
+      || question.id.trim().length === 0
+      || question.id.length > 200
+      || questionIds.has(question.id.trim())
+      || typeof question.header !== "string"
+      || question.header.trim().length === 0
+      || question.header.length > 200
+      || typeof question.question !== "string"
+      || question.question.trim().length === 0
+      || question.question.length > 4_000
+      || question.isSecret === true
+      || question.isSecret !== undefined && typeof question.isSecret !== "boolean"
+      || question.isOther !== undefined && typeof question.isOther !== "boolean") {
+      return undefined;
+    }
+
+    let options: DesktopPendingUserInputOption[] | null = null;
+    if (question.options !== null && question.options !== undefined) {
+      if (!Array.isArray(question.options) || question.options.length > 20) {
+        return undefined;
+      }
+      const labels = new Set<string>();
+      options = [];
+      for (const optionValue of question.options) {
+        const option = record(optionValue);
+        if (!option
+          || typeof option.label !== "string"
+          || option.label.trim().length === 0
+          || option.label.length > 200
+          || typeof option.description !== "string"
+          || option.description.trim().length === 0
+          || option.description.length > 2_000
+          || labels.has(option.label.trim())) {
+          return undefined;
+        }
+        labels.add(option.label.trim());
+        options.push({ label: option.label.trim(), description: option.description.trim() });
+      }
+    }
+
+    const id = question.id.trim();
+    questionIds.add(id);
+    questions.push({
+      id,
+      header: question.header.trim(),
+      question: question.question.trim(),
+      isOther: question.isOther === true,
+      options
+    });
+  }
+
+  return {
+    requestId: item.requestId.trim(),
+    requestIdIsString: item.requestIdIsString !== false,
+    itemId: item.itemId.trim(),
+    threadId: item.threadId.trim(),
+    turnId: item.turnId.trim(),
+    questions,
+    expiresAtMs: typeof item.expiresAtMs === "number" && Number.isFinite(item.expiresAtMs)
+      ? item.expiresAtMs
+      : null
+  };
+}
+
+export function desktopTaskFrom(value: unknown): DesktopTask | undefined {
+  const item = record(value);
+  if (!item
+    || typeof item.id !== "string"
+    || item.id.trim().length === 0
+    || item.id.length > 200
+    || typeof item.status !== "string"
+    || item.status.trim().length === 0
+    || item.status.length > 64) {
+    return undefined;
+  }
+
+  const pendingUserInput = item.status !== "waitingForUserInput"
+    || item.pendingUserInput === null
+    || item.pendingUserInput === undefined
+    ? undefined
+    : pendingUserInputFrom(item.pendingUserInput);
+  const entityVersion = readEntityVersion(item);
+  const execution = record(item.execution);
+  const executionId = typeof execution?.id === "string" && execution.id.trim().length > 0 && execution.id.length <= 200
+    ? execution.id.trim()
+    : undefined;
+  const task: DesktopTask = {
+    id: item.id.trim(),
+    status: item.status.trim(),
+    ...(executionId === undefined ? {} : { executionId }),
+    goal: typeof item.goal === "string" && item.goal.length <= 100_000 ? item.goal : undefined,
+    progressSummary: item.progressSummary === null
+      ? null
+      : typeof item.progressSummary === "string" && item.progressSummary.length <= 2_000
+        ? item.progressSummary
+        : undefined,
+    resultSummary: item.resultSummary === null
+      ? null
+      : typeof item.resultSummary === "string" && item.resultSummary.length <= 100_000
+        ? item.resultSummary
+        : undefined,
+    ...(entityVersion === undefined ? {} : { entityVersion })
+  };
+  if (pendingUserInput) {
+    task.pendingUserInput = pendingUserInput;
+  }
+  return task;
+}
 
 export const nonTerminalTaskStatuses = [
   "queued",
@@ -356,12 +519,24 @@ export class DesktopTaskNotificationFeed {
       if (!accepted) {
         return;
       }
-      this.taskById.set(id, {
-        ...(previous ?? { id }),
-        ...payload,
+      const status = stringValue(payload.status) ?? previous?.status ?? "queued";
+      const nextTask = desktopTaskFrom({
         id,
-        status: stringValue(payload.status) ?? previous?.status ?? "queued"
+        status,
+        execution: payload.executionId === undefined && previous?.executionId === undefined
+          ? undefined
+          : { id: payload.executionId ?? previous?.executionId },
+        goal: payload.goal ?? previous?.goal,
+        progressSummary: payload.progressSummary ?? previous?.progressSummary,
+        resultSummary: payload.resultSummary ?? previous?.resultSummary,
+        entityVersion: readEntityVersion(payload) ?? previous?.entityVersion,
+        pendingUserInput: Object.hasOwn(payload, "pendingUserInput")
+          ? payload.pendingUserInput
+          : previous?.pendingUserInput
       });
+      if (nextTask) {
+        this.taskById.set(id, nextTask);
+      }
       return;
     }
 
@@ -653,7 +828,10 @@ export function ensureActiveDesktopTaskNotificationFeed(
 
 function normalizeTaskPage(value: DesktopTaskPageResult): DesktopTaskPage {
   if (Array.isArray(value)) {
-    return { items: value, nextCursor: null };
+    return {
+      items: value.map(desktopTaskFrom).filter((task): task is DesktopTask => task !== undefined),
+      nextCursor: null
+    };
   }
 
   const item = record(value);
@@ -663,14 +841,20 @@ function normalizeTaskPage(value: DesktopTaskPageResult): DesktopTaskPage {
 
   const nextCursor = item.nextCursor;
   if (nextCursor === undefined || nextCursor === null) {
-    return { items: item.items as DesktopTask[], nextCursor: null };
+    return {
+      items: item.items.map(desktopTaskFrom).filter((task): task is DesktopTask => task !== undefined),
+      nextCursor: null
+    };
   }
 
   if (typeof nextCursor !== "string" || nextCursor.length === 0 || nextCursor.length > 200) {
     throw new Error("Backend returned an invalid task cursor.");
   }
 
-  return { items: item.items as DesktopTask[], nextCursor };
+  return {
+    items: item.items.map(desktopTaskFrom).filter((task): task is DesktopTask => task !== undefined),
+    nextCursor
+  };
 }
 
 function readEntityVersion(payload: Record<string, unknown>): number | undefined {

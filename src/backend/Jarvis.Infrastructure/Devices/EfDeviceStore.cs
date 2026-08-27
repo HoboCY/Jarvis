@@ -275,24 +275,47 @@ public sealed class EfDeviceStore(
             return new(DeviceOperationStatus.Conflict, Detail: "The task already has an active execution.");
         }
 
+        var pendingUserInput = activeExecution is null
+            ? null
+            : await db.TaskUserInputRequests.AsNoTracking()
+                .Where(request => request.TaskId == task.Id
+                    && request.ExecutionId == activeExecution.Id
+                    && request.Status == TaskUserInputRequestStatus.Pending
+                    && (request.ExpiresAtMs == null || request.ExpiresAtMs > nowMs))
+                .OrderByDescending(request => request.CreatedAtMs)
+                .FirstOrDefaultAsync(cancellationToken);
+
         task.Assign(leaseOwner, checked(nowMs + LeaseDurationMs), nowMs, deviceId);
-        task.Start(nowMs);
         var execution = activeExecution;
         if (execution is null)
         {
+            task.Start(nowMs);
             execution = TaskExecution.Create(Guid.CreateVersion7(), task.Id, deviceId, task.WorkerKind, nowMs);
             execution.Start(nowMs);
             db.TaskExecutions.Add(execution);
         }
+        else if (pendingUserInput is not null)
+        {
+            task.ResumeWaitingForUserInputFromRecovery(nowMs);
+            execution.ResumeWaitingForUserInputFromRecovery(nowMs);
+        }
         else
         {
+            task.Start(nowMs);
             execution.ResumeFromRecovery(nowMs);
         }
         execution.SetMetadata(JsonSerializer.Serialize(effectiveEnvelope, JsonOptions));
-        AddTaskEvent(task, "task.claimed", nowMs, deviceId, execution.Id, null);
+        AddTaskEvent(
+            task,
+            "task.claimed",
+            nowMs,
+            deviceId,
+            execution.Id,
+            null,
+            pendingUserInput is null ? null : ToTaskUserInputResponse(pendingUserInput));
         var response = new DeviceTaskClaimResponse(
             true,
-            ToTaskResponse(task, execution),
+            ToTaskResponse(task, execution, pendingUserInput),
             ToExecutionResponse(execution),
             leaseOwner,
             task.LeaseExpiresAtMs,
@@ -324,6 +347,7 @@ public sealed class EfDeviceStore(
                 && (task.Status == DomainTaskStatus.Assigned
                     || task.Status == DomainTaskStatus.Running
                     || task.Status == DomainTaskStatus.WaitingForApproval
+                    || task.Status == DomainTaskStatus.WaitingForUserInput
                     || task.Status == DomainTaskStatus.CancellationRequested))
             .OrderBy(task => task.CreatedAtMs)
             .ToListAsync(cancellationToken);
@@ -341,12 +365,19 @@ public sealed class EfDeviceStore(
                 && execution.Status != TaskExecutionStatus.Cancelled)
             .OrderByDescending(execution => execution.StartedAtMs)
             .ToListAsync(cancellationToken);
+        var pendingUserInputs = await db.TaskUserInputRequests.AsNoTracking()
+            .Where(item => taskIds.Contains(item.TaskId)
+                && item.Status == TaskUserInputRequestStatus.Pending
+                && (item.ExpiresAtMs == null || item.ExpiresAtMs > nowMs))
+            .OrderByDescending(item => item.CreatedAtMs)
+            .ToListAsync(cancellationToken);
         var items = tasks
             .Select(task => (task, execution: executions.FirstOrDefault(execution => execution.TaskId == task.Id)))
             .Where(item => item.execution is not null && !string.IsNullOrWhiteSpace(item.task.LeaseOwner))
             .Select(item => new DeviceTaskClaimResponse(
                 true,
-                ToTaskResponse(item.task, item.execution),
+                ToTaskResponse(item.task, item.execution, pendingUserInputs.FirstOrDefault(input =>
+                    input.TaskId == item.task.Id && input.ExecutionId == item.execution!.Id)),
                 ToExecutionResponse(item.execution!),
                 item.task.LeaseOwner,
                 item.task.LeaseExpiresAtMs,
@@ -382,7 +413,9 @@ public sealed class EfDeviceStore(
         }
 
         var nowMs = Now();
-        var renewed = task.RenewLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs);
+        var renewed = task.Status == DomainTaskStatus.CancellationRequested
+            ? task.RenewCancellationLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs)
+            : task.RenewLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs);
         if (!renewed)
         {
             return new(DeviceOperationStatus.Conflict, new DeviceTaskLeaseRenewResponse(task.Id, false, task.LeaseExpiresAtMs, ToContractStatus(task.Status)), "The lease is not owned or has expired.");
@@ -407,7 +440,16 @@ public sealed class EfDeviceStore(
             .Where(item => item.TaskId == taskId && item.DeviceId == deviceId)
             .OrderByDescending(item => item.StartedAtMs)
             .FirstOrDefaultAsync(cancellationToken);
-        return new(DeviceOperationStatus.Succeeded, ToTaskResponse(task, execution));
+        var nowMs = Now();
+        var pendingUserInput = await db.TaskUserInputRequests.AsNoTracking()
+            .Where(item => item.TaskId == taskId
+                && task.Status == DomainTaskStatus.WaitingForUserInput
+                && (execution == null || item.ExecutionId == execution.Id)
+                && item.Status == TaskUserInputRequestStatus.Pending
+                && (item.ExpiresAtMs == null || item.ExpiresAtMs > nowMs))
+            .OrderByDescending(item => item.CreatedAtMs)
+            .FirstOrDefaultAsync(cancellationToken);
+        return new(DeviceOperationStatus.Succeeded, ToTaskResponse(task, execution, pendingUserInput));
     }
 
     public async Task<DeviceOperation<DeviceTaskEventResponse>> AppendEventAsync(
@@ -583,7 +625,8 @@ public sealed class EfDeviceStore(
             status = JsonNamingPolicy.CamelCase.ConvertName(task.Status.ToString()),
             eventType = request.EventType,
             occurredAt = nowMs,
-            entityVersion = task.Version
+            entityVersion = task.Version,
+            pendingUserInput = (object?)null
         }, nowMs);
         response = new DeviceTaskEventResponse(taskId, execution.Id, true, false, ToContractStatus(task.Status), ToContractStatus(execution.Status));
         AddIdempotency(device.UserId, scope, idempotencyKey, requestHash, 200, response, nowMs);
@@ -1043,10 +1086,17 @@ public sealed class EfDeviceStore(
 
     private static string HashCredential(string credential) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(credential)));
 
-    private void AddTaskEvent(DomainTask task, string eventType, long nowMs, Guid? deviceId, Guid? executionId, string? clientEventId)
+    private void AddTaskEvent(
+        DomainTask task,
+        string eventType,
+        long nowMs,
+        Guid? deviceId,
+        Guid? executionId,
+        string? clientEventId,
+        TaskUserInputResponse? pendingUserInput = null)
     {
         var sequence = (db.TaskEvents.Where(item => item.TaskId == task.Id).Select(item => (long?)item.Sequence).Max() ?? 0L) + 1L;
-        var payload = JsonSerializer.Serialize(new
+        var payload = new
         {
             userId = task.UserId,
             deviceId,
@@ -1054,10 +1104,25 @@ public sealed class EfDeviceStore(
             executionId,
             eventType,
             status = JsonNamingPolicy.CamelCase.ConvertName(task.Status.ToString()),
+            pendingUserInput,
             occurredAt = nowMs,
             entityVersion = task.Version
-        }, JsonOptions);
-        db.TaskEvents.Add(DomainTaskEvent.Create(Guid.CreateVersion7(), task.Id, sequence, eventType, payload, nowMs, deviceId, executionId, clientEventId));
+        };
+        db.TaskEvents.Add(DomainTaskEvent.Create(
+            Guid.CreateVersion7(),
+            task.Id,
+            sequence,
+            eventType,
+            JsonSerializer.Serialize(payload, JsonOptions),
+            nowMs,
+            deviceId,
+            executionId,
+            clientEventId));
+        if (pendingUserInput is not null)
+        {
+            AddOutbox("task.updated", payload, nowMs);
+            AddOutbox("task.eventAdded", payload, nowMs);
+        }
     }
 
     private void AddTerminalNotification(DomainTask task, string type, NotificationSeverity severity, string title, string body, long nowMs, Guid? approvalId = null)
@@ -1094,7 +1159,10 @@ public sealed class EfDeviceStore(
         JarvisTelemetry.RecordOutboxEnqueued(eventType);
     }
 
-    private static TaskResponse ToTaskResponse(DomainTask task, TaskExecution? execution = null) => new(
+    private static TaskResponse ToTaskResponse(
+        DomainTask task,
+        TaskExecution? execution = null,
+        TaskUserInputRequest? pendingUserInput = null) => new(
         task.Id,
         task.ConversationId,
         task.CreatedByMessageId,
@@ -1119,7 +1187,8 @@ public sealed class EfDeviceStore(
         task.CompletedAtMs,
         execution is null ? null : ToExecutionResponse(execution),
         execution is null ? Array.Empty<ArtifactManifestEntry>() : DeserializeArtifacts(execution.ArtifactManifestJson),
-        DeserializeCapabilityEnvelope(task.CapabilityEnvelopeJson));
+        DeserializeCapabilityEnvelope(task.CapabilityEnvelopeJson),
+        pendingUserInput is null ? null : ToTaskUserInputResponse(pendingUserInput));
 
     private static TaskExecutionResponse ToExecutionResponse(TaskExecution execution) => new(
         execution.Id,
@@ -1153,6 +1222,29 @@ public sealed class EfDeviceStore(
         approval.DecidedAtMs,
         approval.ExpiresAtMs,
         approval.Version);
+
+    private static TaskUserInputResponse ToTaskUserInputResponse(TaskUserInputRequest request)
+    {
+        TaskUserInputQuestion[] questions;
+        try
+        {
+            questions = JsonSerializer.Deserialize<TaskUserInputQuestion[]>(request.QuestionsJson, JsonOptions) ?? [];
+        }
+        catch (JsonException)
+        {
+            questions = [];
+        }
+
+        return new(
+            request.RequestId,
+            request.ItemId,
+            request.ThreadId,
+            request.TurnId,
+            questions,
+            TaskUserInputStatusValue.Pending,
+            request.ExpiresAtMs,
+            request.RequestIdIsString);
+    }
 
     private static string[] DeserializeList(string json)
     {

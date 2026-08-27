@@ -287,6 +287,9 @@ public interface IDeviceNodeControlPlane
     Task<DeviceTaskLeaseRenewResponse> RenewLeaseAsync(Guid taskId, DeviceTaskLeaseRenewRequest request, string idempotencyKey, CancellationToken cancellationToken);
     Task<DeviceTaskEventResponse> AppendEventAsync(Guid taskId, DeviceTaskEventRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken);
     Task<DeviceApprovalResponse> CreateApprovalAsync(Guid taskId, DeviceApprovalRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken);
+    Task<DeviceTaskUserInputResponse> CreateUserInputAsync(Guid taskId, DeviceTaskUserInputRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken);
+    Task<DeviceTaskUserInputResponse> GetUserInputAsync(Guid taskId, Guid executionId, string requestId, bool requestIdIsString, string leaseOwner, CancellationToken cancellationToken);
+    Task<DeviceTaskUserInputResponse> ResolveUserInputAsync(Guid taskId, Guid executionId, string requestId, bool requestIdIsString, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken);
 }
 
 public sealed class DeviceNodeHttpClient(
@@ -319,6 +322,15 @@ public sealed class DeviceNodeHttpClient(
 
     public Task<DeviceApprovalResponse> CreateApprovalAsync(Guid taskId, DeviceApprovalRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken) =>
         SendAsync<DeviceApprovalResponse>(HttpMethod.Post, $"/api/v1/device-tasks/{taskId:D}/approvals", request, idempotencyKey, leaseOwner, cancellationToken);
+
+    public Task<DeviceTaskUserInputResponse> CreateUserInputAsync(Guid taskId, DeviceTaskUserInputRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken) =>
+        SendAsync<DeviceTaskUserInputResponse>(HttpMethod.Post, $"/api/v1/device-tasks/{taskId:D}/user-input", request, idempotencyKey, leaseOwner, cancellationToken);
+
+    public Task<DeviceTaskUserInputResponse> GetUserInputAsync(Guid taskId, Guid executionId, string requestId, bool requestIdIsString, string leaseOwner, CancellationToken cancellationToken) =>
+        GetAsync<DeviceTaskUserInputResponse>($"/api/v1/device-tasks/{taskId:D}/user-input/{Uri.EscapeDataString(requestId)}?executionId={executionId:D}&requestIdIsString={requestIdIsString.ToString().ToLowerInvariant()}", leaseOwner, cancellationToken);
+
+    public Task<DeviceTaskUserInputResponse> ResolveUserInputAsync(Guid taskId, Guid executionId, string requestId, bool requestIdIsString, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken) =>
+        SendAsync<DeviceTaskUserInputResponse>(HttpMethod.Post, $"/api/v1/device-tasks/{taskId:D}/user-input/{Uri.EscapeDataString(requestId)}/resolved?executionId={executionId:D}&requestIdIsString={requestIdIsString.ToString().ToLowerInvariant()}", new { }, idempotencyKey, leaseOwner, cancellationToken);
 
     private async Task<T> SendAsync<T>(
         HttpMethod method,
@@ -356,7 +368,9 @@ public sealed class DeviceNodeHttpClient(
         return value ?? throw new InvalidDataException("The Control Plane returned an empty Device Node response.");
     }
 
-    private async Task<T> GetAsync<T>(string path, CancellationToken cancellationToken)
+    private Task<T> GetAsync<T>(string path, CancellationToken cancellationToken) => GetAsync<T>(path, null, cancellationToken);
+
+    private async Task<T> GetAsync<T>(string path, string? leaseOwner, CancellationToken cancellationToken)
     {
         if (nodeOptions.DeviceId == Guid.Empty || string.IsNullOrWhiteSpace(nodeOptions.DeviceCredential))
         {
@@ -365,6 +379,10 @@ public sealed class DeviceNodeHttpClient(
 
         using var request = new HttpRequestMessage(HttpMethod.Get, path);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", nodeOptions.DeviceCredential);
+        if (!string.IsNullOrWhiteSpace(leaseOwner))
+        {
+            request.Headers.Add("X-Lease-Owner", leaseOwner);
+        }
         using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {

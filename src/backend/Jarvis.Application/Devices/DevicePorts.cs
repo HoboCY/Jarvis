@@ -1,4 +1,5 @@
 using Jarvis.Contracts;
+using Jarvis.Application.Tasks;
 
 namespace Jarvis.Application.Devices;
 
@@ -77,7 +78,7 @@ public interface IDeviceStore
     Task<DeviceOperation<DeviceApprovalStatusResponse>> GetApprovalAsync(Guid deviceId, Guid taskId, Guid approvalId, CancellationToken cancellationToken);
 }
 
-public sealed class DeviceCoordinationService(IDeviceStore store)
+public sealed class DeviceCoordinationService(IDeviceStore store, ITaskUserInputStore? userInputStore = null)
 {
     private static readonly HashSet<string> SupportedTaskEventTypes = new(StringComparer.Ordinal)
     {
@@ -256,6 +257,75 @@ public sealed class DeviceCoordinationService(IDeviceStore store)
         deviceId == Guid.Empty || taskId == Guid.Empty || approvalId == Guid.Empty
             ? Task.FromResult(new DeviceOperation<DeviceApprovalStatusResponse>(DeviceOperationStatus.Invalid, Detail: "Approval identity is invalid."))
             : store.GetApprovalAsync(deviceId, taskId, approvalId, cancellationToken);
+
+    public Task<TaskUserInputOperation<DeviceTaskUserInputResponse>> CreateUserInputAsync(
+        Guid deviceId,
+        Guid taskId,
+        DeviceTaskUserInputRequest? request,
+        string? leaseOwner,
+        string? idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        if (deviceId == Guid.Empty || taskId == Guid.Empty || request is null
+            || string.IsNullOrWhiteSpace(leaseOwner) || leaseOwner.Trim().Length > 200
+            || string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Trim().Length > 200)
+        {
+            return Task.FromResult(new TaskUserInputOperation<DeviceTaskUserInputResponse>(
+                TaskUserInputOperationStatus.Invalid,
+                Detail: "The device task user-input request is invalid."));
+        }
+
+        return UserInputStore.CreateDeviceRequestAsync(
+            deviceId,
+            taskId,
+            request,
+            leaseOwner.Trim(),
+            idempotencyKey.Trim(),
+            cancellationToken);
+    }
+
+    public Task<TaskUserInputOperation<DeviceTaskUserInputResponse>> GetUserInputAsync(
+        Guid deviceId,
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string? leaseOwner,
+        CancellationToken cancellationToken) =>
+        deviceId == Guid.Empty || taskId == Guid.Empty || executionId == Guid.Empty || string.IsNullOrWhiteSpace(requestId) || requestId.Length > TaskUserInputValidation.MaxRequestIdLength || string.IsNullOrWhiteSpace(leaseOwner) || leaseOwner.Trim().Length > 200
+            ? Task.FromResult(new TaskUserInputOperation<DeviceTaskUserInputResponse>(
+                TaskUserInputOperationStatus.Invalid,
+                Detail: "The user-input request identity is invalid."))
+            : UserInputStore.GetDeviceRequestAsync(deviceId, taskId, executionId, requestId.Trim(), requestIdIsString, leaseOwner.Trim(), cancellationToken);
+
+    public Task<TaskUserInputOperation<DeviceTaskUserInputResponse>> ResolveUserInputAsync(
+        Guid deviceId,
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string? leaseOwner,
+        string? idempotencyKey,
+        CancellationToken cancellationToken) =>
+        deviceId == Guid.Empty || taskId == Guid.Empty || executionId == Guid.Empty || string.IsNullOrWhiteSpace(requestId)
+            || requestId.Length > TaskUserInputValidation.MaxRequestIdLength
+            || string.IsNullOrWhiteSpace(leaseOwner) || leaseOwner.Trim().Length > 200
+            || string.IsNullOrWhiteSpace(idempotencyKey) || idempotencyKey.Trim().Length > 200
+            ? Task.FromResult(new TaskUserInputOperation<DeviceTaskUserInputResponse>(
+                TaskUserInputOperationStatus.Invalid,
+                Detail: "The user-input resolution request is invalid."))
+            : UserInputStore.ResolveDeviceRequestAsync(
+                    deviceId,
+                    taskId,
+                    executionId,
+                    requestId.Trim(),
+                    requestIdIsString,
+                    leaseOwner.Trim(),
+                    idempotencyKey.Trim(),
+                    cancellationToken);
+
+    private ITaskUserInputStore UserInputStore => userInputStore
+        ?? throw new InvalidOperationException("The task user-input store is not configured.");
 
     private static string[]? NormalizeCapabilities(IReadOnlyList<string>? values)
     {

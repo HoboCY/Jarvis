@@ -13,7 +13,8 @@ import {
   refreshFeedIfCurrent,
   refreshOnBackendConnectionState,
   type DesktopNotification,
-  type DesktopTask
+  type DesktopTask,
+  desktopTaskFrom
 } from "./task-feed.js";
 import {
   DesktopApprovalFeed,
@@ -49,15 +50,102 @@ type ClientSecret = {
 type Device = { deviceId: string; name: string; platform: string };
 
 function taskFrom(value: unknown): DesktopTask {
-  const item = asRecord(value);
-  return {
-    ...item,
-    id: String(item.id),
-    status: String(item.status),
-    goal: typeof item.goal === "string" ? item.goal : undefined,
-    progressSummary: typeof item.progressSummary === "string" ? item.progressSummary : null,
-    resultSummary: typeof item.resultSummary === "string" ? item.resultSummary : null
+  const task = desktopTaskFrom(value);
+  if (!task) {
+    throw new Error("Backend returned an invalid task.");
+  }
+
+  return task;
+}
+
+function TaskUserInputForm({
+  task,
+  onSubmitted,
+  onError
+}: {
+  task: DesktopTask;
+  onSubmitted: () => Promise<void>;
+  onError: (error: unknown) => void;
+}) {
+  const pending = task.pendingUserInput;
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  if (!pending) {
+    return null;
+  }
+
+  const submit = async (): Promise<void> => {
+    if (pending.questions.some(question => !(answers[question.id] ?? "").trim())) {
+      onError(new Error("请回答所有问题。"));
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const fixedAnswers: Record<string, { answers: string[] }> = {};
+      for (const question of pending.questions) {
+        fixedAnswers[question.id] = { answers: [answers[question.id]!.trim()] };
+      }
+      await window.jarvis.submitTaskUserInput({
+        taskId: task.id,
+        requestId: pending.requestId,
+        executionId: task.executionId,
+        requestIdIsString: pending.requestIdIsString,
+        answers: fixedAnswers,
+        idempotencyKey: crypto.randomUUID()
+      });
+      await onSubmitted();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  return (
+    <form onSubmit={event => {
+      event.preventDefault();
+      void submit();
+    }}>
+      <fieldset disabled={submitting}>
+        <legend>需要你的输入</legend>
+        {pending.questions.map(question => (
+          <div key={question.id}>
+            <label htmlFor={`task-${task.id}-${question.id}`}>{question.header}</label>
+            <p>{question.question}</p>
+            {question.options && question.options.length > 0 && !question.isOther ? (
+              <select
+                id={`task-${task.id}-${question.id}`}
+                value={answers[question.id] ?? ""}
+                onChange={event => setAnswers(current => ({ ...current, [question.id]: event.target.value }))}
+              >
+                <option value="">请选择</option>
+                {question.options.map(option => (
+                  <option key={option.label} value={option.label}>{option.label} — {option.description}</option>
+                ))}
+              </select>
+            ) : (
+              <>
+                {question.options && question.options.length > 0 ? (
+                  <ul>
+                    {question.options.map(option => <li key={option.label}>{option.label}: {option.description}</li>)}
+                  </ul>
+                ) : null}
+                <input
+                  id={`task-${task.id}-${question.id}`}
+                  value={answers[question.id] ?? ""}
+                  onChange={event => setAnswers(current => ({ ...current, [question.id]: event.target.value }))}
+                  maxLength={4_000}
+                  placeholder="请输入答案"
+                />
+              </>
+            )}
+          </div>
+        ))}
+        <button type="submit">{submitting ? "提交中…" : "提交答案"}</button>
+      </fieldset>
+    </form>
+  );
 }
 
 function notificationFrom(value: unknown): DesktopNotification {
@@ -679,6 +767,13 @@ export function App() {
               <li key={task.id}>
                 <strong>{task.status}</strong> {task.goal ?? task.id}
                 {task.resultSummary ? <p>{task.resultSummary}</p> : null}
+                {task.pendingUserInput ? (
+                  <TaskUserInputForm
+                    task={task}
+                    onSubmitted={() => refreshFeed(conversation?.id)}
+                    onError={reason => setError(reason instanceof Error ? reason.message : "Task user-input submission failed.")}
+                  />
+                ) : null}
                 {task.status !== "succeeded"
                   && task.status !== "failed"
                   && task.status !== "cancelled" ? (

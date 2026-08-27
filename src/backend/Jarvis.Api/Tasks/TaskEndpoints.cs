@@ -42,6 +42,15 @@ public static class TaskEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound)
             .ProducesProblem(StatusCodes.Status409Conflict);
 
+        group.MapPost("/{taskId:guid}/user-input", SubmitUserInputAsync)
+            .WithName("SubmitTaskUserInput")
+            .WithSummary("Submit bounded answers to a Codex task waiting for user input.")
+            .Produces<TaskUserInputSubmissionResponse>()
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status401Unauthorized)
+            .ProducesProblem(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+
         return endpoints;
     }
 
@@ -150,6 +159,37 @@ public static class TaskEndpoints
             TaskOperationStatus.StateConflict => Problem(StatusCodes.Status409Conflict, "Task state conflict", result.Detail),
             TaskOperationStatus.Conflict => Problem(StatusCodes.Status409Conflict, "Idempotency conflict", result.Detail),
             _ => Problem(StatusCodes.Status500InternalServerError, "Unexpected result", "The task could not be cancelled.")
+        };
+    }
+
+    private static async Task<IResult> SubmitUserInputAsync(
+        Guid taskId,
+        HttpContext httpContext,
+        TaskUserInputService service,
+        TaskUserInputSubmissionRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(httpContext, out var userId))
+        {
+            return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "Authentication is required.");
+        }
+
+        var result = await service.SubmitAsync(
+            userId,
+            taskId,
+            httpContext.Request.Headers["Idempotency-Key"].FirstOrDefault(),
+            request,
+            cancellationToken);
+        return result.Status switch
+        {
+            TaskUserInputOperationStatus.Succeeded or TaskUserInputOperationStatus.Replayed
+                => TypedResults.Ok(result.Value),
+            TaskUserInputOperationStatus.Invalid => Problem(StatusCodes.Status400BadRequest, "Invalid user-input submission", result.Detail),
+            TaskUserInputOperationStatus.NotFound => Problem(StatusCodes.Status404NotFound, "User-input request not found", result.Detail),
+            TaskUserInputOperationStatus.StateConflict or TaskUserInputOperationStatus.Conflict
+                => Problem(StatusCodes.Status409Conflict, "User-input state conflict", result.Detail),
+            TaskUserInputOperationStatus.Unauthorized => Problem(StatusCodes.Status403Forbidden, "User-input submission forbidden", result.Detail),
+            _ => Problem(StatusCodes.Status500InternalServerError, "User-input submission failed", result.Detail)
         };
     }
 

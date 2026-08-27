@@ -14,8 +14,10 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using DomainTask = Jarvis.Domain.Tasks.Task;
 using DomainTaskExecution = Jarvis.Domain.Tasks.TaskExecution;
+using DomainTaskExecutionStatus = Jarvis.Domain.Tasks.TaskExecutionStatus;
 using DomainTaskStatus = Jarvis.Domain.Tasks.TaskStatus;
 using DomainTaskEvent = Jarvis.Domain.Tasks.TaskEvent;
+using DomainTaskUserInputStatus = Jarvis.Domain.Tasks.TaskUserInputRequestStatus;
 using DomainWorkerKind = Jarvis.Domain.Tasks.WorkerKind;
 
 namespace Jarvis.Infrastructure.Tasks;
@@ -188,7 +190,25 @@ public sealed class EfTaskStore(
             .Where(item => item.TaskId == taskId)
             .OrderByDescending(item => item.StartedAtMs)
             .FirstOrDefaultAsync(cancellationToken);
-        return ToResponse(task, execution);
+        var nowMs = timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+        var pendingUserInput = await db.TaskUserInputRequests.AsNoTracking()
+            .Where(item => item.TaskId == taskId
+                && task.Status == DomainTaskStatus.WaitingForUserInput
+                && (execution == null || item.ExecutionId == execution.Id)
+                && item.Status == DomainTaskUserInputStatus.Pending
+                && (item.ExpiresAtMs == null || item.ExpiresAtMs > nowMs))
+            .OrderByDescending(item => item.CreatedAtMs)
+            .Select(item => new PendingUserInputRow(
+                item.ExecutionId,
+                item.RequestId,
+                item.RequestIdIsString,
+                item.ItemId,
+                item.ThreadId,
+                item.TurnId,
+                item.QuestionsJson,
+                item.ExpiresAtMs))
+            .FirstOrDefaultAsync(cancellationToken);
+        return ToResponse(task, execution, ToPendingUserInput(pendingUserInput));
     }
 
     public async Task<TaskListResponse?> ListAsync(
@@ -239,8 +259,36 @@ public sealed class EfTaskStore(
         var latestExecutionByTask = executions
             .GroupBy(item => item.TaskId)
             .ToDictionary(group => group.Key, group => group.First());
+        var nowMs = timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+        var pendingUserInputs = await db.TaskUserInputRequests.AsNoTracking()
+            .Where(item => taskIds.Contains(item.TaskId)
+                && item.Status == DomainTaskUserInputStatus.Pending
+                && (item.ExpiresAtMs == null || item.ExpiresAtMs > nowMs))
+            .OrderByDescending(item => item.CreatedAtMs)
+            .Select(item => new PendingUserInputRow(
+                item.TaskId,
+                item.ExecutionId,
+                item.RequestId,
+                item.RequestIdIsString,
+                item.ItemId,
+                item.ThreadId,
+                item.TurnId,
+                item.QuestionsJson,
+                item.ExpiresAtMs))
+            .ToListAsync(cancellationToken);
+        var pendingUserInputByTask = tasks.ToDictionary(
+            task => task.Id,
+            task => task.Status == DomainTaskStatus.WaitingForUserInput
+                ? pendingUserInputs.FirstOrDefault(input =>
+                    input.TaskId == task.Id
+                    && latestExecutionByTask.TryGetValue(task.Id, out var execution)
+                    && input.ExecutionId == execution.Id)
+                : null);
         return new TaskListResponse(
-            tasks.Select(task => ToResponse(task, latestExecutionByTask.GetValueOrDefault(task.Id))).ToArray(),
+            tasks.Select(task => ToResponse(
+                task,
+                latestExecutionByTask.GetValueOrDefault(task.Id),
+                ToPendingUserInput(pendingUserInputByTask.GetValueOrDefault(task.Id)))).ToArray(),
             nextCursor);
     }
 
@@ -310,6 +358,25 @@ public sealed class EfTaskStore(
             return new(TaskStoreResultKind.NotFound);
         }
 
+        var wasWaitingForUserInput = task.Status == DomainTaskStatus.WaitingForUserInput;
+        var activeExecutionId = wasWaitingForUserInput
+            ? await db.TaskExecutions
+                .Where(item => item.TaskId == taskId
+                    && item.Status != DomainTaskExecutionStatus.Succeeded
+                    && item.Status != DomainTaskExecutionStatus.Failed
+                    && item.Status != DomainTaskExecutionStatus.Cancelled)
+                .OrderByDescending(item => item.StartedAtMs)
+                .Select(item => (Guid?)item.Id)
+                .FirstOrDefaultAsync(cancellationToken)
+            : null;
+        var pendingUserInput = wasWaitingForUserInput
+            ? await db.TaskUserInputRequests.SingleOrDefaultAsync(
+                item => item.TaskId == taskId
+                    && item.Status == DomainTaskUserInputStatus.Pending
+                    && (activeExecutionId == null || item.ExecutionId == activeExecutionId),
+                cancellationToken)
+            : null;
+
         bool changed;
         try
         {
@@ -337,6 +404,21 @@ public sealed class EfTaskStore(
         var response = new TaskCancelResponse(task.Id, changed, ToContractStatus(task.Status));
         if (changed)
         {
+            if (wasWaitingForUserInput && pendingUserInput is not null && pendingUserInput.Clear(nowMs))
+            {
+                MarkUserInputNotificationActioned(task, pendingUserInput.RequestId, nowMs);
+                AddTaskEventAndOutbox(task, "task.userInputCancelled", nowMs);
+                AddOutbox("task.userInputCancelled", new
+                {
+                    userId = task.UserId,
+                    deviceId = task.AssignedDeviceId,
+                    taskId = task.Id,
+                    requestId = pendingUserInput.RequestId,
+                    occurredAt = nowMs,
+                    entityVersion = task.Version
+                }, nowMs);
+            }
+
             AddTaskEventAndOutbox(task, "task.cancellationRequested", nowMs);
             if (task.Status == DomainTaskStatus.Cancelled)
             {
@@ -417,6 +499,7 @@ public sealed class EfTaskStore(
             taskId = task.Id,
             status = JsonNamingPolicy.CamelCase.ConvertName(task.Status.ToString()),
             eventType,
+            pendingUserInput = (object?)null,
             occurredAt = nowMs,
             entityVersion = task.Version
         };
@@ -431,6 +514,32 @@ public sealed class EfTaskStore(
         AddOutbox("task.eventAdded", payload, nowMs);
     }
 
+    public void FailClosedUserInput(
+        DomainTask task,
+        DomainTaskExecution execution,
+        string errorCode,
+        string errorMessage,
+        long nowMs)
+    {
+        if (task.Status is DomainTaskStatus.WaitingForUserInput or DomainTaskStatus.Recovering)
+        {
+            task.MarkFailed(errorCode, errorMessage, nowMs);
+        }
+
+        if (execution.Status is DomainTaskExecutionStatus.WaitingForUserInput or DomainTaskExecutionStatus.Recovering)
+        {
+            execution.MarkFailed(JsonSerializer.Serialize(new { reason = errorCode }, JsonOptions), nowMs);
+        }
+
+        AddTerminalNotification(
+            task,
+            "task.failed",
+            NotificationSeverity.Error,
+            "后台任务无法继续",
+            errorMessage,
+            nowMs);
+    }
+
     private void AddOutbox(string eventType, object payload, long nowMs)
     {
         var eventId = Guid.CreateVersion7();
@@ -443,6 +552,43 @@ public sealed class EfTaskStore(
         }, JsonOptions);
         db.OutboxMessages.Add(OutboxMessage.Create(eventId, eventType, payloadJson, nowMs));
         JarvisTelemetry.RecordOutboxEnqueued(eventType);
+    }
+
+    public void MarkUserInputNotificationActioned(
+        DomainTask task,
+        string requestId,
+        long nowMs,
+        string action = "userInputCancelled")
+    {
+        var notification = db.Notifications.SingleOrDefault(item =>
+            item.UserId == task.UserId
+            && item.TaskId == task.Id
+            && item.Type == "task.needsUserInput"
+            && item.DedupKey == $"task:{task.Id:D}:user-input:{requestId}");
+        if (notification is null || notification.Status is NotificationStatus.Actioned or NotificationStatus.Dismissed)
+        {
+            return;
+        }
+
+        if (!notification.MarkActioned(nowMs))
+        {
+            return;
+        }
+
+        AddOutbox("notification.updated", new
+        {
+            userId = task.UserId,
+            notificationId = notification.Id,
+            taskId = notification.TaskId,
+            conversationId = notification.ConversationId,
+            status = "actioned",
+            title = notification.Title,
+            body = notification.Body,
+            type = notification.Type,
+            dedupKey = notification.DedupKey,
+            action,
+            entityVersion = notification.Version
+        }, nowMs);
     }
 
     private IdempotencyRecord CreateIdempotencyRecord(
@@ -575,7 +721,10 @@ public sealed class EfTaskStore(
         return false;
     }
 
-    private static TaskResponse ToResponse(DomainTask task, DomainTaskExecution? execution = null)
+    private static TaskResponse ToResponse(
+        DomainTask task,
+        DomainTaskExecution? execution = null,
+        TaskUserInputResponse? pendingUserInput = null)
     {
         var capabilities = JsonSerializer.Deserialize<string[]>(task.RequiredCapabilitiesJson, JsonOptions)
             ?? Array.Empty<string>();
@@ -606,7 +755,8 @@ public sealed class EfTaskStore(
             task.CompletedAtMs,
             execution is null ? null : ToExecutionResponse(execution),
             execution is null ? Array.Empty<ArtifactManifestEntry>() : DeserializeArtifacts(execution.ArtifactManifestJson),
-            DeserializeCapabilityEnvelope(task.CapabilityEnvelopeJson));
+            DeserializeCapabilityEnvelope(task.CapabilityEnvelopeJson),
+            pendingUserInput);
     }
 
     private static TaskExecutionResponse ToExecutionResponse(DomainTaskExecution execution) => new(
@@ -648,6 +798,59 @@ public sealed class EfTaskStore(
         {
             return null;
         }
+    }
+
+    private static TaskUserInputResponse? ToPendingUserInput(PendingUserInputRow? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var questions = JsonSerializer.Deserialize<TaskUserInputQuestion[]>(value.QuestionsJson, JsonOptions);
+            return questions is null
+                ? null
+                : new TaskUserInputResponse(
+                    value.RequestId,
+                    value.ItemId,
+                    value.ThreadId,
+                    value.TurnId,
+                    questions,
+                    TaskUserInputStatusValue.Pending,
+                    value.ExpiresAtMs,
+                    value.RequestIdIsString);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record PendingUserInputRow(
+        Guid ExecutionId,
+        string RequestId,
+        bool RequestIdIsString,
+        string ItemId,
+        string ThreadId,
+        string TurnId,
+        string QuestionsJson,
+        long? ExpiresAtMs)
+    {
+        public PendingUserInputRow(
+            Guid taskId,
+            Guid executionId,
+            string requestId,
+            bool requestIdIsString,
+            string itemId,
+            string threadId,
+            string turnId,
+            string questionsJson,
+            long? expiresAtMs)
+            : this(executionId, requestId, requestIdIsString, itemId, threadId, turnId, questionsJson, expiresAtMs) => TaskId = taskId;
+
+        public Guid TaskId { get; }
     }
 
     private static TaskStatusValue ToContractStatus(DomainTaskStatus status) => status switch

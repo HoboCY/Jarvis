@@ -60,16 +60,90 @@ public sealed class PollingApprovalDecisionWaiter(
     }
 }
 
+public interface IDeviceUserInputWaiter
+{
+    Task<DeviceUserInputResolution?> WaitAsync(
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string leaseOwner,
+        CancellationToken cancellationToken);
+}
+
+public sealed record DeviceUserInputResolution(
+    IReadOnlyDictionary<string, TaskUserInputAnswer>? Answers,
+    TaskUserInputStatusValue Status = TaskUserInputStatusValue.Answered);
+
+public sealed class FailClosedUserInputWaiter : IDeviceUserInputWaiter
+{
+    public async Task<DeviceUserInputResolution?> WaitAsync(
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+        return null;
+    }
+}
+
+public sealed class PollingUserInputWaiter(
+    IDeviceNodeControlPlane controlPlane,
+    IOptions<DeviceNodeOptions> options,
+    TimeProvider timeProvider) : IDeviceUserInputWaiter
+{
+    private readonly DeviceNodeOptions nodeOptions = options.Value;
+
+    public async Task<DeviceUserInputResolution?> WaitAsync(
+        Guid taskId,
+        Guid executionId,
+        string requestId,
+        bool requestIdIsString,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(
+            TimeSpan.FromMilliseconds(Math.Max(100, nodeOptions.PollingIntervalMs)),
+            timeProvider);
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var status = await controlPlane.GetUserInputAsync(
+                taskId,
+                executionId,
+                requestId,
+                requestIdIsString,
+                leaseOwner,
+                cancellationToken).ConfigureAwait(false);
+            if (status.Status == TaskUserInputStatusValue.Answered && status.Answers is not null)
+            {
+                return new DeviceUserInputResolution(status.Answers);
+            }
+
+            if (status.Status is TaskUserInputStatusValue.Cleared or TaskUserInputStatusValue.Expired)
+            {
+                return new DeviceUserInputResolution(null, status.Status);
+            }
+        }
+
+        return null;
+    }
+}
+
 public sealed partial class DeviceNodeWorker(
     IOptions<DeviceNodeOptions> options,
     IDeviceNodeControlPlane controlPlane,
     ILogger<DeviceNodeWorker> logger,
     IDeviceApprovalDecisionWaiter? approvalWaiter = null,
-    TimeProvider? timeProvider = null) : BackgroundService
+    TimeProvider? timeProvider = null,
+    IDeviceUserInputWaiter? userInputWaiter = null) : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly DeviceNodeOptions nodeOptions = options.Value;
     private readonly IDeviceApprovalDecisionWaiter approvalWaiter = approvalWaiter ?? new FailClosedApprovalDecisionWaiter();
+    private readonly IDeviceUserInputWaiter userInputWaiter = userInputWaiter ?? new FailClosedUserInputWaiter();
     private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -210,7 +284,15 @@ public sealed partial class DeviceNodeWorker(
                 effectivePolicy,
                 effectiveWorkingDirectory,
                 execution.CodexThreadId,
-                (runtime, threadId, token) => ExecuteTurnAsync(runtime, task, execution, threadId, leaseOwner, turnState, effectivePolicy, token),
+                (runtime, threadId, token) => ExecuteTurnFromDurableStateAsync(
+                    runtime,
+                    task,
+                    execution,
+                    threadId,
+                    leaseOwner,
+                    turnState,
+                    effectivePolicy,
+                    token),
                 onStateAsync: (state, token) => ObserveSupervisorStateAsync(state, task, execution, leaseOwner, token),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
@@ -250,6 +332,43 @@ public sealed partial class DeviceNodeWorker(
                 $"device-failed:{execution.Id:D}",
                 cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task<string> ExecuteTurnFromDurableStateAsync(
+        ICodexRuntime runtime,
+        TaskResponse claimedTask,
+        TaskExecutionResponse claimedExecution,
+        string threadId,
+        string leaseOwner,
+        ActiveTurnState turnState,
+        CapabilityPolicy policy,
+        CancellationToken cancellationToken)
+    {
+        // A restarted app-server must reconstruct pending input from the
+        // Control Plane claim, never from runtime memory or the old process.
+        var durableTask = await controlPlane.GetTaskAsync(claimedTask.Id, cancellationToken).ConfigureAwait(false);
+        var durableExecution = durableTask.Execution is { Id: var executionId } execution
+            && executionId == claimedExecution.Id
+            ? execution
+            : claimedExecution;
+        if (durableTask.Status is TaskStatusValue.Succeeded or TaskStatusValue.Failed or TaskStatusValue.Cancelled
+            || durableExecution.Status is TaskExecutionStatusValue.Succeeded or TaskExecutionStatusValue.Failed or TaskExecutionStatusValue.Cancelled)
+        {
+            // A fail-closed resolution (serverRequest/resolved, expiry, or
+            // process exit) is already durable. Do not let the supervisor
+            // restart boundary create another turn for that terminal outcome.
+            return "The durable Codex task is already terminal.";
+        }
+
+        return await ExecuteTurnAsync(
+            runtime,
+            durableTask,
+            durableExecution,
+            threadId,
+            leaseOwner,
+            turnState,
+            policy,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<string> ExecuteTurnAsync(
@@ -315,14 +434,267 @@ public sealed partial class DeviceNodeWorker(
             () => cancellationRequested = true,
             turnCancellation);
         var progressNumber = 0;
+        var pendingUserInputRequestId = task.PendingUserInput?.RequestId;
+        var pendingUserInputRequestIdIsString = task.PendingUserInput?.RequestIdIsString ?? true;
+        Task<DeviceUserInputResolution?>? userInputTask = null;
+        if (task.PendingUserInput is not null)
+        {
+            userInputTask = userInputWaiter.WaitAsync(
+                task.Id,
+                execution.Id,
+                task.PendingUserInput.RequestId,
+                pendingUserInputRequestIdIsString,
+                leaseOwner,
+                turnCancellation.Token);
+        }
+
+        await using var runtimeEvents = runtime.ReadEventsAsync(turnCancellation.Token).GetAsyncEnumerator(turnCancellation.Token);
+        Task<bool>? nextRuntimeEvent = null;
         try
         {
-            await foreach (var runtimeEvent in runtime.ReadEventsAsync(turnCancellation.Token).ConfigureAwait(false))
+            while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                nextRuntimeEvent ??= runtimeEvents.MoveNextAsync().AsTask();
+                if (userInputTask is not null)
+                {
+                    await Task.WhenAny(
+                        nextRuntimeEvent,
+                        userInputTask,
+                        runtime.ProcessExit,
+                        leaseRenewal,
+                        cancellationMonitor).ConfigureAwait(false);
+
+                    // These signals share one arbitration point. A lease loss,
+                    // cancellation, or process exit always wins over an answer
+                    // that happened to become visible at the same time.
+                    if (leaseRenewal.IsCompleted)
+                    {
+                        await leaseRenewal.ConfigureAwait(false);
+                    }
+
+                    if (cancellationMonitor.IsCompleted)
+                    {
+                        await cancellationMonitor.ConfigureAwait(false);
+                        if (cancellationRequested)
+                        {
+                            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                            return "Codex task cancelled.";
+                        }
+                    }
+
+                    if (runtime.ProcessExit.IsCompleted)
+                    {
+                        await ResolveUserInputSafelyAsync(
+                            task,
+                            execution,
+                            pendingUserInputRequestId!,
+                            pendingUserInputRequestIdIsString,
+                            leaseOwner,
+                            $"codex-user-input-process-exit:{RequestIdentitySuffix(pendingUserInputRequestId, pendingUserInputRequestIdIsString)}",
+                            cancellationToken).ConfigureAwait(false);
+                        throw new EndOfStreamException("Codex app-server exited while waiting for a user-input answer.");
+                    }
+
+                    // A resolved notification wins a race with a completed poll so the
+                    // Device Node never answers a request the server has already cleared.
+                    if (nextRuntimeEvent.IsCompleted)
+                    {
+                        if (!await nextRuntimeEvent.ConfigureAwait(false))
+                        {
+                            break;
+                        }
+
+                        var eventWhileWaiting = runtimeEvents.Current;
+                        nextRuntimeEvent = null;
+                        if (await HandleResolvedUserInputAsync(
+                                eventWhileWaiting,
+                                pendingUserInputRequestId,
+                                pendingUserInputRequestIdIsString,
+                                execution,
+                                threadId,
+                                task,
+                                leaseOwner,
+                                turnCancellation.Token).ConfigureAwait(false))
+                        {
+                            return "Codex cleared the user-input request before it was answered.";
+                        }
+
+                        if (eventWhileWaiting.Method == CodexProtocolMethods.ProcessExited)
+                        {
+                            await ResolveUserInputSafelyAsync(
+                                task,
+                                execution,
+                                pendingUserInputRequestId,
+                                pendingUserInputRequestIdIsString,
+                                leaseOwner,
+                                $"codex-user-input-process-exit:{RequestIdentitySuffix(pendingUserInputRequestId, pendingUserInputRequestIdIsString)}",
+                                cancellationToken).ConfigureAwait(false);
+                            throw new EndOfStreamException("Codex app-server exited during a turn.");
+                        }
+
+                        if (eventWhileWaiting.Method is "turn/completed" or "turn/complete")
+                        {
+                            await ResolveUserInputSafelyAsync(
+                                task,
+                                execution,
+                                pendingUserInputRequestId,
+                                pendingUserInputRequestIdIsString,
+                                leaseOwner,
+                                $"codex-user-input-completed:{task.Id:D}:{RequestIdentitySuffix(pendingUserInputRequestId, pendingUserInputRequestIdIsString)}",
+                                turnCancellation.Token).ConfigureAwait(false);
+                            return "Codex completed while the user-input request was pending.";
+                        }
+
+                        continue;
+                    }
+
+                    var resolution = await userInputTask.ConfigureAwait(false);
+                    userInputTask = null;
+                    if (resolution is null)
+                    {
+                        return "Codex user-input request was not answered.";
+                    }
+
+                    if (resolution.Status != TaskUserInputStatusValue.Answered
+                        || resolution.Answers is null)
+                    {
+                        var cancellationState = cancellationRequested
+                            ? TaskStatusValue.CancellationRequested
+                            : (await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false)).Status;
+                        if (cancellationState == TaskStatusValue.CancellationRequested)
+                        {
+                            await runtime.InterruptTurnAsync(threadId, turn.TurnId, cancellationToken).ConfigureAwait(false);
+                            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                            return "Codex task cancelled.";
+                        }
+
+                        return "Codex user-input request was cleared before it was answered.";
+                    }
+
+                    // Polling the answer and writing the JSON-RPC response are
+                    // separate operations. Re-read the durable projection and
+                    // require the same request to still be waiting before send.
+                    DeviceTaskUserInputResponse? currentInput = null;
+                    try
+                    {
+                        currentInput = await controlPlane.GetUserInputAsync(
+                            task.Id,
+                            execution.Id,
+                            pendingUserInputRequestId!,
+                            pendingUserInputRequestIdIsString,
+                            leaseOwner,
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (DeviceNodeControlPlaneException exception)
+                        when (exception.StatusCode is System.Net.HttpStatusCode.Conflict
+                            or System.Net.HttpStatusCode.NotFound)
+                    {
+                        // The durable request was cleared/expired or the lease
+                        // changed. The answer must not cross that boundary.
+                    }
+
+                    if (currentInput is null
+                        || currentInput.Status != TaskUserInputStatusValue.Answered
+                        || currentInput.Answers is null
+                        || !string.Equals(currentInput.RequestId, pendingUserInputRequestId, StringComparison.Ordinal)
+                        || currentInput.RequestIdIsString != pendingUserInputRequestIdIsString)
+                    {
+                        var currentTask = await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false);
+                        if (currentTask.Status == TaskStatusValue.CancellationRequested || cancellationRequested)
+                        {
+                            await runtime.InterruptTurnAsync(threadId, turn.TurnId, cancellationToken).ConfigureAwait(false);
+                            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                            return "Codex task cancelled.";
+                        }
+
+                        return "Codex user-input request was cleared before it was answered.";
+                    }
+
+                    // Cancellation can be committed after the poll completes but
+                    // before the response write. Re-check the durable task at the
+                    // single arbitration point so a late answer never crosses the
+                    // cancellation boundary.
+                    var latestTask = await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false);
+                    if (cancellationRequested || latestTask.Status == TaskStatusValue.CancellationRequested)
+                    {
+                        await runtime.InterruptTurnAsync(threadId, turn.TurnId, cancellationToken).ConfigureAwait(false);
+                        await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                        return "Codex task cancelled.";
+                    }
+
+                    await runtime.RespondToServerRequestAsync(
+                        new CodexServerRequest(
+                            pendingUserInputRequestId ?? string.Empty,
+                            CodexProtocolMethods.ToolRequestUserInput,
+                            default,
+                            pendingUserInputRequestIdIsString),
+                        CodexUserInputProtocol.CreateResponse(resolution.Answers),
+                        cancellationToken).ConfigureAwait(false);
+                    pendingUserInputRequestId = null;
+                    pendingUserInputRequestIdIsString = true;
+                    continue;
+                }
+
+                await Task.WhenAny(
+                    nextRuntimeEvent,
+                    runtime.ProcessExit,
+                    leaseRenewal,
+                    cancellationMonitor).ConfigureAwait(false);
+
+                if (leaseRenewal.IsCompleted)
+                {
+                    await leaseRenewal.ConfigureAwait(false);
+                }
+
+                if (cancellationMonitor.IsCompleted)
+                {
+                    await cancellationMonitor.ConfigureAwait(false);
+                    if (cancellationRequested)
+                    {
+                        await runtime.InterruptTurnAsync(threadId, turn.TurnId, cancellationToken).ConfigureAwait(false);
+                        await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                        return "Codex task cancelled.";
+                    }
+                }
+
+                if (runtime.ProcessExit.IsCompleted)
+                {
+                    await ResolveUserInputSafelyAsync(
+                        task,
+                        execution,
+                        pendingUserInputRequestId,
+                        pendingUserInputRequestIdIsString,
+                        leaseOwner,
+                        $"codex-user-input-process-exit:{RequestIdentitySuffix(pendingUserInputRequestId, pendingUserInputRequestIdIsString)}",
+                        cancellationToken).ConfigureAwait(false);
+                    throw new EndOfStreamException("Codex app-server exited during a turn.");
+                }
+
+                if (!await nextRuntimeEvent.ConfigureAwait(false))
+                {
+                    break;
+                }
+
+                var runtimeEvent = runtimeEvents.Current;
+                nextRuntimeEvent = null;
                 if (runtimeEvent.Method == CodexProtocolMethods.ProcessExited)
                 {
+                    await ResolveUserInputSafelyAsync(
+                        task,
+                        execution,
+                        pendingUserInputRequestId,
+                        pendingUserInputRequestIdIsString,
+                        leaseOwner,
+                        $"codex-user-input-process-exit:{RequestIdentitySuffix(pendingUserInputRequestId, pendingUserInputRequestIdIsString)}",
+                        cancellationToken).ConfigureAwait(false);
                     throw new EndOfStreamException("Codex app-server exited during a turn.");
+                }
+
+                if (cancellationRequested)
+                {
+                    await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                    return "Codex task cancelled.";
                 }
 
                 if (runtimeEvent.IsRequest && CodexProtocolMethods.ServerApprovalRequests.Contains(runtimeEvent.Method))
@@ -355,7 +727,11 @@ public sealed partial class DeviceNodeWorker(
                         approval.ApprovalId,
                         cancellationToken).ConfigureAwait(false);
                     await runtime.RespondToServerRequestAsync(
-                        new CodexServerRequest(runtimeEvent.RequestId ?? string.Empty, runtimeEvent.Method, runtimeEvent.Params ?? default),
+                        new CodexServerRequest(
+                            runtimeEvent.RequestId ?? string.Empty,
+                            runtimeEvent.Method,
+                            runtimeEvent.Params ?? default,
+                            runtimeEvent.RequestIdIsString),
                         CodexApprovalResponseFactory.Create(runtimeEvent.Method, resolution.Decision, resolution.Scope, runtimeEvent.Params, policy),
                         cancellationToken).ConfigureAwait(false);
                     if (resolution.Decision == ApprovalDecisionValue.Deny)
@@ -364,6 +740,68 @@ public sealed partial class DeviceNodeWorker(
                         return "Codex operation denied by the user.";
                     }
 
+                    continue;
+                }
+
+                if (runtimeEvent.IsRequest && runtimeEvent.Method == CodexProtocolMethods.ToolRequestUserInput)
+                {
+                    if (string.IsNullOrWhiteSpace(runtimeEvent.RequestId)
+                        || runtimeEvent.Params is not JsonElement userInputParams
+                        || !CodexUserInputProtocol.TryParse(
+                            runtimeEvent.RequestId,
+                            runtimeEvent.RequestIdIsString,
+                            execution.Id,
+                            userInputParams,
+                            timeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
+                            out var userInputRequest,
+                            out _))
+                    {
+                        await AppendFailureAsync(
+                            task,
+                            execution,
+                            leaseOwner,
+                            "codex_user_input_invalid",
+                            "Codex sent an invalid or unsupported user-input request.",
+                            cancellationToken).ConfigureAwait(false);
+                        return "Codex user-input request was rejected.";
+                    }
+
+                    var persisted = await controlPlane.CreateUserInputAsync(
+                        task.Id,
+                        userInputRequest,
+                        leaseOwner,
+                        $"codex-user-input:{execution.Id:D}:{RequestIdentitySuffix(userInputRequest.RequestId, userInputRequest.RequestIdIsString)}",
+                        cancellationToken).ConfigureAwait(false);
+                    if (persisted.Status == TaskUserInputStatusValue.Answered && persisted.Answers is not null)
+                    {
+                        await runtime.RespondToServerRequestAsync(
+                            new CodexServerRequest(runtimeEvent.RequestId, runtimeEvent.Method, userInputParams, runtimeEvent.RequestIdIsString),
+                            CodexUserInputProtocol.CreateResponse(persisted.Answers),
+                            cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (persisted.Status != TaskUserInputStatusValue.Pending)
+                    {
+                        await AppendFailureAsync(
+                            task,
+                            execution,
+                            leaseOwner,
+                            "codex_user_input_not_pending",
+                            "The Codex user-input request was not left pending by the Control Plane.",
+                            cancellationToken).ConfigureAwait(false);
+                        return "Codex user-input request was not left pending.";
+                    }
+
+                    pendingUserInputRequestId = persisted.RequestId;
+                    pendingUserInputRequestIdIsString = persisted.RequestIdIsString;
+                    userInputTask = userInputWaiter.WaitAsync(
+                        task.Id,
+                        execution.Id,
+                        persisted.RequestId,
+                        persisted.RequestIdIsString,
+                        leaseOwner,
+                        turnCancellation.Token);
                     continue;
                 }
 
@@ -391,6 +829,17 @@ public sealed partial class DeviceNodeWorker(
                     {
                         var status = ExtractStatus(runtimeEvent.Params);
                         var summary = progress ?? "Codex task completed.";
+                        if (pendingUserInputRequestId is not null)
+                        {
+                            await AppendFailureAsync(
+                                task,
+                                execution,
+                                leaseOwner,
+                                "codex_user_input_unresolved",
+                                "Codex completed while a user-input request was still pending.",
+                                cancellationToken).ConfigureAwait(false);
+                            return "Codex completed with unresolved user input.";
+                        }
                         if (cancellationRequested || string.Equals(status, "cancelled", StringComparison.OrdinalIgnoreCase))
                         {
                             await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
@@ -453,6 +902,76 @@ public sealed partial class DeviceNodeWorker(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             throw new CodexTurnStartUncertainException(threadId, exception);
+        }
+    }
+
+    private async Task<bool> HandleResolvedUserInputAsync(
+        CodexRuntimeEvent runtimeEvent,
+        string? pendingRequestId,
+        bool pendingRequestIdIsString,
+        TaskExecutionResponse execution,
+        string threadId,
+        TaskResponse task,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(runtimeEvent.Method, CodexProtocolMethods.ServerRequestResolved, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(pendingRequestId))
+        {
+            return false;
+        }
+
+        var resolvedRequest = ExtractResolvedRequestIdentity(runtimeEvent.Params);
+        var resolvedThreadId = ExtractResolvedThreadId(runtimeEvent.Params);
+        if (resolvedRequest is null
+            || !string.Equals(resolvedRequest.Value.Text, pendingRequestId, StringComparison.Ordinal)
+            || resolvedRequest.Value.IsString != pendingRequestIdIsString
+            || !string.Equals(resolvedThreadId, threadId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        await controlPlane.ResolveUserInputAsync(
+            task.Id,
+            execution.Id,
+            pendingRequestId,
+            pendingRequestIdIsString,
+            leaseOwner,
+            $"codex-user-input-resolved:{task.Id:D}:{RequestIdentitySuffix(pendingRequestId, pendingRequestIdIsString)}",
+            cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task ResolveUserInputSafelyAsync(
+        TaskResponse task,
+        TaskExecutionResponse execution,
+        string? requestId,
+        bool requestIdIsString,
+        string leaseOwner,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(requestId))
+        {
+            return;
+        }
+
+        try
+        {
+            await controlPlane.ResolveUserInputAsync(
+                task.Id,
+                execution.Id,
+                requestId,
+                requestIdIsString,
+                leaseOwner,
+                idempotencyKey,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is DeviceNodeControlPlaneException or HttpRequestException)
+        {
+            // A lost lease or an unavailable Control Plane is fail-closed: the
+            // durable request remains for expiry/recovery and no answer is sent.
+            LogEventPersistenceFailure(logger, exception, "task.userInputCleared", task.Id);
         }
     }
 
@@ -687,6 +1206,46 @@ public sealed partial class DeviceNodeWorker(
         }
 
         return null;
+    }
+
+    private static (string Text, bool IsString)? ExtractResolvedRequestIdentity(JsonElement? parameters)
+    {
+        if (parameters is not JsonElement value || value.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (!value.TryGetProperty("requestId", out var requestId))
+        {
+            return null;
+        }
+
+        return requestId.ValueKind switch
+        {
+            JsonValueKind.String => (requestId.GetString() ?? string.Empty, true),
+            JsonValueKind.Number => (requestId.GetRawText(), false),
+            _ => null
+        };
+    }
+
+    private static string? ExtractResolvedThreadId(JsonElement? parameters)
+    {
+        if (parameters is not JsonElement value
+            || value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("threadId", out var threadId)
+            || threadId.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return threadId.GetString();
+    }
+
+    private static string RequestIdentitySuffix(string? requestId, bool requestIdIsString)
+    {
+        var value = $"{(requestIdIsString ? 's' : 'n')}:{requestId ?? string.Empty}";
+        var digest = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(digest)[..16];
     }
 
     private static List<string> CapabilityNames(CapabilityEnvelopeOptions capabilities)

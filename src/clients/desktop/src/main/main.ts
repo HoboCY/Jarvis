@@ -201,6 +201,35 @@ function optionalStringArray(value: unknown, name: string, maxItems = 100): stri
   return requiredStringArray(value, name, maxItems);
 }
 
+function boundedUserInputAnswers(value: unknown): Record<string, { answers: string[] }> {
+  const input = requiredBody(value);
+  const entries = Object.entries(input);
+  if (entries.length < 1 || entries.length > 3) {
+    throw new Error("Invalid user-input answers.");
+  }
+
+  let totalLength = 0;
+  const answers: Record<string, { answers: string[] }> = {};
+  for (const [questionId, answerValue] of entries) {
+    const normalizedQuestionId = requiredString(questionId, "questionId", 200);
+    const answerRecord = requiredBody(answerValue);
+    if (!Array.isArray(answerRecord.answers)
+      || answerRecord.answers.length < 1
+      || answerRecord.answers.length > 20) {
+      throw new Error("Invalid user-input answer values.");
+    }
+
+    const normalizedAnswers = answerRecord.answers.map(answer => requiredString(answer, "answer", 4_000));
+    totalLength += normalizedAnswers.reduce((sum, answer) => sum + answer.length, 0);
+    if (totalLength > 20_000) {
+      throw new Error("User-input answers are too long.");
+    }
+    answers[normalizedQuestionId] = { answers: normalizedAnswers };
+  }
+
+  return answers;
+}
+
 function requiredUuidArray(value: unknown, name: string, maxItems = 100): string[] {
   return requiredStringArray(value, name, maxItems).map(item => {
     if (!isUuid(item)) {
@@ -570,6 +599,33 @@ if (!app.requestSingleInstanceLock()) {
       return requestBackend(
         `${taskApiPath}/${encodeURIComponent(requiredString(input.taskId, "taskId"))}`,
         "GET");
+    });
+    ipcMain.handle("backend:submitTaskUserInput", (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const taskId = requiredString(input.taskId, "taskId");
+      if (!isUuid(taskId)) {
+        throw new Error("Invalid taskId.");
+      }
+      const executionId = optionalString(input.executionId, "executionId");
+      if (executionId !== undefined && !isUuid(executionId)) {
+        throw new Error("Invalid executionId.");
+      }
+      const requestIdIsString = input.requestIdIsString === undefined
+        ? true
+        : input.requestIdIsString;
+      if (typeof requestIdIsString !== "boolean") {
+        throw new Error("Invalid requestIdIsString.");
+      }
+      return requestBackend(
+        `${taskApiPath}/${encodeURIComponent(taskId)}/user-input`,
+        "POST",
+        {
+          requestId: requiredString(input.requestId, "requestId", 200),
+          executionId,
+          requestIdIsString,
+          answers: boundedUserInputAnswers(input.answers)
+        },
+        requiredString(input.idempotencyKey, "idempotencyKey"));
     });
     ipcMain.handle("backend:cancelTask", (_event, value: unknown) => {
       const input = requiredBody(value);

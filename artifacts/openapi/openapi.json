@@ -1646,6 +1646,110 @@
         ]
       }
     },
+    "/api/v1/tasks/{taskId}/user-input": {
+      "post": {
+        "tags": [
+          "TaskEndpoints"
+        ],
+        "summary": "Submit bounded answers to a Codex task waiting for user input.",
+        "operationId": "SubmitTaskUserInput",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TaskUserInputSubmissionRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskUserInputSubmissionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "LocalBearer": []
+          },
+          {
+            "MobileBearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/notifications": {
       "get": {
         "tags": [
@@ -2769,6 +2873,302 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "DeviceBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/device-tasks/{taskId}/user-input": {
+      "post": {
+        "tags": [
+          "DeviceEndpoints"
+        ],
+        "operationId": "CreateDeviceTaskUserInput",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DeviceTaskUserInputRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceTaskUserInputResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "DeviceBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/device-tasks/{taskId}/user-input/{requestId}": {
+      "get": {
+        "tags": [
+          "DeviceEndpoints"
+        ],
+        "operationId": "GetDeviceTaskUserInput",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "executionId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "requestIdIsString",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceTaskUserInputResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "DeviceBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/device-tasks/{taskId}/user-input/{requestId}/resolved": {
+      "post": {
+        "tags": [
+          "DeviceEndpoints"
+        ],
+        "operationId": "ResolveDeviceTaskUserInput",
+        "parameters": [
+          {
+            "name": "taskId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "executionId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "requestIdIsString",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceTaskUserInputResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3936,6 +4336,120 @@
           },
           "status": {
             "$ref": "#/components/schemas/TaskStatusValue"
+          }
+        }
+      },
+      "DeviceTaskUserInputRequest": {
+        "required": [
+          "executionId",
+          "requestId",
+          "itemId",
+          "questions",
+          "threadId",
+          "turnId"
+        ],
+        "type": "object",
+        "properties": {
+          "executionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "itemId": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskUserInputQuestion"
+            }
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "autoResolutionMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "requestIdIsString": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "DeviceTaskUserInputResponse": {
+        "required": [
+          "taskId",
+          "executionId",
+          "requestId",
+          "itemId",
+          "threadId",
+          "turnId",
+          "questions",
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "executionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "itemId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskUserInputQuestion"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskUserInputStatusValue"
+          },
+          "answers": {
+            "type": [
+              "null",
+              "object"
+            ],
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TaskUserInputAnswer"
+            }
+          },
+          "expiresAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "requestIdIsString": {
+            "type": "boolean",
+            "default": true
           }
         }
       },
@@ -5123,7 +5637,8 @@
           "recovering",
           "succeeded",
           "failed",
-          "cancelled"
+          "cancelled",
+          "waitingForUserInput"
         ]
       },
       "TaskListResponse": {
@@ -5337,6 +5852,16 @@
                 "$ref": "#/components/schemas/CapabilityEnvelopeContract"
               }
             ]
+          },
+          "pendingUserInput": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TaskUserInputResponse"
+              }
+            ]
           }
         }
       },
@@ -5353,6 +5878,188 @@
           "failed",
           "cancelled"
         ]
+      },
+      "TaskUserInputAnswer": {
+        "required": [
+          "answers"
+        ],
+        "type": "object",
+        "properties": {
+          "answers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TaskUserInputOption": {
+        "required": [
+          "description",
+          "label"
+        ],
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "TaskUserInputQuestion": {
+        "required": [
+          "header",
+          "id",
+          "question"
+        ],
+        "type": "object",
+        "properties": {
+          "header": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "isOther": {
+            "type": "boolean",
+            "default": false
+          },
+          "isSecret": {
+            "type": "boolean",
+            "default": false
+          },
+          "options": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TaskUserInputOption"
+            }
+          }
+        }
+      },
+      "TaskUserInputResponse": {
+        "required": [
+          "requestId",
+          "itemId",
+          "threadId",
+          "turnId",
+          "questions"
+        ],
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "itemId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskUserInputQuestion"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskUserInputStatusValue"
+          },
+          "expiresAtMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int64"
+          },
+          "requestIdIsString": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "TaskUserInputStatusValue": {
+        "enum": [
+          "pending",
+          "answered",
+          "cleared",
+          "expired"
+        ],
+        "default": "pending"
+      },
+      "TaskUserInputSubmissionRequest": {
+        "required": [
+          "requestId",
+          "answers"
+        ],
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "answers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TaskUserInputAnswer"
+            }
+          },
+          "executionId": {
+            "type": [
+              "null",
+              "string"
+            ],
+            "format": "uuid"
+          },
+          "requestIdIsString": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "TaskUserInputSubmissionResponse": {
+        "required": [
+          "taskId",
+          "executionId",
+          "requestId",
+          "accepted",
+          "status",
+          "executionStatus"
+        ],
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "executionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskStatusValue"
+          },
+          "executionStatus": {
+            "$ref": "#/components/schemas/TaskExecutionStatusValue"
+          }
+        }
       },
       "TypedMessageRequest": {
         "required": [

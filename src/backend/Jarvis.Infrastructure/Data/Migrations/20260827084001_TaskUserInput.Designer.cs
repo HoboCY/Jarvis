@@ -3,6 +3,7 @@ using System;
 using Jarvis.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Jarvis.Infrastructure.Data.Migrations
 {
     [DbContext(typeof(JarvisDbContext))]
-    partial class JarvisDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260827084001_TaskUserInput")]
+    partial class TaskUserInput
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.11");

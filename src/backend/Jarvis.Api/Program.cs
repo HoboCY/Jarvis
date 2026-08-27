@@ -72,6 +72,7 @@ builder.Services.AddOpenApi(options =>
             or "IngestRealtimeEvents"
             or "CreateTask"
             or "CancelTask"
+            or "SubmitTaskUserInput"
             or "MarkNotificationDelivered"
             or "MarkNotificationRead"
             or "DismissNotification"
@@ -94,6 +95,8 @@ builder.Services.AddOpenApi(options =>
             or "AppendDeviceTaskEvent"
             or "RenewDeviceTaskLease"
             or "CreateDeviceApproval"
+            or "CreateDeviceTaskUserInput"
+            or "ResolveDeviceTaskUserInput"
             or "DecideApproval")
         {
             operation.Parameters ??= [];

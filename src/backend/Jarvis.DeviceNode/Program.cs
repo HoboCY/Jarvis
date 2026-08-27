@@ -61,6 +61,7 @@ builder.Services.AddSingleton<DeviceNodeBootstrapper>();
 builder.Services.AddSingleton<IDeviceNodeControlPlane>(serviceProvider =>
     serviceProvider.GetRequiredService<DeviceNodeHttpClient>());
 builder.Services.AddSingleton<IDeviceApprovalDecisionWaiter, PollingApprovalDecisionWaiter>();
+builder.Services.AddSingleton<IDeviceUserInputWaiter, PollingUserInputWaiter>();
 builder.Services.AddHostedService<DeviceNodeBootstrapHostedService>();
 builder.Services.AddHostedService<DeviceNodeWorker>();
 using var host = builder.Build();

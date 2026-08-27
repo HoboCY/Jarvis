@@ -8,7 +8,8 @@ public enum TaskExecutionStatus
     Recovering,
     Succeeded,
     Failed,
-    Cancelled
+    Cancelled,
+    WaitingForUserInput
 }
 
 public sealed class TaskExecution
@@ -189,15 +190,23 @@ public sealed class TaskExecution
 
     public bool WaitForApproval(long nowMs)
     {
-        EnsureActive();
+        EnsureCanPause();
         Status = TaskExecutionStatus.WaitingForApproval;
+        Version++;
+        return true;
+    }
+
+    public bool WaitForUserInput(long nowMs)
+    {
+        EnsureCanPause();
+        Status = TaskExecutionStatus.WaitingForUserInput;
         Version++;
         return true;
     }
 
     public bool Resume(long nowMs)
     {
-        if (Status != TaskExecutionStatus.WaitingForApproval)
+        if (Status is not (TaskExecutionStatus.WaitingForApproval or TaskExecutionStatus.WaitingForUserInput))
         {
             throw new InvalidOperationException($"Execution in {Status} cannot resume.");
         }
@@ -227,6 +236,18 @@ public sealed class TaskExecution
         }
 
         Status = TaskExecutionStatus.Running;
+        Version++;
+        return true;
+    }
+
+    public bool ResumeWaitingForUserInputFromRecovery(long nowMs)
+    {
+        if (Status != TaskExecutionStatus.Recovering)
+        {
+            throw new InvalidOperationException($"Execution in {Status} cannot resume waiting for user input from recovery.");
+        }
+
+        Status = TaskExecutionStatus.WaitingForUserInput;
         Version++;
         return true;
     }
@@ -268,6 +289,15 @@ public sealed class TaskExecution
         if (Status is TaskExecutionStatus.Succeeded or TaskExecutionStatus.Failed or TaskExecutionStatus.Cancelled)
         {
             throw new InvalidOperationException("A terminal execution cannot change state.");
+        }
+    }
+
+    private void EnsureCanPause()
+    {
+        EnsureActive();
+        if (Status != TaskExecutionStatus.Running)
+        {
+            throw new InvalidOperationException($"Execution in {Status} cannot pause.");
         }
     }
 }

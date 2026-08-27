@@ -12,6 +12,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using DomainTaskStatus = Jarvis.Domain.Tasks.TaskStatus;
 using DomainTaskExecutionStatus = Jarvis.Domain.Tasks.TaskExecutionStatus;
+using DomainTaskUserInputStatus = Jarvis.Domain.Tasks.TaskUserInputRequestStatus;
 using DomainWorkerKind = Jarvis.Domain.Tasks.WorkerKind;
 
 namespace Jarvis.Infrastructure.Devices;
@@ -35,17 +36,63 @@ public sealed class DeviceLeaseRecoveryService(
                 && task.LeaseExpiresAtMs <= nowMs
                 && (task.Status == DomainTaskStatus.Assigned
                     || task.Status == DomainTaskStatus.Running
-                    || task.Status == DomainTaskStatus.WaitingForApproval))
+                    || task.Status == DomainTaskStatus.WaitingForApproval
+                    || task.Status == DomainTaskStatus.WaitingForUserInput
+                    || task.Status == DomainTaskStatus.CancellationRequested))
             .ToListAsync(cancellationToken);
         var expiredApprovals = await db.Approvals
             .Where(approval => approval.Status == ApprovalStatus.Pending
                 && approval.ExpiresAtMs != null
                 && approval.ExpiresAtMs <= nowMs)
             .ToListAsync(cancellationToken);
-        if (tasks.Count == 0 && expiredApprovals.Count == 0)
+        var expiredUserInputs = await db.TaskUserInputRequests
+            .Where(request => request.Status == DomainTaskUserInputStatus.Pending
+                && request.ExpiresAtMs != null
+                && request.ExpiresAtMs <= nowMs)
+            .ToListAsync(cancellationToken);
+        if (tasks.Count == 0 && expiredApprovals.Count == 0 && expiredUserInputs.Count == 0)
         {
             await transaction.CommitAsync(cancellationToken);
             return 0;
+        }
+
+        var recoveredCount = 0;
+        foreach (var task in tasks.Where(item => item.Status == DomainTaskStatus.CancellationRequested))
+        {
+            var cancellationExecutions = await db.TaskExecutions
+                .Where(execution => execution.TaskId == task.Id
+                    && execution.Status != DomainTaskExecutionStatus.Succeeded
+                    && execution.Status != DomainTaskExecutionStatus.Failed
+                    && execution.Status != DomainTaskExecutionStatus.Cancelled)
+                .ToListAsync(cancellationToken);
+            var pendingCancellationInputs = await db.TaskUserInputRequests
+                .Where(request => request.TaskId == task.Id && request.Status == DomainTaskUserInputStatus.Pending)
+                .ToListAsync(cancellationToken);
+
+            foreach (var pendingUserInput in pendingCancellationInputs)
+            {
+                pendingUserInput.Clear(nowMs);
+                taskStore.MarkUserInputNotificationActioned(task, pendingUserInput.RequestId, nowMs);
+            }
+
+            if (task.ConfirmCancellation(nowMs))
+            {
+                recoveredCount++;
+                foreach (var execution in cancellationExecutions)
+                {
+                    execution.MarkCancelled(nowMs);
+                }
+
+                taskStore.AddTaskEventAndOutbox(task, "task.cancelled", nowMs);
+                AddTaskCancelledOutbox(task, cancellationExecutions.FirstOrDefault()?.Id, nowMs);
+                taskStore.AddTerminalNotification(
+                    task,
+                    "task.cancelled",
+                    NotificationSeverity.Info,
+                    "后台任务已取消",
+                    "The device lease expired while cancellation was pending.",
+                    nowMs);
+            }
         }
 
         foreach (var approval in expiredApprovals)
@@ -81,6 +128,31 @@ public sealed class DeviceLeaseRecoveryService(
             }
         }
 
+        foreach (var userInput in expiredUserInputs)
+        {
+            var task = await db.Tasks.SingleOrDefaultAsync(item => item.Id == userInput.TaskId, cancellationToken);
+            var execution = await db.TaskExecutions.SingleOrDefaultAsync(item => item.Id == userInput.ExecutionId, cancellationToken);
+            if (!userInput.Expire(nowMs))
+            {
+                continue;
+            }
+
+            if (task is null || execution is null)
+            {
+                continue;
+            }
+
+            taskStore.FailClosedUserInput(
+                task,
+                execution,
+                "codex_user_input_expired",
+                "The Codex user-input request expired before it was answered.",
+                nowMs);
+            taskStore.MarkUserInputNotificationActioned(task, userInput.RequestId, nowMs, "userInputExpired");
+            taskStore.AddTaskEventAndOutbox(task, "task.userInputExpired", nowMs);
+            AddUserInputExpiredOutbox(task, execution.Id, userInput.RequestId, nowMs);
+        }
+
         var taskIds = tasks.Select(task => task.Id).ToArray();
         var activeExecutions = await db.TaskExecutions
             .Where(execution => taskIds.Contains(execution.TaskId)
@@ -93,12 +165,12 @@ public sealed class DeviceLeaseRecoveryService(
                 && approval.Status == ApprovalStatus.Pending)
             .ToListAsync(cancellationToken);
 
-        var recoveredCount = 0;
         foreach (var task in tasks)
         {
             if (task.Status is not (DomainTaskStatus.Assigned
                 or DomainTaskStatus.Running
-                or DomainTaskStatus.WaitingForApproval))
+                or DomainTaskStatus.WaitingForApproval
+                or DomainTaskStatus.WaitingForUserInput))
             {
                 continue;
             }
@@ -180,6 +252,52 @@ public sealed class DeviceLeaseRecoveryService(
             JsonSerializer.Serialize(payload, JsonOptions),
             nowMs));
         JarvisTelemetry.RecordOutboxEnqueued("approval.resolved");
+    }
+
+    private void AddUserInputExpiredOutbox(
+        Jarvis.Domain.Tasks.Task task,
+        Guid executionId,
+        string requestId,
+        long nowMs)
+    {
+        AddOutbox("task.userInputExpired", new
+        {
+            userId = task.UserId,
+            deviceId = task.AssignedDeviceId,
+            taskId = task.Id,
+            executionId,
+            requestId,
+            occurredAt = nowMs,
+            entityVersion = task.Version
+        }, nowMs);
+    }
+
+    private void AddTaskCancelledOutbox(
+        Jarvis.Domain.Tasks.Task task,
+        Guid? executionId,
+        long nowMs)
+    {
+        AddOutbox("task.cancelled", new
+        {
+            userId = task.UserId,
+            deviceId = task.AssignedDeviceId,
+            taskId = task.Id,
+            executionId,
+            occurredAt = nowMs,
+            entityVersion = task.Version,
+            pendingUserInput = (object?)null
+        }, nowMs);
+    }
+
+    private void AddOutbox(string eventType, object payload, long nowMs)
+    {
+        var eventId = Guid.CreateVersion7();
+        db.OutboxMessages.Add(OutboxMessage.Create(
+            eventId,
+            eventType,
+            JsonSerializer.Serialize(new { eventId, occurredAt = nowMs, type = eventType, payload }, JsonOptions),
+            nowMs));
+        JarvisTelemetry.RecordOutboxEnqueued(eventType);
     }
 }
 

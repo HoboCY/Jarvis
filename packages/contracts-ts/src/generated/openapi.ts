@@ -372,6 +372,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{taskId}/user-input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit bounded answers to a Codex task waiting for user input. */
+        post: operations["SubmitTaskUserInput"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/notifications": {
         parameters: {
             query?: never;
@@ -592,6 +609,54 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["CreateDeviceApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/user-input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["CreateDeviceTaskUserInput"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/user-input/{requestId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["GetDeviceTaskUserInput"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/device-tasks/{taskId}/user-input/{requestId}/resolved": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["ResolveDeviceTaskUserInput"];
         delete?: never;
         options?: never;
         head?: never;
@@ -873,6 +938,38 @@ export interface components {
             /** Format: int64 */
             leaseExpiresAtMs: null | number | string;
             status: components["schemas"]["TaskStatusValue"];
+        };
+        DeviceTaskUserInputRequest: {
+            /** Format: uuid */
+            executionId: string;
+            requestId: string;
+            itemId: string;
+            questions: components["schemas"]["TaskUserInputQuestion"][];
+            threadId: string;
+            turnId: string;
+            /** Format: int64 */
+            autoResolutionMs?: null | number | string;
+            /** @default true */
+            requestIdIsString: boolean;
+        };
+        DeviceTaskUserInputResponse: {
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            executionId: string;
+            requestId: string;
+            itemId: string;
+            threadId: string;
+            turnId: string;
+            questions: components["schemas"]["TaskUserInputQuestion"][];
+            status: components["schemas"]["TaskUserInputStatusValue"];
+            answers?: null | {
+                [key: string]: components["schemas"]["TaskUserInputAnswer"];
+            };
+            /** Format: int64 */
+            expiresAtMs?: null | number | string;
+            /** @default true */
+            requestIdIsString: boolean;
         };
         /** @enum {unknown} */
         DeviceTypeValue: "desktop" | "mobile" | "server";
@@ -1166,7 +1263,7 @@ export interface components {
             codexTurnStartRequestedAtMs?: null | number | string;
         };
         /** @enum {unknown} */
-        TaskExecutionStatusValue: "assigned" | "running" | "waitingForApproval" | "recovering" | "succeeded" | "failed" | "cancelled";
+        TaskExecutionStatusValue: "assigned" | "running" | "waitingForApproval" | "recovering" | "succeeded" | "failed" | "cancelled" | "waitingForUserInput";
         TaskListResponse: {
             items: components["schemas"]["TaskResponse"][];
             nextCursor?: null | string;
@@ -1208,9 +1305,64 @@ export interface components {
             execution?: null | components["schemas"]["TaskExecutionResponse"];
             artifacts?: null | components["schemas"]["ArtifactManifestEntry"][];
             capabilityEnvelope?: null | components["schemas"]["CapabilityEnvelopeContract"];
+            pendingUserInput?: null | components["schemas"]["TaskUserInputResponse"];
         };
         /** @enum {unknown} */
         TaskStatusValue: "queued" | "assigned" | "running" | "waitingForApproval" | "waitingForUserInput" | "cancellationRequested" | "recovering" | "succeeded" | "failed" | "cancelled";
+        TaskUserInputAnswer: {
+            answers: string[];
+        };
+        TaskUserInputOption: {
+            description: string;
+            label: string;
+        };
+        TaskUserInputQuestion: {
+            header: string;
+            id: string;
+            question: string;
+            /** @default false */
+            isOther: boolean;
+            /** @default false */
+            isSecret: boolean;
+            options?: null | components["schemas"]["TaskUserInputOption"][];
+        };
+        TaskUserInputResponse: {
+            requestId: string;
+            itemId: string;
+            threadId: string;
+            turnId: string;
+            questions: components["schemas"]["TaskUserInputQuestion"][];
+            status?: components["schemas"]["TaskUserInputStatusValue"];
+            /** Format: int64 */
+            expiresAtMs?: null | number | string;
+            /** @default true */
+            requestIdIsString: boolean;
+        };
+        /**
+         * @default pending
+         * @enum {unknown}
+         */
+        TaskUserInputStatusValue: "pending" | "answered" | "cleared" | "expired";
+        TaskUserInputSubmissionRequest: {
+            requestId: string;
+            answers: {
+                [key: string]: components["schemas"]["TaskUserInputAnswer"];
+            };
+            /** Format: uuid */
+            executionId?: null | string;
+            /** @default true */
+            requestIdIsString: boolean;
+        };
+        TaskUserInputSubmissionResponse: {
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            executionId: string;
+            requestId: string;
+            accepted: boolean;
+            status: components["schemas"]["TaskStatusValue"];
+            executionStatus: components["schemas"]["TaskExecutionStatusValue"];
+        };
         TypedMessageRequest: {
             clientRequestId: string;
             text: string;
@@ -2354,6 +2506,70 @@ export interface operations {
             };
         };
     };
+    SubmitTaskUserInput: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["TaskUserInputSubmissionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskUserInputSubmissionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
     ListUnreadNotifications: {
         parameters: {
             query?: {
@@ -3094,6 +3310,187 @@ export interface operations {
             };
             /** @description Unauthorized */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    CreateDeviceTaskUserInput: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                taskId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["DeviceTaskUserInputRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceTaskUserInputResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetDeviceTaskUserInput: {
+        parameters: {
+            query?: {
+                executionId?: string;
+                requestIdIsString?: boolean;
+            };
+            header?: never;
+            path: {
+                taskId: string;
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceTaskUserInputResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    ResolveDeviceTaskUserInput: {
+        parameters: {
+            query?: {
+                executionId?: string;
+                requestIdIsString?: boolean;
+            };
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                taskId: string;
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceTaskUserInputResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

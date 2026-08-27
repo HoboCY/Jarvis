@@ -3,15 +3,184 @@ import { test } from "node:test";
 import {
   DesktopTaskNotificationFeed,
   collectTaskPages,
+  desktopTaskFrom,
   ensureActiveDesktopTaskNotificationFeed,
   maxTrackedFeedEntities,
   nonTerminalTaskStatuses,
+  pendingUserInputFrom,
   notificationActionIdempotencyKey,
   refreshFeedIfCurrent,
   refreshOnBackendConnectionState,
   type DesktopNotification,
   type DesktopTask
 } from "./task-feed.js";
+
+test("projects bounded user-input questions without accepting secret or provider fields", async () => {
+  const projection = pendingUserInputFrom({
+    requestId: "99",
+    itemId: "item-1",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    status: "pending",
+    providerRaw: { answers: { q1: { answers: ["secret"] } } },
+    questions: [{
+      id: "q1",
+      header: "Choice",
+      question: "Choose one",
+      options: [{ label: "A", description: "First" }]
+    }]
+  });
+
+  assert.deepEqual(projection, {
+    requestId: "99",
+    requestIdIsString: true,
+    itemId: "item-1",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    questions: [{
+      id: "q1",
+      header: "Choice",
+      question: "Choose one",
+      isOther: false,
+      options: [{ label: "A", description: "First" }]
+    }],
+    expiresAtMs: null
+  });
+  assert.equal(pendingUserInputFrom({
+    requestId: "99",
+    itemId: "item-1",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    questions: [{ id: "q1", header: "Secret", question: "Password?", isSecret: true }]
+  }), undefined);
+  assert.deepEqual(desktopTaskFrom({
+    id: "task-1",
+    status: "waitingForUserInput",
+    providerRaw: { result: "must not enter Renderer" },
+    pendingUserInput: projection
+  }), {
+    id: "task-1",
+    status: "waitingForUserInput",
+    goal: undefined,
+    progressSummary: undefined,
+    resultSummary: undefined,
+    pendingUserInput: projection
+  });
+});
+
+test("task events update only the fixed task projection and clear completed user input", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.applyEvent({
+    eventId: "task-input-required",
+    occurredAt: 1,
+    type: "task.updated",
+    payload: {
+      taskId: "task-input",
+      status: "waitingForUserInput",
+      pendingUserInput: {
+        requestId: "99",
+        itemId: "item-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        questions: [{ id: "q1", header: "Choice", question: "Choose one" }]
+      },
+      entityVersion: 7,
+      providerRaw: { answers: { q1: { answers: ["raw"] } } }
+    }
+  });
+  assert.equal(feed.tasks[0]?.pendingUserInput?.requestId, "99");
+  assert.equal(feed.tasks[0]?.entityVersion, 7);
+  assert.equal("providerRaw" in (feed.tasks[0] ?? {}), false);
+
+  await feed.applyEvent({
+    eventId: "task-input-answered",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "task-input",
+      status: "running",
+      pendingUserInput: null,
+      entityVersion: 8,
+      providerRaw: { answers: { q1: { answers: ["raw"] } } }
+    }
+  });
+  assert.equal(feed.tasks[0]?.pendingUserInput, undefined);
+  assert.equal(feed.tasks[0]?.status, "running");
+
+  await feed.applyEvent({
+    eventId: "task-input-late-required",
+    occurredAt: 3,
+    type: "task.updated",
+    payload: {
+      taskId: "task-input",
+      status: "waitingForUserInput",
+      pendingUserInput: {
+        requestId: "late",
+        itemId: "late-item",
+        threadId: "late-thread",
+        turnId: "late-turn",
+        questions: [{ id: "q1", header: "Late", question: "Should not render" }]
+      },
+      entityVersion: 7
+    }
+  });
+  assert.equal(feed.tasks[0]?.status, "running");
+  assert.equal(feed.tasks[0]?.pendingUserInput, undefined);
+
+  const recoveringProjection = desktopTaskFrom({
+    id: "task-recovering",
+    status: "recovering",
+    pendingUserInput: {
+      requestId: "recovery-input",
+      itemId: "recovery-item",
+      threadId: "recovery-thread",
+      turnId: "recovery-turn",
+      questions: [{ id: "q1", header: "Recovery", question: "Should stay hidden" }],
+      entityVersion: 9
+    }
+  });
+  assert.equal(recoveringProjection?.pendingUserInput, undefined);
+
+  await feed.applyEvent({
+    eventId: "task-input-reclaimed",
+    occurredAt: 4,
+    type: "task.updated",
+    payload: {
+      taskId: "task-input",
+      status: "waitingForUserInput",
+      pendingUserInput: {
+        requestId: "reclaimed",
+        itemId: "reclaimed-item",
+        threadId: "reclaimed-thread",
+        turnId: "reclaimed-turn",
+        questions: [{ id: "q1", header: "Reclaimed", question: "Answer after recovery" }]
+      },
+      entityVersion: 9
+    }
+  });
+  assert.equal(feed.tasks[0]?.status, "waitingForUserInput");
+  assert.equal(feed.tasks[0]?.pendingUserInput?.requestId, "reclaimed");
+  await feed.applyEvent({
+    eventId: "task-input-recovery-stale",
+    occurredAt: 5,
+    type: "task.updated",
+    payload: {
+      taskId: "task-input",
+      status: "recovering",
+      pendingUserInput: null,
+      entityVersion: 8
+    }
+  });
+  assert.equal(feed.tasks[0]?.status, "waitingForUserInput");
+  assert.equal(feed.tasks[0]?.pendingUserInput?.requestId, "reclaimed");
+});
 
 test("refreshes durable tasks and unread notifications and deduplicates notification events", async () => {
   const calls: string[] = [];

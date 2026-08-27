@@ -44,6 +44,12 @@ export type TaskListResponse =
   paths["/api/v1/tasks"]["get"]["responses"][200]["content"]["application/json"];
 export type TaskCancelResponse =
   paths["/api/v1/tasks/{taskId}/cancel"]["post"]["responses"][200]["content"]["application/json"];
+export type TaskUserInputSubmissionRequest =
+  paths["/api/v1/tasks/{taskId}/user-input"]["post"]["requestBody"] extends { content: { "application/json": infer T } }
+    ? NonNullable<T>
+    : never;
+export type TaskUserInputSubmissionResponse =
+  paths["/api/v1/tasks/{taskId}/user-input"]["post"]["responses"][200]["content"]["application/json"];
 export type NotificationListResponse =
   paths["/api/v1/notifications"]["get"]["responses"][200]["content"]["application/json"];
 export type NotificationResponse =
@@ -264,6 +270,21 @@ export async function cancelTask(
     idempotencyKey,
     options
   ) as Promise<TaskCancelResponse>;
+}
+
+export async function submitTaskUserInput(
+  baseUrl: string,
+  taskId: string,
+  request: TaskUserInputSubmissionRequest,
+  idempotencyKey: string,
+  options: ApiRequestOptions = {}
+): Promise<TaskUserInputSubmissionResponse> {
+  return requestJson(
+    new URL(`/api/v1/tasks/${encodeURIComponent(taskId)}/user-input`, baseUrl),
+    request,
+    idempotencyKey,
+    options
+  ) as Promise<TaskUserInputSubmissionResponse>;
 }
 
 export async function listUnreadNotifications(

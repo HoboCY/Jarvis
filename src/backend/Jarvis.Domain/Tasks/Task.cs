@@ -222,7 +222,7 @@ public sealed class Task
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseOwner);
         ArgumentOutOfRangeException.ThrowIfNegative(leaseExpiresAtMs);
         ArgumentOutOfRangeException.ThrowIfNegative(nowMs);
-        if (Status is not (TaskStatus.Running or TaskStatus.WaitingForApproval)
+        if (Status is not (TaskStatus.Running or TaskStatus.WaitingForApproval or TaskStatus.WaitingForUserInput)
             || !string.Equals(LeaseOwner, leaseOwner.Trim(), StringComparison.Ordinal)
             || LeaseExpiresAtMs is not long currentLeaseExpiresAtMs
             || currentLeaseExpiresAtMs <= nowMs)
@@ -275,7 +275,7 @@ public sealed class Task
             return true;
         }
 
-        if (Status != TaskStatus.Running)
+        if (Status is not (TaskStatus.Running or TaskStatus.WaitingForUserInput))
         {
             throw new InvalidOperationException($"A task in {Status} cannot request cancellation.");
         }
@@ -364,7 +364,7 @@ public sealed class Task
             return false;
         }
 
-        if (Status is not (TaskStatus.Assigned or TaskStatus.Running or TaskStatus.WaitingForApproval))
+        if (Status is not (TaskStatus.Assigned or TaskStatus.Running or TaskStatus.WaitingForApproval or TaskStatus.WaitingForUserInput))
         {
             throw new InvalidOperationException($"A task in {Status} cannot recover.");
         }
@@ -424,6 +424,19 @@ public sealed class Task
         return true;
     }
 
+    public bool ResumeWaitingForUserInputFromRecovery(long nowMs)
+    {
+        if (Status is not (TaskStatus.Recovering or TaskStatus.Assigned))
+        {
+            throw new InvalidOperationException($"A task in {Status} cannot resume waiting for user input from recovery.");
+        }
+
+        Status = TaskStatus.WaitingForUserInput;
+        HeartbeatAtMs = nowMs;
+        Touch();
+        return true;
+    }
+
     private void EnsureNotTerminal()
     {
         if (Status is TaskStatus.Succeeded or TaskStatus.Failed or TaskStatus.Cancelled)
@@ -452,7 +465,7 @@ public sealed class Task
             throw new InvalidOperationException("A terminal task cannot change state.");
         }
 
-        if (Status is not (TaskStatus.Running or TaskStatus.Recovering))
+        if (Status is not (TaskStatus.Running or TaskStatus.WaitingForUserInput or TaskStatus.Recovering))
         {
             throw new InvalidOperationException($"A task in {Status} cannot fail.");
         }

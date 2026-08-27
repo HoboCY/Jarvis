@@ -58,6 +58,21 @@ interface Window {
       idempotencyKey: string;
     }) => Promise<unknown>;
     getTaskStatus: (taskId: string) => Promise<unknown>;
+    submitTaskUserInput: (input: {
+      taskId: string;
+      requestId: string;
+      executionId?: string;
+      requestIdIsString?: boolean;
+      answers: Record<string, { answers: string[] }>;
+      idempotencyKey: string;
+    }) => Promise<{
+      taskId: string;
+      executionId: string;
+      requestId: string;
+      accepted: boolean;
+      status: "queued" | "assigned" | "running" | "waitingForApproval" | "waitingForUserInput" | "recovering" | "cancellationRequested" | "succeeded" | "failed" | "cancelled";
+      executionStatus: "assigned" | "running" | "waitingForApproval" | "recovering" | "succeeded" | "failed" | "cancelled" | "waitingForUserInput";
+    }>;
     cancelTask: (input: { taskId: string; idempotencyKey: string }) => Promise<unknown>;
     rememberFact: (input: {
       key: string;
