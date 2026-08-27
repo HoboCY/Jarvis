@@ -39,11 +39,12 @@ xcodebuild \
   build
 ```
 
-Android CI pins JDK 17, SDK/Build Tools 37.0.0 and NDK 27.1.12297006. The
-iOS gate uses the macOS 15 runner and an unsigned Simulator target. A workflow
-definition or Metro bundle is not proof that these builds passed; use the
-corresponding GitHub Actions run for the exact commit as the authoritative
-native-build evidence.
+Android CI pins JDK 17 and verifies the hosted runner's SDK 37/Build Tools
+37.0.0 before installing the pinned NDK 27.1.12297006 when absent. The iOS gate
+uses the macOS 15 runner and an unsigned Simulator target. A workflow definition
+or Metro bundle is not proof that these builds passed; use the corresponding
+GitHub Actions run for the exact commit as the authoritative native-build
+evidence.
 
 ## Pairing and endpoint configuration
 

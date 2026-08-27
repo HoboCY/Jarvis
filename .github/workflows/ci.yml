@@ -241,13 +241,15 @@ jobs:
       - name: Install TypeScript workspace with frozen lockfile
         run: pnpm install --frozen-lockfile
 
-      - name: Install pinned Android SDK components
+      - name: Verify Android SDK and install the pinned NDK
         run: |
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "platform-tools" \
-            "platforms;android-37" \
-            "build-tools;37.0.0" \
-            "ndk;27.1.12297006"
+          test -d "$ANDROID_SDK_ROOT/platforms/android-37"
+          test -d "$ANDROID_SDK_ROOT/build-tools/37.0.0"
+          if [ ! -d "$ANDROID_SDK_ROOT/ndk/27.1.12297006" ]; then
+            "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+              "ndk;27.1.12297006"
+          fi
+          test -d "$ANDROID_SDK_ROOT/ndk/27.1.12297006"
 
       - name: Build Android debug application
         working-directory: src/clients/mobile/android
