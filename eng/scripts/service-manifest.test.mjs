@@ -11,6 +11,7 @@ import {
   renderLaunchdPlist,
   uninstallService
 } from "./launchd-service.mjs";
+import { run as runInstallLaunchdService } from "./install-launchd-service.mjs";
 import { getServiceBundleArtifacts } from "./create-service-manifest.mjs";
 import { buildReleaseManifest, sha256File } from "./release-manifest.mjs";
 
@@ -43,6 +44,70 @@ test("launchd plist rendering refuses unresolved variables and credentials", () 
     dataDirectory: "/tmp/jarvis/data",
     logDirectory: "/tmp/jarvis/logs"
   }), /credential|secret|token/i);
+});
+
+test("launchd plist rendering defaults to port 5004 and preserves an explicit port", () => {
+  const template = "<plist>http://127.0.0.1:__API_PORT__</plist>";
+  const values = {
+    label: "com.hobocy.jarvis.api.phase6",
+    executable: "/tmp/jarvis/api/Jarvis.Api",
+    workingDirectory: "/tmp/jarvis/api",
+    dataDirectory: "/tmp/jarvis/data",
+    logDirectory: "/tmp/jarvis/logs"
+  };
+
+  assert.match(renderLaunchdPlist(template, values), /http:\/\/127\.0\.0\.1:5004/);
+  assert.match(renderLaunchdPlist(template, { ...values, apiPort: "43123" }), /http:\/\/127\.0\.0\.1:43123/);
+});
+
+test("launchd install defaults to port 5004 when no port is supplied", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jarvis-launchd-default-port-"));
+  const label = "com.hobocy.jarvis.api.default-port";
+  const templatePath = join(root, "jarvis-api.plist.template");
+  const template = await readFile(join(process.cwd(), "eng/services/templates/jarvis-api.plist.template"), "utf8");
+
+  try {
+    await writeFile(templatePath, template);
+    await installService({
+      root,
+      label,
+      executable: "/tmp/Jarvis.Api",
+      workingDirectory: "/tmp/jarvis",
+      templatePath,
+      launchctlRunner: () => ({ status: 0, stdout: "", stderr: "" })
+    });
+
+    const rendered = await readFile(join(root, `${label}.plist`), "utf8");
+    assert.match(rendered, /http:\/\/127\.0\.0\.1:5004/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("launchd installer CLI defaults to port 5004 and preserves --api-port", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jarvis-launchd-cli-port-"));
+  const label = "com.hobocy.jarvis.api.cli-port";
+  const args = [
+    "install",
+    "--root", root,
+    "--label", label,
+    "--kind", "api",
+    "--executable", "/tmp/Jarvis.Api",
+    "--working-directory", "/tmp/jarvis",
+    "--dry-run"
+  ];
+
+  try {
+    await runInstallLaunchdService(args);
+    const defaultRendered = await readFile(join(root, `${label}.plist`), "utf8");
+    assert.match(defaultRendered, /http:\/\/127\.0\.0\.1:5004/);
+
+    await runInstallLaunchdService([...args, "--api-port", "43123"]);
+    const explicitRendered = await readFile(join(root, `${label}.plist`), "utf8");
+    assert.match(explicitRendered, /http:\/\/127\.0\.0\.1:43123/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("release manifest records SHA-256 and explicit unsigned status", async () => {

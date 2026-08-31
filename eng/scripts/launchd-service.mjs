@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const labelPattern = /^com\.hobocy\.jarvis\.[A-Za-z0-9][A-Za-z0-9.-]{0,80}$/;
 const sensitivePattern = /bearer|secret|token|credential|api[_-]?key/i;
 const serviceNotFoundPattern = /^(?:Could not find service "[^"]+" in domain for system|Bad request\. Could not find service "[^"]+" in domain for user gui: \d+)$/;
+export const DEFAULT_API_PORT = "5004";
 
 export function assertSafeServiceLabel(label) {
   if (typeof label !== "string" || !labelPattern.test(label) || label.includes("..")) {
@@ -30,7 +31,7 @@ export function buildServicePaths(root, label) {
 }
 
 export function renderLaunchdPlist(template, values) {
-  if (typeof (values.apiPort ?? "5000") !== "string" || !/^\d{2,5}$/.test(values.apiPort ?? "5000")) {
+  if (typeof (values.apiPort ?? DEFAULT_API_PORT) !== "string" || !/^\d{2,5}$/.test(values.apiPort ?? DEFAULT_API_PORT)) {
     throw new Error("Service API port must be a bounded numeric port.");
   }
   const replacements = {
@@ -39,7 +40,7 @@ export function renderLaunchdPlist(template, values) {
     WORKING_DIRECTORY: values.workingDirectory,
     DATA_DIRECTORY: values.dataDirectory,
     LOG_DIRECTORY: values.logDirectory,
-    API_PORT: values.apiPort ?? "5000"
+    API_PORT: values.apiPort ?? DEFAULT_API_PORT
   };
   for (const [name, value] of Object.entries(replacements)) {
     if (typeof value !== "string" || value.length === 0 || sensitivePattern.test(value)) {
@@ -94,7 +95,7 @@ export async function installService({
   executable,
   workingDirectory,
   templatePath,
-  apiPort = "5000",
+  apiPort = DEFAULT_API_PORT,
   dryRun = false,
   launchctlRunner = launchctl
 }) {

@@ -16,11 +16,12 @@ import {
   createOverlayWindowOptions,
   shouldHideWindowOnClose
 } from "./desktop-lifecycle.js";
+import { resolveBackendBaseUrl } from "./backend-config.js";
 import { isUuid } from "./input-validation.js";
 
 type JsonRecord = Record<string, unknown>;
 
-const backendBaseUrl = process.env.JARVIS_API_BASE_URL ?? "http://127.0.0.1:5000";
+const backendBaseUrl = resolveBackendBaseUrl();
 const backendBearer = process.env.JARVIS_LOCAL_BEARER;
 const clientHubPath = "/hubs/client";
 const taskApiPath = "/api/v1/tasks";

@@ -1,6 +1,7 @@
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_API_PORT,
   installService,
   smokeService,
   statusService,
@@ -55,7 +56,7 @@ export async function run(argv = process.argv.slice(2)) {
       executable: required(options, "executable"),
       workingDirectory: required(options, "working-directory"),
       templatePath: templateFor(required(options, "kind")),
-      apiPort: options["api-port"] ?? "5000",
+      apiPort: options["api-port"] ?? DEFAULT_API_PORT,
       dryRun: options.dryRun
     });
     console.log(JSON.stringify({ action, ...paths, dryRun: options.dryRun }));

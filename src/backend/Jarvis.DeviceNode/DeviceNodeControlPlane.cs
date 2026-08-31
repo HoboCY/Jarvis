@@ -12,7 +12,7 @@ public sealed class DeviceNodeOptions
 {
     public const string SectionName = "DeviceNode";
 
-    public string ApiBaseUrl { get; set; } = "http://127.0.0.1:5000";
+    public string ApiBaseUrl { get; set; } = "http://127.0.0.1:5004";
     public Guid DeviceId { get; set; }
     public string DeviceCredential { get; set; } = string.Empty;
     public string BootstrapBearer { get; set; } = string.Empty;

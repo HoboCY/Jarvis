@@ -522,6 +522,14 @@ done
     }
 
     [Fact]
+    public void DeviceNodeOptionsUseTheLocalApiPortWhenNoEndpointIsConfigured()
+    {
+        var options = new DeviceNodeOptions();
+
+        Assert.Equal("http://127.0.0.1:5004", options.ApiBaseUrl);
+    }
+
+    [Fact]
     public async System.Threading.Tasks.Task BootstrapLoadsTheDeviceIdentityFromSecureStorageWithoutRegisteringAgain()
     {
         var identity = new DeviceNodeIdentity(Guid.NewGuid(), "stored-device-credential");
