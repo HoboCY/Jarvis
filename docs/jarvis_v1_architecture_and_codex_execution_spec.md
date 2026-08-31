@@ -2047,8 +2047,14 @@ Dispatcher：
 ```text
 OpenAI:RealtimeModel
 OpenAI:RealtimeVoice
-OpenAI:ResponsesModel
-OpenAI:SummarizerModel
+Responses:Provider
+Responses:Model
+Responses:SummarizerModel
+Responses:TimeoutSeconds
+Responses:MaxTransientRetries
+Responses:PollingIntervalMs
+DeepSeek:ApiKey
+DeepSeek:BaseUrl
 Codex:BinaryPath
 Codex:ExpectedVersion
 ```
@@ -2479,4 +2485,3 @@ C# Device Node + Codex
 1. **语音与文字共享同一个逻辑 Conversation。**
 2. **长任务立即委派后台，不能阻塞实时交流。**
 3. **数据库中的 Conversation、Task、Approval 和 Notification 才是事实来源。**
-

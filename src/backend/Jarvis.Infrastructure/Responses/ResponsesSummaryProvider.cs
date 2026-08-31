@@ -1,12 +1,11 @@
 using Jarvis.Application.Responses;
-using Jarvis.Infrastructure.Realtime;
 using Microsoft.Extensions.Options;
 
 namespace Jarvis.Infrastructure.Responses;
 
-public sealed class OpenAiSummaryProvider(
+public sealed class ResponsesSummaryProvider(
     IResponsesRuntime runtime,
-    IOptions<OpenAiRealtimeOptions> options) : ISummaryProvider
+    IOptions<ResponsesOptions> options) : ISummaryProvider
 {
     public async Task<string> SummarizeAsync(
         SummaryRequest request,
@@ -47,10 +46,15 @@ public sealed class OpenAiSummaryProvider(
                 throw new InvalidOperationException("The Responses provider did not finish the conversation summary.");
             }
 
+            if (runtime is not IStoredResponsesRuntime storedRuntime)
+            {
+                throw new InvalidOperationException("The synchronous Responses provider returned a non-terminal summary result.");
+            }
+
             await Task.Delay(
-                Math.Clamp(options.Value.ResponsesPollingIntervalMs, 25, 5_000),
+                Math.Clamp(options.Value.PollingIntervalMs, 25, 5_000),
                 cancellationToken);
-            result = await runtime.RetrieveAsync(result.ResponseId, cancellationToken);
+            result = await storedRuntime.RetrieveAsync(result.ResponseId, cancellationToken);
         }
     }
 }

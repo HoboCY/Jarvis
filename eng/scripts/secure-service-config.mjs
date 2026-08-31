@@ -9,6 +9,9 @@ export async function writeApiConfiguration({
   openAiApiKey,
   openAiBaseUrl,
   databasePath,
+  responsesProvider = "OpenAI",
+  deepSeekApiKey,
+  deepSeekBaseUrl,
   fakeWorkerEnabled = false,
   fakeWorkerDelayMs = 50
 }) {
@@ -17,7 +20,17 @@ export async function writeApiConfiguration({
   assertSecret(openAiApiKey, "openAiApiKey", 1);
   assertUrl(openAiBaseUrl, "openAiBaseUrl");
   assertPath(databasePath, "databasePath");
-  return writeSecureJsonFile(join(resolve(directory), "appsettings.Production.json"), {
+  const provider = assertResponsesProvider(responsesProvider);
+  const defaultResponsesModel = provider === "DeepSeek" ? "deepseek-v4-flash" : "gpt-4.1-mini";
+  const responses = {
+    Provider: provider,
+    Model: defaultResponsesModel,
+    SummarizerModel: defaultResponsesModel,
+    TimeoutSeconds: 5,
+    MaxTransientRetries: 0,
+    PollingIntervalMs: 100
+  };
+  const configuration = {
     Authentication: { BearerToken: bearerToken },
     ConnectionStrings: { Jarvis: `Data Source=${databasePath}` },
     OpenAI: {
@@ -27,19 +40,21 @@ export async function writeApiConfiguration({
       RealtimeVoice: "alloy",
       AllowedVoices: ["alloy"],
       SafetyIdentifierSalt: "phase6-local-smoke-salt",
-      ResponsesModel: "gpt-4.1-mini",
-      SummarizerModel: "gpt-4.1-mini",
-      ClientSecretLifetimeSeconds: 600,
-      ResponsesTimeoutSeconds: 5,
-      ResponsesMaxTransientRetries: 0,
-      ResponsesPollingIntervalMs: 100
+      ClientSecretLifetimeSeconds: 600
     },
+    Responses: responses,
     Outbox: { Enabled: false },
     FakeWorker: { Enabled: fakeWorkerEnabled, DelayMs: fakeWorkerDelayMs },
     ResponsesWorker: { Enabled: false },
     SummaryWorker: { Enabled: false },
     Diagnostics: { RequireLoopback: true, Enabled: true }
-  });
+  };
+  if (provider === "DeepSeek") {
+    assertSecret(deepSeekApiKey, "deepSeekApiKey", 1);
+    assertUrl(deepSeekBaseUrl, "deepSeekBaseUrl");
+    configuration.DeepSeek = { ApiKey: deepSeekApiKey, BaseUrl: deepSeekBaseUrl };
+  }
+  return writeSecureJsonFile(join(resolve(directory), "appsettings.Production.json"), configuration);
 }
 
 /**
@@ -102,6 +117,15 @@ export async function writeSecureJsonFile(path, value) {
 
 function assertDirectory(value) {
   assertPath(value, "directory");
+}
+
+function assertResponsesProvider(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!/^openai$/i.test(normalized) && !/^deepseek$/i.test(normalized)) {
+    throw new Error("responsesProvider must be OpenAI or DeepSeek.");
+  }
+
+  return /^deepseek$/i.test(normalized) ? "DeepSeek" : "OpenAI";
 }
 
 function assertPath(value, name) {

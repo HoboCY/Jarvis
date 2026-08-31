@@ -1,11 +1,9 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using Jarvis.Application.Responses;
-using Jarvis.Infrastructure.Realtime;
 using Jarvis.Infrastructure.Responses;
 using Microsoft.Extensions.Options;
 #pragma warning disable OPENAI001
@@ -145,15 +143,13 @@ public sealed class OpenAiResponsesRuntimeTests
             RetryPolicy = new ClientRetryPolicy(0),
             Transport = new HttpClientPipelineTransport(new HttpClient(handler))
         });
-        var options = Options.Create(new OpenAiRealtimeOptions
+        var responsesOptions = Options.Create(new ResponsesOptions
         {
-            ApiKey = "test-key",
-            BaseUrl = "https://test.local/",
-            ResponsesModel = "gpt-test",
-            ResponsesTimeoutSeconds = timeoutSeconds,
-            ResponsesMaxTransientRetries = maxRetries
+            Model = "gpt-test",
+            TimeoutSeconds = timeoutSeconds,
+            MaxTransientRetries = maxRetries
         });
-        return new OpenAiResponsesRuntime(options, new PipelineResponsesClientFactory(pipeline));
+        return new OpenAiResponsesRuntime(responsesOptions, new PipelineResponsesClientFactory(pipeline));
     }
 
     private static HttpResponseMessage JsonResponse(HttpStatusCode status, string json) => new(status)

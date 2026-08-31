@@ -37,11 +37,15 @@ const dotnet = spawn("dotnet", [
     OpenAI__BaseUrl: "https://api.openai.com/",
     OpenAI__RealtimeModel: "gpt-4o-realtime-preview",
     OpenAI__RealtimeVoice: "alloy",
-    OpenAI__ResponsesModel: "gpt-4.1-mini",
-    OpenAI__SummarizerModel: "gpt-4.1-mini",
     OpenAI__AllowedVoices__0: "alloy",
     OpenAI__SafetyIdentifierSalt: "openapi-generation-salt",
-    OpenAI__ClientSecretLifetimeSeconds: "600"
+    OpenAI__ClientSecretLifetimeSeconds: "600",
+    Responses__Provider: "OpenAI",
+    Responses__Model: "gpt-4.1-mini",
+    Responses__SummarizerModel: "gpt-4.1-mini",
+    Responses__TimeoutSeconds: "60",
+    Responses__MaxTransientRetries: "2",
+    Responses__PollingIntervalMs: "250"
   }
 });
 

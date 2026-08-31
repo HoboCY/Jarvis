@@ -8,7 +8,7 @@ Phase 5 的代码范围已完成：纯文本 Task 现在可由 Control Plane 内
 
 ## 主要改动
 
-- Responses SDK 边界：Infrastructure 引入官方 `OpenAI` .NET SDK `2.13.0`，以窄 `IResponsesRuntime` 隔离 SDK DTO。create 使用配置模型、`background`、`store` 和稳定 `Idempotency-Key`；retrieve/cancel、超时、调用方取消及有限瞬时重试均在 adapter 内处理。实现参考官方 [Responses create](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)、[retrieve](https://developers.openai.com/api/reference/cli/resources/responses/methods/retrieve) 与 [OpenAI .NET SDK](https://www.nuget.org/packages/OpenAI/)。
+- Responses SDK 边界：Infrastructure 引入官方 `OpenAI` .NET SDK `2.13.0`，以窄 `IResponsesRuntime` create 端口隔离 SDK DTO，并以继承它的 `IStoredResponsesRuntime` 单独承载 OpenAI 的 retrieve/cancel 生命周期。日常 provider 由 `Responses:Provider` 选择：OpenAI 保留 background/store/retrieve/cancel；DeepSeek 指向 `https://api.deepseek.com`，create 强制 `background=false`、`store=false`，只接受同步终态，queued/in-progress/unknown 立即 fail closed，不伪造 retrieve/cancel。模型、超时、重试与轮询由 `Responses:*` 配置；摘要使用 `Responses:SummarizerModel`。所有 create 可携带稳定 `Idempotency-Key` 作为追踪字段，但无状态 DeepSeek 不依赖它恢复；DeepSeek 只对明确的 429 做有限重试，网络、超时和 5xx 不重试，OpenAI 保持原有瞬时重试。实现参考官方 [Responses create](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)、[retrieve](https://developers.openai.com/api/reference/cli/resources/responses/methods/retrieve) 与 [OpenAI .NET SDK](https://www.nuget.org/packages/OpenAI/)。
 - Responses Worker：只领取 `WorkerKind.Responses`，不读取 Device、allowed roots 或 Codex runtime。外部 Response ID 落 TaskExecution；queued/in-progress 可跨 scope 与过期 lease 恢复，cancel、failed、incomplete、unknown 均 fail closed，终态与 TaskEvent、Notification、Outbox 同事务写入。
 - 安全错误边界：provider 原始错误正文不进入 Task、TaskEvent、Notification 或 Outbox；用户只收到按有限状态映射的固定安全摘要。
 - 会话摘要：新增 `ConversationSummaries`、`Conversation.CurrentSummaryId`、连续 FromSequence/ToSequence 与累计摘要。新摘要包含旧累计摘要和新增消息；成功后原子切换 current summary 并写 `conversation.summaryUpdated`。provider 失败时不修改原消息或 CurrentSummaryId。
@@ -27,18 +27,15 @@ Phase 5 的代码范围已完成：纯文本 Task 现在可由 Control Plane 内
 dotnet restore Jarvis.sln --locked-mode                              PASS
 dotnet list Jarvis.sln package --vulnerable --include-transitive     PASS (12 projects, no vulnerable packages)
 dotnet build Jarvis.sln -c Release --no-restore                      PASS (0 warning, 0 error)
-dotnet test Jarvis.sln -c Release --no-build --no-restore            PASS (170/170)
-  Infrastructure 15; Domain 14; Architecture 4; DeviceNode 13;
-  Application 17; API integration 107
+dotnet test Jarvis.sln -c Release --no-build --no-restore            PASS (273/273)
+  Infrastructure 39; Domain 26; Architecture 4; DeviceNode 43;
+  Application 18; API integration 135; E2E 8
 dotnet format Jarvis.sln --no-restore --verify-no-changes            PASS
 dotnet ef migrations has-pending-model-changes ...                   PASS (no pending model changes)
 
-Phase 5 filtered tests                                               PASS (22/22)
-OpenAiResponsesRuntimeTests                                          PASS (11/11)
-Phase5MemoryApiTests                                                 PASS (5/5)
-Phase5ResponsesWorkerTests                                           PASS (9/9)
-Phase5RealtimeContextTests                                           PASS (3/3)
-Phase5SummaryWorkerTests                                             PASS (3/3)
+dotnet test tests/backend/Jarvis.Infrastructure.Tests/Jarvis.Infrastructure.Tests.csproj -c Release --no-build --no-restore PASS (39/39)
+dotnet test tests/backend/Jarvis.Api.IntegrationTests/Jarvis.Api.IntegrationTests.csproj -c Release --no-build --no-restore --filter FullyQualifiedName~Phase5ResponsesWorkerTests PASS (13/13)
+dotnet test tests/backend/Jarvis.Api.IntegrationTests/Jarvis.Api.IntegrationTests.csproj -c Release --no-build --no-restore --filter FullyQualifiedName~Phase5SummaryWorkerTests PASS (3/3)
 
 pnpm install --frozen-lockfile                                       PASS
 pnpm typecheck                                                       PASS
@@ -50,6 +47,7 @@ pnpm check:codex-schema                                              PASS (275 f
 pnpm check:codex-schema-canonical                                    PASS (275 files)
 pnpm test:codex-schema-canonical                                     PASS (2/2)
 pnpm check:secrets && pnpm test:secret-scan                          PASS (1/1)
+pnpm test:service-manifest                                           PASS (19/19)
 git diff --check                                                     PASS
 ```
 
@@ -58,7 +56,7 @@ git diff --check                                                     PASS
 ## 影响与回滚
 
 - API 影响：新增 `POST /api/v1/memory-facts` 与 `POST /api/v1/memory-facts/{memoryId}/retract`；写操作要求 Local bearer 与 `Idempotency-Key`。Router 对 deep reasoning、network research、summary 和 structured output 的执行方改为 Responses。
-- 配置影响：`OpenAI:ResponsesModel` 与 `OpenAI:SummarizerModel` 为启动必填；Responses timeout/retry/polling 和 Summary/Memory worker 使用后端配置并在启动时校验。API Key 仍只存在于可信后端。
+- 配置影响：`OpenAI` 只保留 Realtime/client-secret 所需的 ApiKey、BaseUrl、RealtimeModel、Voice、AllowedVoices、SafetyIdentifierSalt、ClientSecretLifetimeSeconds；`Responses:Provider/Model/SummarizerModel/TimeoutSeconds/MaxTransientRetries/PollingIntervalMs` 为启动必填。安全配置写入器按 provider 使用 `gpt-4.1-mini`（OpenAI）或 `deepseek-v4-flash`（DeepSeek）默认模型。选择 `DeepSeek` 时额外要求 `DeepSeek:ApiKey` 与 `DeepSeek:BaseUrl`；选择 `OpenAI` 时不要求 DeepSeek 凭据。API Key 仍只存在于可信后端。
 - 数据库影响：新增 ConversationSummary、MemoryFact、current summary 外键和 active memory 唯一约束。回滚前应先停止 Responses/Summary worker，确认没有 Running/Recovering Responses execution，再按相反顺序回退 Phase 5 migrations 并恢复旧二进制。
 - 运行回滚：若外部 provider 异常，可禁用 Responses/Summary worker；原 Task、Message、旧 Summary 和 MemoryFact 保留审计，不应通过改写原消息或放宽敏感策略恢复服务。
 

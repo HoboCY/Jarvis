@@ -4,8 +4,12 @@ The API and Device Node are independent launchd services. Their templates hold
 only bounded paths, the loopback API port, and non-secret environment values;
 bearers never appear in a plist, launchd argument, or log. API configuration is
 written by `writeApiConfiguration` as an owner-only (`0600`) production JSON
-file. It contains the required local bearer/OpenAI validation values and a
-database path outside the repository.
+file. It contains the required local bearer/OpenAI Realtime validation values,
+the selected `Responses` provider settings, and a database path outside the
+repository. When `Responses:Provider` is `DeepSeek`, the writer also requires
+and stores the owner-only `DeepSeek:ApiKey` and `DeepSeek:BaseUrl` values; its
+default daily and summary model is `deepseek-v4-flash` (OpenAI defaults remain
+`gpt-4.1-mini`).
 
 Device pairing is one-time: register with the local bearer, then persist the
 returned `{deviceId, deviceCredential}` identity in the selected secure store.

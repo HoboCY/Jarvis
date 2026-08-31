@@ -132,12 +132,32 @@ public static class InfrastructureServiceCollectionExtensions
             .Validate(options => options.AllowedVoices.Length > 0, "OpenAI:AllowedVoices must contain at least one server-approved voice.")
             .Validate(options => options.AllowedVoices.Contains(options.RealtimeVoice, StringComparer.OrdinalIgnoreCase), "OpenAI:RealtimeVoice must be in OpenAI:AllowedVoices.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.SafetyIdentifierSalt), "OpenAI:SafetyIdentifierSalt is required.")
-            .Validate(options => !string.IsNullOrWhiteSpace(options.ResponsesModel), "OpenAI:ResponsesModel is required.")
-            .Validate(options => !string.IsNullOrWhiteSpace(options.SummarizerModel), "OpenAI:SummarizerModel is required.")
             .Validate(options => options.ClientSecretLifetimeSeconds is >= 60 and <= 3600, "OpenAI:ClientSecretLifetimeSeconds must be between 60 and 3600.")
-            .Validate(options => options.ResponsesTimeoutSeconds is >= 1 and <= 600, "OpenAI:ResponsesTimeoutSeconds must be between 1 and 600.")
-            .Validate(options => options.ResponsesMaxTransientRetries is >= 0 and <= 3, "OpenAI:ResponsesMaxTransientRetries must be between 0 and 3.")
-            .Validate(options => options.ResponsesPollingIntervalMs is >= 25 and <= 5_000, "OpenAI:ResponsesPollingIntervalMs must be between 25 and 5000.")
+            .ValidateOnStart();
+        services
+            .AddOptions<ResponsesOptions>()
+            .Bind(configuration.GetSection(ResponsesOptions.SectionName))
+            .Validate(options => string.Equals(options.Provider, "OpenAI", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(options.Provider, "DeepSeek", StringComparison.OrdinalIgnoreCase), "Responses:Provider must be OpenAI or DeepSeek.")
+            .Validate(options => !string.IsNullOrWhiteSpace(options.Model), "Responses:Model is required.")
+            .Validate(options => !string.IsNullOrWhiteSpace(options.SummarizerModel), "Responses:SummarizerModel is required.")
+            .Validate(options => options.TimeoutSeconds is >= 1 and <= 600, "Responses:TimeoutSeconds must be between 1 and 600.")
+            .Validate(options => options.MaxTransientRetries is >= 0 and <= 3, "Responses:MaxTransientRetries must be between 0 and 3.")
+            .Validate(options => options.PollingIntervalMs is >= 25 and <= 5_000, "Responses:PollingIntervalMs must be between 25 and 5000.")
+            .ValidateOnStart();
+        services
+            .AddOptions<DeepSeekOptions>()
+            .Bind(configuration.GetSection(DeepSeekOptions.SectionName))
+            .Validate(options => !string.Equals(
+                    configuration[$"{ResponsesOptions.SectionName}:Provider"],
+                    "DeepSeek",
+                    StringComparison.OrdinalIgnoreCase)
+                || !string.IsNullOrWhiteSpace(options.ApiKey), "DeepSeek:ApiKey is required when Responses:Provider is DeepSeek.")
+            .Validate(options => !string.Equals(
+                    configuration[$"{ResponsesOptions.SectionName}:Provider"],
+                    "DeepSeek",
+                    StringComparison.OrdinalIgnoreCase)
+                || Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out _), "DeepSeek:BaseUrl must be an absolute URI when Responses:Provider is DeepSeek.")
             .ValidateOnStart();
         services.AddHttpClient<IRealtimeClientSecretProvider, OpenAiRealtimeClientSecretProvider>((serviceProvider, client) =>
         {
@@ -150,9 +170,18 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IRealtimeSafetyIdentifierProvider, ConfiguredRealtimeSafetyIdentifierProvider>();
         services.AddScoped<IRealtimeStore, EfRealtimeStore>();
         services.AddScoped<RealtimeService>();
-        services.AddSingleton<IResponsesClientFactory, OpenAiResponsesClientFactory>();
-        services.AddScoped<IResponsesRuntime, OpenAiResponsesRuntime>();
-        services.AddScoped<ISummaryProvider, OpenAiSummaryProvider>();
+        var responsesProvider = configuration[$"{ResponsesOptions.SectionName}:Provider"] ?? "OpenAI";
+        if (string.Equals(responsesProvider, "DeepSeek", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddSingleton<IResponsesClientFactory, DeepSeekResponsesClientFactory>();
+            services.AddScoped<IResponsesRuntime, DeepSeekResponsesRuntime>();
+        }
+        else
+        {
+            services.AddSingleton<IResponsesClientFactory, OpenAiResponsesClientFactory>();
+            services.AddScoped<IResponsesRuntime, OpenAiResponsesRuntime>();
+        }
+        services.AddScoped<ISummaryProvider, ResponsesSummaryProvider>();
         services.AddOptions<SummaryWorkerOptions>()
             .Bind(configuration.GetSection(SummaryWorkerOptions.SectionName))
             .Validate(options => options.PollingIntervalMs is >= 100 and <= 60_000, "SummaryWorker:PollingIntervalMs must be between 100 and 60000.")

@@ -1,12 +1,13 @@
 using System.Data;
 using System.Data.Common;
+using System.ClientModel;
 using System.Text.Json;
 using Jarvis.Application.Responses;
 using Jarvis.Domain.Notifications;
 using Jarvis.Domain.Tasks;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Observability;
-using Jarvis.Infrastructure.Realtime;
+using Jarvis.Infrastructure.Responses;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -36,13 +37,14 @@ public sealed class ResponsesWorker(
     IResponsesRuntime runtime,
     TimeProvider timeProvider,
     IOptions<ResponsesWorkerOptions> options,
-    IOptions<OpenAiRealtimeOptions> openAiOptions,
+    IOptions<ResponsesOptions> responsesOptions,
     ResponsesWorkerIdentity identity) : IDisposable
 {
     private const int MaxWriteAttempts = 5;
     private const string LeaseLostErrorCode = "responses_lease_lost";
     private const string ProviderFailedErrorCode = "responses_failed";
     private const string ProviderIncompleteErrorCode = "responses_incomplete";
+    private const string RecoveryUnsupportedErrorCode = "responses_recovery_unsupported";
     private readonly SemaphoreSlim processGate = new(1, 1);
 
     public string WorkerId => identity.Value;
@@ -224,27 +226,50 @@ public sealed class ResponsesWorker(
 
         if (prepared.CancellationRequested)
         {
-            result = execution.ExternalExecutionId is null
+            result = execution.ExternalExecutionId is null || runtime is not IStoredResponsesRuntime storedRuntime
                 ? new(null, ResponsesStatus.Cancelled)
-                : await runtime.CancelAsync(execution.ExternalExecutionId, cancellationToken);
+                : await storedRuntime.CancelAsync(execution.ExternalExecutionId, cancellationToken);
         }
         else if (string.IsNullOrWhiteSpace(execution.ExternalExecutionId))
         {
             var task = await db.Tasks.AsNoTracking().SingleAsync(item => item.Id == prepared.TaskId, cancellationToken);
-            result = await runtime.CreateAsync(
-                new ResponsesCreateRequest(
-                    ResolveModel(),
-                    "Return a concise, user-safe text result. Do not claim unperformed actions.",
-                    BuildInput(task.Goal, task.ExpectedOutput),
-                    CreateIdempotencyKey(prepared.TaskId, prepared.ExecutionId!.Value)),
-                cancellationToken);
+            try
+            {
+                result = await runtime.CreateAsync(
+                    new ResponsesCreateRequest(
+                        ResolveModel(),
+                        "Return a concise, user-safe text result. Do not claim unperformed actions.",
+                        BuildInput(task.Goal, task.ExpectedOutput),
+                        CreateIdempotencyKey(prepared.TaskId, prepared.ExecutionId!.Value)),
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (ClientResultException) when (runtime is not IStoredResponsesRuntime && !cancellationToken.IsCancellationRequested)
+            {
+                result = CreateSynchronousProviderFailureResult();
+            }
+            catch (HttpRequestException) when (runtime is not IStoredResponsesRuntime && !cancellationToken.IsCancellationRequested)
+            {
+                result = CreateSynchronousProviderFailureResult();
+            }
+            catch (OperationCanceledException) when (runtime is not IStoredResponsesRuntime && !cancellationToken.IsCancellationRequested)
+            {
+                result = CreateSynchronousProviderFailureResult();
+            }
+
             if (string.IsNullOrWhiteSpace(result.ResponseId))
             {
-                result = new(
-                    null,
-                    ResponsesStatus.Failed,
-                    ErrorCode: "responses_create_uncertain",
-                    ErrorMessage: "The Responses provider did not return a response id after create.");
+                if (result.ErrorCode != ProviderFailedErrorCode)
+                {
+                    result = new(
+                        null,
+                        ResponsesStatus.Failed,
+                        ErrorCode: "responses_create_uncertain",
+                        ErrorMessage: "The Responses provider did not return a response id after create.");
+                }
             }
             else
             {
@@ -253,7 +278,13 @@ public sealed class ResponsesWorker(
         }
         else
         {
-            result = await runtime.RetrieveAsync(execution.ExternalExecutionId, cancellationToken);
+            result = runtime is IStoredResponsesRuntime storedRuntime
+                ? await storedRuntime.RetrieveAsync(execution.ExternalExecutionId, cancellationToken)
+                : new(
+                    execution.ExternalExecutionId,
+                    ResponsesStatus.Failed,
+                    ErrorCode: RecoveryUnsupportedErrorCode,
+                    ErrorMessage: "The synchronous Responses provider cannot recover an external response.");
         }
 
         if (result.Status == ResponsesStatus.Unknown)
@@ -356,6 +387,8 @@ public sealed class ResponsesWorker(
                 ? ProviderIncompleteErrorCode
                 : result.ErrorCode == "responses_unknown_status"
                     ? "responses_unknown_status"
+                    : result.ErrorCode == RecoveryUnsupportedErrorCode
+                        ? RecoveryUnsupportedErrorCode
                     : ProviderFailedErrorCode;
             var message = SafeError(result);
             task.MarkFailed(errorCode, message, nowMs);
@@ -420,7 +453,7 @@ public sealed class ResponsesWorker(
             ? goal
             : $"Goal:\n{goal}\n\nExpected output:\n{expectedOutput}";
 
-    private string ResolveModel() => openAiOptions.Value.ResponsesModel;
+    private string ResolveModel() => responsesOptions.Value.Model;
 
     private async Task<bool> RenewLeaseAsync(Guid taskId, CancellationToken cancellationToken)
     {
@@ -460,6 +493,13 @@ public sealed class ResponsesWorker(
             ? "The Responses provider returned an unknown status."
             : "The Responses provider failed to complete the task.";
     }
+
+    private static ResponsesResult CreateSynchronousProviderFailureResult() =>
+        new(
+            null,
+            ResponsesStatus.Failed,
+            ErrorCode: ProviderFailedErrorCode,
+            ErrorMessage: "The Responses provider failed to complete the task.");
 
     private static bool IsWriteRace(Exception exception)
     {

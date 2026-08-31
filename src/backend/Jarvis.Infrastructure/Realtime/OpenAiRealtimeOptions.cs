@@ -17,14 +17,4 @@ public sealed class OpenAiRealtimeOptions
     public int ClientSecretLifetimeSeconds { get; set; } = 600;
 
     public string[] AllowedVoices { get; set; } = [];
-
-    public string ResponsesModel { get; set; } = string.Empty;
-
-    public string SummarizerModel { get; set; } = string.Empty;
-
-    public int ResponsesTimeoutSeconds { get; set; } = 60;
-
-    public int ResponsesMaxTransientRetries { get; set; } = 2;
-
-    public int ResponsesPollingIntervalMs { get; set; } = 250;
 }

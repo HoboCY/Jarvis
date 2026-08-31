@@ -31,6 +31,17 @@ test("service configuration is written with owner-only permissions and no plist 
     assert.match(contents, /ConnectionStrings/);
     assert.equal(contents.includes("JARVIS_LOCAL_BEARER"), false);
     assert.equal(contents.includes("/usr/bin/security"), false);
+    const configuration = JSON.parse(contents);
+    assert.deepEqual(configuration.Responses, {
+      Provider: "OpenAI",
+      Model: "gpt-4.1-mini",
+      SummarizerModel: "gpt-4.1-mini",
+      TimeoutSeconds: 5,
+      MaxTransientRetries: 0,
+      PollingIntervalMs: 100
+    });
+    assert.equal(configuration.OpenAI.ResponsesModel, undefined);
+    assert.equal(configuration.OpenAI.SummarizerModel, undefined);
 
     const codexHome = join(physicalRoot, "codex-home");
     const runtimePath = await writeDeviceRuntimeConfiguration({
@@ -59,6 +70,54 @@ test("service configuration is written with owner-only permissions and no plist 
     assert.equal((await stat(keychainRuntimePath)).mode & 0o777, 0o600);
     assert.equal((await readFile(keychainRuntimePath, "utf8")).includes("DeviceCredential"), false);
     assert.equal((await stat(keychainCodexHome)).mode & 0o777, 0o700);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("secure service configuration writes DeepSeek credentials only when selected", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jarvis-secure-config-deepseek-"));
+  try {
+    const apiPath = await writeApiConfiguration({
+      directory: root,
+      bearerToken: "t".repeat(64),
+      openAiApiKey: "phase6-realtime-key",
+      openAiBaseUrl: "https://api.openai.com/",
+      databasePath: join(root, "jarvis.db"),
+      responsesProvider: "DeepSeek",
+      deepSeekApiKey: "phase6-deepseek-key",
+      deepSeekBaseUrl: "https://api.deepseek.com/"
+    });
+    const configuration = JSON.parse(await readFile(apiPath, "utf8"));
+    assert.deepEqual(configuration.Responses, {
+      Provider: "DeepSeek",
+      Model: "deepseek-v4-flash",
+      SummarizerModel: "deepseek-v4-flash",
+      TimeoutSeconds: 5,
+      MaxTransientRetries: 0,
+      PollingIntervalMs: 100
+    });
+    assert.deepEqual(configuration.DeepSeek, {
+      ApiKey: "phase6-deepseek-key",
+      BaseUrl: "https://api.deepseek.com/"
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("secure service configuration rejects missing selected DeepSeek credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jarvis-secure-config-deepseek-invalid-"));
+  try {
+    await assert.rejects(() => writeApiConfiguration({
+      directory: root,
+      bearerToken: "t".repeat(64),
+      openAiApiKey: "phase6-realtime-key",
+      openAiBaseUrl: "https://api.openai.com/",
+      databasePath: join(root, "jarvis.db"),
+      responsesProvider: "DeepSeek",
+      deepSeekBaseUrl: "https://api.deepseek.com/"
+    }), /deepSeekApiKey/i);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

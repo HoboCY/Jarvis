@@ -78,11 +78,17 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             ["OpenAI:BaseUrl"] = "https://api.openai.com/",
             ["OpenAI:RealtimeModel"] = "gpt-4o-realtime-preview",
             ["OpenAI:RealtimeVoice"] = "alloy",
-            ["OpenAI:ResponsesModel"] = "gpt-4.1-mini",
-            ["OpenAI:SummarizerModel"] = "gpt-4.1-mini",
             ["OpenAI:AllowedVoices:0"] = "alloy",
             ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
             ["OpenAI:ClientSecretLifetimeSeconds"] = "600",
+            ["Responses:Provider"] = "OpenAI",
+            ["Responses:Model"] = "gpt-4.1-mini",
+            ["Responses:SummarizerModel"] = "gpt-4.1-mini",
+            ["Responses:TimeoutSeconds"] = "60",
+            ["Responses:MaxTransientRetries"] = "2",
+            ["Responses:PollingIntervalMs"] = "250",
+            ["DeepSeek:ApiKey"] = "test-deepseek-key",
+            ["DeepSeek:BaseUrl"] = "https://api.deepseek.com/",
             ["Diagnostics:AllowTestServerLoopback"] = "true"
         };
         if (_workerDeviceId is not null)

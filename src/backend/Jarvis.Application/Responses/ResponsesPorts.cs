@@ -37,7 +37,10 @@ public interface IResponsesRuntime
     Task<ResponsesResult> CreateAsync(
         ResponsesCreateRequest request,
         CancellationToken cancellationToken);
+}
 
+public interface IStoredResponsesRuntime : IResponsesRuntime
+{
     Task<ResponsesResult> RetrieveAsync(
         string responseId,
         CancellationToken cancellationToken);

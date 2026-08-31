@@ -295,6 +295,132 @@ public sealed class Phase5ResponsesWorkerTests
         Assert.True(task.LeaseExpiresAtMs > clock.GetUtcNow().ToUnixTimeMilliseconds() + 60_000);
     }
 
+    [Fact]
+    public async Task SynchronousProviderCompletesAndPersistsItsExternalIdWithoutPolling()
+    {
+        var runtime = new SynchronousResponsesRuntime();
+        using var factory = new TestApplicationFactory(null, true, null, null, null, null, null, null, runtime);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", factory.Token);
+        var conversationId = await CreateConversationAsync(client);
+        var taskId = await CreateResponsesTaskAsync(client, conversationId);
+
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(await scope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        var task = await client.GetFromJsonAsync<JsonElement>($"/api/v1/tasks/{taskId}");
+        Assert.Equal("succeeded", task.GetProperty("status").GetString());
+        Assert.Equal("deepseek_sync_1", task.GetProperty("execution").GetProperty("externalExecutionId").GetString());
+        Assert.Equal(1, runtime.CreateCalls);
+    }
+
+    [Fact]
+    public async Task SynchronousProviderCreateExceptionFailsClosedWithoutRetryingOrLeakingProviderDetails()
+    {
+        var runtime = new ThrowingSynchronousResponsesRuntime();
+        using var factory = new TestApplicationFactory(null, true, null, null, null, null, null, null, runtime);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", factory.Token);
+        var conversationId = await CreateConversationAsync(client);
+        var taskId = await CreateResponsesTaskAsync(client, conversationId);
+
+        await using (var firstScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(await firstScope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        await using (var secondScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.False(await secondScope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        var task = await client.GetFromJsonAsync<JsonElement>($"/api/v1/tasks/{taskId}");
+        Assert.Equal("failed", task.GetProperty("status").GetString());
+        Assert.Equal("responses_failed", task.GetProperty("errorCode").GetString());
+        Assert.Equal("The Responses provider failed to complete the task.", task.GetProperty("errorMessage").GetString());
+        Assert.DoesNotContain("provider secret diagnostics", task.GetProperty("errorMessage").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, runtime.CreateCalls);
+    }
+
+    [Fact]
+    public async Task SynchronousProviderFailsClosedForAnExternalIdLeftByACrash()
+    {
+        var clock = new AdvancingTimeProvider(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var runtime = new SynchronousResponsesRuntime();
+        using var factory = new TestApplicationFactory(null, true, null, clock, null, null, null, null, runtime);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", factory.Token);
+        var conversationId = await CreateConversationAsync(client);
+        var taskId = await CreateResponsesTaskAsync(client, conversationId);
+
+        await using (var seedScope = factory.Services.CreateAsyncScope())
+        {
+            var db = seedScope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+            var task = await db.Tasks.SingleAsync(item => item.Id == taskId);
+            var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
+            task.Assign("crashed-worker", nowMs - 1, nowMs);
+            task.Start(nowMs);
+            var execution = Jarvis.Domain.Tasks.TaskExecution.Create(
+                Guid.CreateVersion7(), task.Id, null, Jarvis.Domain.Tasks.WorkerKind.Responses, nowMs);
+            execution.Start(nowMs);
+            execution.SetExternalExecutionId("deepseek_crash_window");
+            db.TaskExecutions.Add(execution);
+            await db.SaveChangesAsync();
+        }
+
+        await using (var workerScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(await workerScope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        var taskAfterRecovery = await client.GetFromJsonAsync<JsonElement>($"/api/v1/tasks/{taskId}");
+        Assert.Equal("failed", taskAfterRecovery.GetProperty("status").GetString());
+        Assert.Equal("responses_recovery_unsupported", taskAfterRecovery.GetProperty("errorCode").GetString());
+        Assert.Equal("deepseek_crash_window", taskAfterRecovery.GetProperty("execution").GetProperty("externalExecutionId").GetString());
+        Assert.Equal(0, runtime.CreateCalls);
+    }
+
+    [Fact]
+    public async Task SynchronousProviderConfirmsCancellationLocallyForAPersistedExternalId()
+    {
+        var clock = new AdvancingTimeProvider(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        var runtime = new SynchronousResponsesRuntime();
+        using var factory = new TestApplicationFactory(null, true, null, clock, null, null, null, null, runtime);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", factory.Token);
+        var conversationId = await CreateConversationAsync(client);
+        var taskId = await CreateResponsesTaskAsync(client, conversationId);
+
+        await using (var seedScope = factory.Services.CreateAsyncScope())
+        {
+            var db = seedScope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+            var task = await db.Tasks.SingleAsync(item => item.Id == taskId);
+            var workerId = seedScope.ServiceProvider.GetRequiredService<ResponsesWorker>().WorkerId;
+            var nowMs = clock.GetUtcNow().ToUnixTimeMilliseconds();
+            task.Assign(workerId, nowMs + 60_000, nowMs);
+            task.Start(nowMs);
+            task.RequestCancellation(nowMs);
+            var execution = Jarvis.Domain.Tasks.TaskExecution.Create(
+                Guid.CreateVersion7(), task.Id, null, Jarvis.Domain.Tasks.WorkerKind.Responses, nowMs);
+            execution.Start(nowMs);
+            execution.SetExternalExecutionId("deepseek_cancel_window");
+            db.TaskExecutions.Add(execution);
+            await db.SaveChangesAsync();
+        }
+
+        await using (var workerScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(await workerScope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        var taskAfterCancellation = await client.GetFromJsonAsync<JsonElement>($"/api/v1/tasks/{taskId}");
+        Assert.Equal("cancelled", taskAfterCancellation.GetProperty("status").GetString());
+        Assert.Equal("deepseek_cancel_window", taskAfterCancellation.GetProperty("execution").GetProperty("externalExecutionId").GetString());
+        Assert.Equal(0, runtime.CreateCalls);
+    }
+
     private static async Task<Guid> CreateResponsesTaskAsync(HttpClient client, Guid conversationId)
     {
         using var create = new HttpRequestMessage(HttpMethod.Post, "/api/v1/tasks")
@@ -335,15 +461,31 @@ public sealed class Phase5ResponsesWorkerTests
             CreateCalls++;
             return Task.FromResult(new ResponsesResult("resp_test_1", ResponsesStatus.Completed, "测试总结"));
         }
-
-        public Task<ResponsesResult> RetrieveAsync(string responseId, CancellationToken cancellationToken) =>
-            Task.FromResult(new ResponsesResult(responseId, ResponsesStatus.Completed, "测试总结"));
-
-        public Task<ResponsesResult> CancelAsync(string responseId, CancellationToken cancellationToken) =>
-            Task.FromResult(new ResponsesResult(responseId, ResponsesStatus.Cancelled));
     }
 
-    private sealed class QueueThenCompleteResponsesRuntime : IResponsesRuntime
+    private sealed class SynchronousResponsesRuntime : IResponsesRuntime
+    {
+        public int CreateCalls { get; private set; }
+
+        public Task<ResponsesResult> CreateAsync(ResponsesCreateRequest request, CancellationToken cancellationToken)
+        {
+            CreateCalls++;
+            return Task.FromResult(new ResponsesResult("deepseek_sync_1", ResponsesStatus.Completed, "同步结果"));
+        }
+    }
+
+    private sealed class ThrowingSynchronousResponsesRuntime : IResponsesRuntime
+    {
+        public int CreateCalls { get; private set; }
+
+        public Task<ResponsesResult> CreateAsync(ResponsesCreateRequest request, CancellationToken cancellationToken)
+        {
+            CreateCalls++;
+            throw new HttpRequestException("provider secret diagnostics");
+        }
+    }
+
+    private sealed class QueueThenCompleteResponsesRuntime : IStoredResponsesRuntime
     {
         public int CreateCalls { get; private set; }
 
@@ -365,7 +507,7 @@ public sealed class Phase5ResponsesWorkerTests
             Task.FromResult(new ResponsesResult(responseId, ResponsesStatus.Cancelled));
     }
 
-    private sealed class QueueResponsesRuntime : IResponsesRuntime
+    private sealed class QueueResponsesRuntime : IStoredResponsesRuntime
     {
         public int CreateCalls { get; private set; }
 
@@ -390,14 +532,9 @@ public sealed class Phase5ResponsesWorkerTests
         public Task<ResponsesResult> CreateAsync(ResponsesCreateRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new ResponsesResult("resp_terminal", status, ErrorCode: errorCode, ErrorMessage: errorMessage));
 
-        public Task<ResponsesResult> RetrieveAsync(string responseId, CancellationToken cancellationToken) =>
-            Task.FromResult(new ResponsesResult(responseId, status, ErrorCode: errorCode, ErrorMessage: errorMessage));
-
-        public Task<ResponsesResult> CancelAsync(string responseId, CancellationToken cancellationToken) =>
-            Task.FromResult(new ResponsesResult(responseId, ResponsesStatus.Cancelled));
     }
 
-    private sealed class QueueThenCancelResponsesRuntime : IResponsesRuntime
+    private sealed class QueueThenCancelResponsesRuntime : IStoredResponsesRuntime
     {
         public int CreateCalls { get; private set; }
 
@@ -419,7 +556,7 @@ public sealed class Phase5ResponsesWorkerTests
         }
     }
 
-    private sealed class ExpiredLeaseResponsesRuntime : IResponsesRuntime
+    private sealed class ExpiredLeaseResponsesRuntime : IStoredResponsesRuntime
     {
         public int CreateCalls { get; private set; }
 

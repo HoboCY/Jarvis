@@ -4,8 +4,8 @@ using Jarvis.Application.Responses;
 using Jarvis.Domain.Conversations;
 using Jarvis.Domain.Outbox;
 using Jarvis.Infrastructure.Data;
-using Jarvis.Infrastructure.Realtime;
 using Jarvis.Infrastructure.Observability;
+using Jarvis.Infrastructure.Responses;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -18,7 +18,7 @@ public sealed class SummaryWorker(
     JarvisDbContext db,
     ISummaryProvider provider,
     TimeProvider timeProvider,
-    IOptions<OpenAiRealtimeOptions> openAiOptions,
+    IOptions<ResponsesOptions> responsesOptions,
     IOptions<SummaryWorkerOptions> options) : IDisposable
 {
     private readonly SemaphoreSlim processGate = new(1, 1);
@@ -100,7 +100,7 @@ public sealed class SummaryWorker(
                 input.FromSequence,
                 input.ToSequence,
                 summaryText,
-                openAiOptions.Value.SummarizerModel,
+                responsesOptions.Value.SummarizerModel,
                 nowMs);
             db.ConversationSummaries.Add(summary);
             conversation.SetCurrentSummary(summary.Id);

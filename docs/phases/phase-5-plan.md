@@ -6,8 +6,8 @@
 
 ## 本阶段范围
 
-- 引入官方 `OpenAI` .NET SDK 的 Responses Client，并固定当前稳定包版本；新增窄 `IResponsesRuntime` 端口和 Infrastructure adapter。模型由 `OpenAI:ResponsesModel` / `OpenAI:SummarizerModel` 配置，标准 API Key 只留在可信后端。
-- Responses 调用使用后台响应、持久化查询、取消、超时、有限瞬时重试和稳定 Idempotency-Key。TaskExecution 保存 OpenAI Response ID；Jarvis TaskId 仍是用户可见主 ID。
+- 引入官方 `OpenAI` .NET SDK 的 Responses Client，并固定当前稳定包版本；新增窄 `IResponsesRuntime` create 端口、可选 `IStoredResponsesRuntime` 生命周期端口和 Infrastructure adapter。日常 Responses provider/model/timeout/retry/polling 由 `Responses:*` 配置，摘要使用 `Responses:SummarizerModel`；标准 OpenAI 与 DeepSeek API Key 只留在可信后端。
+- OpenAI Responses 调用使用后台响应、持久化查询、取消、超时、有限瞬时重试和稳定 Idempotency-Key；DeepSeek create 使用同步终态，非终态立即 fail closed，不依赖服务端 retrieve/cancel 或幂等恢复。TaskExecution 保存 provider Response ID；Jarvis TaskId 仍是用户可见主 ID。
 - 新增独立 Responses Worker，只领取 `WorkerKind.Responses` 的任务，不依赖 Device 注册、DeviceHub、Codex 或 allowed roots；Fake Worker 收窄为只执行 Internal 任务。
 - Responses Worker 以数据库状态恢复 queued/running/cancellationRequested 任务；创建、查询、取消和终态回写均经 lease/fencing 检查。成功或失败时与 TaskEvent、Notification、Outbox 同事务写入。
 - 新增 `ConversationSummaries` 领域实体、EF 映射、关系约束和 migration；摘要只覆盖已完成且尚未被当前摘要覆盖的消息，成功后原子更新 `Conversation.CurrentSummaryId` 并写 `conversation.summaryUpdated` Outbox。
