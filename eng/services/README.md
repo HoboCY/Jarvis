@@ -1,5 +1,27 @@
 # macOS launchd services
 
+## Local API configuration
+
+For local development, copy the safe template and start only the API:
+
+```sh
+cp .env.example .env
+chmod 600 .env
+dotnet run --project src/backend/Jarvis.Api --urls http://127.0.0.1:5004
+```
+
+Fill the blank required secrets in `.env` before starting the API.
+
+Only `Jarvis.Api` reads `.env`, from the process working directory. Desktop and
+Renderer do not load this file. The file is ignored by Git and must never be
+committed. Existing process environment variables, command-line arguments, and
+`appsettings*.json` values take precedence; `.env` only supplies missing
+configuration. The `--urls` argument remains the way to select the local API
+port.
+
+Production `appsettings.Production.json` and the launchd service configuration
+continue to work unchanged.
+
 The API and Device Node are independent launchd services. Their templates hold
 only bounded paths, the loopback API port, and non-secret environment values;
 bearers never appear in a plist, launchd argument, or log. API configuration is

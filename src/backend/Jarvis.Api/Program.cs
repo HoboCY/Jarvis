@@ -25,6 +25,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
+LocalEnvironmentFile.ApplyMissing(builder.Configuration);
 
 builder.Logging.ClearProviders();
 builder.Logging.AddJarvisJsonConsole();
