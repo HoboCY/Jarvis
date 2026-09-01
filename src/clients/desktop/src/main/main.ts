@@ -18,8 +18,15 @@ import {
 } from "./desktop-lifecycle.js";
 import { resolveBackendBaseUrl } from "./backend-config.js";
 import { isUuid } from "./input-validation.js";
+import { desktopSignalRLogLevel } from "./signalr-config.js";
 
 type JsonRecord = Record<string, unknown>;
+type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
+type BackendConnectionState = {
+  state: BackendConnectionStateValue;
+  revision: number;
+  error?: string;
+};
 
 const backendBaseUrl = resolveBackendBaseUrl();
 const backendBearer = process.env.JARVIS_LOCAL_BEARER;
@@ -48,7 +55,26 @@ let signalRConnection: HubConnection | undefined;
 let rendererEntryUrl: string | undefined;
 let isQuitting = false;
 let overlayHideTimer: NodeJS.Timeout | undefined;
+let backendConnectionState: BackendConnectionState = {
+  state: backendBearer && backendBearer.length >= 32 ? "connecting" : "disconnected",
+  revision: 0
+};
 const notificationProjectionCache = new NotificationProjectionCache();
+
+function publishBackendConnectionState(
+  window: BrowserWindow,
+  state: BackendConnectionStateValue,
+  error?: Error
+): void {
+  backendConnectionState = {
+    state,
+    revision: backendConnectionState.revision + 1,
+    ...(error?.message ? { error: error.message } : {})
+  };
+  if (!window.isDestroyed()) {
+    window.webContents.send("backend:connectionState", backendConnectionState);
+  }
+}
 
 async function writeDesktopSmokeMarker(window: BrowserWindow): Promise<void> {
   const markerPath = process.env.JARVIS_DESKTOP_SMOKE_MARKER;
@@ -436,17 +462,9 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
     .withUrl(new URL(clientHubPath, backendBaseUrl).toString(), {
       accessTokenFactory: () => backendBearer
     })
+    .configureLogging(desktopSignalRLogLevel)
     .withAutomaticReconnect()
     .build();
-
-  const sendConnectionState = (state: "connected" | "reconnecting" | "disconnected", error?: Error): void => {
-    if (!window.isDestroyed()) {
-      window.webContents.send("backend:connectionState", {
-        state,
-        error: error?.message
-      });
-    }
-  };
 
   for (const eventType of [
     "task.updated",
@@ -471,12 +489,12 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
     });
   }
 
-  connection.onreconnecting(error => sendConnectionState("reconnecting", error));
-  connection.onreconnected(() => sendConnectionState("connected"));
-  connection.onclose(error => sendConnectionState("disconnected", error));
+  connection.onreconnecting(error => publishBackendConnectionState(window, "reconnecting", error));
+  connection.onreconnected(() => publishBackendConnectionState(window, "connected"));
+  connection.onclose(error => publishBackendConnectionState(window, "disconnected", error));
   void connection.start()
-    .then(() => sendConnectionState("connected"))
-    .catch(error => sendConnectionState("disconnected", error instanceof Error ? error : undefined));
+    .then(() => publishBackendConnectionState(window, "connected"))
+    .catch(error => publishBackendConnectionState(window, "disconnected", error instanceof Error ? error : undefined));
   return connection;
 }
 
@@ -485,6 +503,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.whenReady().then(() => {
     ipcMain.handle("app:getVersion", () => app.getVersion());
+    ipcMain.handle("backend:getConnectionState", () => backendConnectionState);
     ipcMain.handle("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
     ipcMain.handle("backend:getDesktopDevice", () =>
       requestBackend("/api/v1/realtime/desktop-device", "POST", {}, randomUUID()));

@@ -35,19 +35,15 @@ public sealed class OpenAiRealtimeClientSecretProvider(
                         new TranscriptionOptions("gpt-4o-mini-transcribe"),
                         new TurnDetectionOptions("server_vad", true, true)),
                     new OutputAudioOptions(voice)),
-                new TracingOptions(
-                    "jarvis-realtime",
-                    null,
-                    new Dictionary<string, string>
-                    {
-                        ["safety_identifier"] = request.SafetyIdentifier
-                    })));
+                ResolveTracing(settings, request.SafetyIdentifier)));
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/realtime/client_secrets")
+        using var httpRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            ResolveRealtimeEndpoint(settings.BaseUrl, "client_secrets"))
         {
             Content = JsonContent.Create(body, options: JsonOptions)
         };
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
+        ApplyAuthentication(httpRequest, settings);
         using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
@@ -68,7 +64,40 @@ public sealed class OpenAiRealtimeClientSecretProvider(
             ToUnixMilliseconds(payload.ExpiresAt.Value),
             payload.Session.Id,
             payload.Session.Model ?? settings.RealtimeModel,
-            payload.Session.Voice ?? voice);
+            payload.Session.Voice ?? voice,
+            ResolveRealtimeEndpoint(settings.BaseUrl, "calls").ToString());
+    }
+
+    private static void ApplyAuthentication(HttpRequestMessage request, OpenAiRealtimeOptions settings)
+    {
+        if (string.Equals(
+                settings.AuthenticationMode,
+                OpenAiRealtimeOptions.ApiKeyAuthentication,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            request.Headers.TryAddWithoutValidation("api-key", settings.ApiKey);
+            return;
+        }
+
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
+    }
+
+    private static Uri ResolveRealtimeEndpoint(string baseUrl, string resource)
+    {
+        var baseUri = new Uri(baseUrl, UriKind.Absolute);
+        var path = baseUri.AbsolutePath.TrimEnd('/');
+        if (!path.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+        {
+            path += "/v1";
+        }
+
+        var builder = new UriBuilder(baseUri)
+        {
+            Path = $"{path}/realtime/{resource}",
+            Query = string.Empty,
+            Fragment = string.Empty
+        };
+        return builder.Uri;
     }
 
     private static string ResolveVoice(OpenAiRealtimeOptions settings, string? preferredVoice)
@@ -81,6 +110,24 @@ public sealed class OpenAiRealtimeClientSecretProvider(
         }
 
         return voice;
+    }
+
+    private static TracingOptions? ResolveTracing(OpenAiRealtimeOptions settings, string safetyIdentifier)
+    {
+        if (new Uri(settings.BaseUrl, UriKind.Absolute).Host.EndsWith(
+                ".openai.azure.com",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return new(
+            "jarvis-realtime",
+            null,
+            new Dictionary<string, string>
+            {
+                ["safety_identifier"] = safetyIdentifier
+            });
     }
 
     private static long ToUnixMilliseconds(JsonElement value)
@@ -114,7 +161,7 @@ public sealed class OpenAiRealtimeClientSecretProvider(
         [property: JsonPropertyName("tools")] IReadOnlyList<RealtimeTool> Tools,
         [property: JsonPropertyName("tool_choice")] string ToolChoice,
         [property: JsonPropertyName("audio")] AudioOptions Audio,
-        [property: JsonPropertyName("tracing")] TracingOptions Tracing);
+        [property: JsonPropertyName("tracing")] TracingOptions? Tracing);
 
     private sealed record AudioOptions(
         [property: JsonPropertyName("input")] InputAudioOptions Input,

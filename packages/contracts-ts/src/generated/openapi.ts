@@ -1178,6 +1178,7 @@ export interface components {
             expiresAt: number | string;
             model: string;
             voice: string;
+            webRtcUrl: string;
             /** Format: int64 */
             contextVersion: number | string;
             /** Format: int64 */

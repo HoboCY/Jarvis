@@ -126,6 +126,9 @@ public static class InfrastructureServiceCollectionExtensions
             .AddOptions<OpenAiRealtimeOptions>()
             .Bind(configuration.GetSection(OpenAiRealtimeOptions.SectionName))
             .Validate(options => !string.IsNullOrWhiteSpace(options.ApiKey), "OpenAI:ApiKey is required.")
+            .Validate(options => string.Equals(options.AuthenticationMode, OpenAiRealtimeOptions.BearerAuthentication, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(options.AuthenticationMode, OpenAiRealtimeOptions.ApiKeyAuthentication, StringComparison.OrdinalIgnoreCase),
+                "OpenAI:AuthenticationMode must be Bearer or ApiKey.")
             .Validate(options => Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out _), "OpenAI:BaseUrl must be an absolute URI.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.RealtimeModel), "OpenAI:RealtimeModel is required.")
             .Validate(options => !string.IsNullOrWhiteSpace(options.RealtimeVoice), "OpenAI:RealtimeVoice is required.")

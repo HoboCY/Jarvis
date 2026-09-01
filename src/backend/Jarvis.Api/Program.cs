@@ -28,7 +28,7 @@ var builder = WebApplication.CreateBuilder(args);
 LocalEnvironmentFile.ApplyMissing(builder.Configuration);
 
 builder.Logging.ClearProviders();
-builder.Logging.AddJarvisJsonConsole();
+builder.Logging.AddJarvisConsole(builder.Configuration);
 builder.Services.AddJarvisTelemetry(builder.Configuration, "jarvis.api", includeAspNetCoreInstrumentation: true);
 builder.Services
     .AddOptions<DiagnosticsOptions>()

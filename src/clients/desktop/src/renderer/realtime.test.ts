@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { NormalizedRealtimeEvent, RealtimeSession } from "@jarvis/realtime-agent";
 import { ensureConversation } from "./conversation-flow.js";
+import { canSendRealtimeText, RealtimeConnectGate } from "./realtime-connect-flow.js";
 import {
   DesktopRealtimeController,
   mapRealtimeCancelResponse,
@@ -21,6 +22,40 @@ test("ensureConversation creates once and lets the first connect continue", asyn
 
   assert.equal(result, created);
   assert.equal(createCalls, 1);
+});
+
+test("Realtime connect gate collapses concurrent connect attempts into one session bootstrap", async () => {
+  const gate = new RealtimeConnectGate();
+  let release: (() => void) | undefined;
+  let connectCalls = 0;
+  const first = gate.run(async () => {
+    connectCalls++;
+    await new Promise<void>(resolve => {
+      release = resolve;
+    });
+  });
+  const second = gate.run(async () => {
+    connectCalls++;
+  });
+
+  await Promise.resolve();
+
+  assert.equal(first, second);
+  assert.equal(connectCalls, 1);
+  assert.equal(gate.isRunning, true);
+
+  release?.();
+  await first;
+
+  assert.equal(gate.isRunning, false);
+});
+
+test("typed Realtime input is accepted only by one fully connected session", () => {
+  assert.equal(canSendRealtimeText("disconnected", false), false);
+  assert.equal(canSendRealtimeText("connecting", true), false);
+  assert.equal(canSendRealtimeText("degraded", false), false);
+  assert.equal(canSendRealtimeText("connected", true), false);
+  assert.equal(canSendRealtimeText("connected", false), true);
 });
 
 test("maps full backend task responses to the strict Realtime status contract", () => {
@@ -103,6 +138,7 @@ class FakeTransport {
 class FakeSession {
   public readonly transport = new FakeTransport();
   public readonly calls: string[] = [];
+  public connectInput: unknown;
   public history: unknown[] = [];
   private readonly listeners = new Map<string, Listener[]>();
 
@@ -112,7 +148,8 @@ class FakeSession {
     private readonly deferSessionCreated = false
   ) {}
 
-  public async connect(): Promise<void> {
+  public async connect(input?: unknown): Promise<void> {
+    this.connectInput = input;
     if (this.connectError) {
       throw this.connectError;
     }
@@ -181,12 +218,18 @@ test("Desktop controller uses the injected session and preserves typed persisten
     await controller.connect({
       realtimeSessionId: "00000000-0000-0000-0000-000000000001",
       clientSecret: "ek_scripted",
+      webRtcUrl: "https://example.openai.azure.com/openai/v1/realtime/calls",
       model: "model",
       voice: "voice",
       instructions: "server context with preferences"
     });
     assert.equal(controller.status, "connected");
     assert.equal(agentInstructions, "server context with preferences");
+    assert.deepEqual(fakeSession.connectInput, {
+      apiKey: "ek_scripted",
+      model: "model",
+      url: "https://example.openai.azure.com/openai/v1/realtime/calls"
+    });
     assert.deepEqual(lifecycle, ["connected:external-scripted"]);
 
     await controller.sendTyped("继续", async text => {

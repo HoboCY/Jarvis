@@ -68,6 +68,7 @@ cp -R "$app_source" "$installed_app"
 
 JARVIS_DESKTOP_SMOKE_MARKER="$marker_path" \
 JARVIS_DESKTOP_SMOKE_ROOT="$install_root" \
+JARVIS_LOCAL_BEARER="desktop-smoke-not-a-real-secret-0001" \
   "$installed_app/Contents/MacOS/Jarvis" --disable-gpu \
   --user-data-dir="$user_data_root" \
   >"$install_root/electron.stdout.log" 2>"$install_root/electron.stderr.log" &

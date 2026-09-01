@@ -7,7 +7,7 @@ using Jarvis.Infrastructure.Observability;
 
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
-builder.Logging.AddJarvisJsonConsole();
+builder.Logging.AddJarvisConsole(builder.Configuration);
 builder.Services.AddJarvisTelemetry(builder.Configuration, "jarvis.device-node");
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddOptions<ResilienceOptions>()

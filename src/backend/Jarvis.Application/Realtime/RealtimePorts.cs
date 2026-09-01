@@ -165,7 +165,8 @@ public sealed record RealtimeClientSecretProviderResponse(
     long ExpiresAtMs,
     string ExternalSessionId,
     string Model,
-    string Voice);
+    string Voice,
+    string WebRtcUrl);
 
 public sealed record ContextPackage(
     long ContextVersion,

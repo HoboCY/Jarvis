@@ -36,6 +36,31 @@ public static partial class SafeLogRedaction
             maxLength);
     }
 
+    public static string SanitizeMessage<TState>(TState state, string? renderedMessage)
+    {
+        var message = renderedMessage ?? string.Empty;
+        if (state is IEnumerable<KeyValuePair<string, object?>> values)
+        {
+            foreach (var pair in values)
+            {
+                if (!IsSensitiveFieldName(pair.Key) || pair.Value is null)
+                {
+                    continue;
+                }
+
+                var sensitiveValue = Convert.ToString(
+                    pair.Value,
+                    System.Globalization.CultureInfo.InvariantCulture);
+                if (!string.IsNullOrEmpty(sensitiveValue))
+                {
+                    message = message.Replace(sensitiveValue, Redacted, StringComparison.Ordinal);
+                }
+            }
+        }
+
+        return Sanitize(message);
+    }
+
     public static bool IsSensitiveFieldName(string? fieldName)
     {
         if (string.IsNullOrWhiteSpace(fieldName))

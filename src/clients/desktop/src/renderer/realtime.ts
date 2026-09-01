@@ -108,6 +108,7 @@ export type DesktopRealtimeStatus = "disconnected" | "connecting" | "connected" 
 export type DesktopRealtimeConnectionInput = {
   realtimeSessionId: string;
   clientSecret: string;
+  webRtcUrl?: string;
   model: string;
   voice: string;
   instructions: string;
@@ -159,6 +160,7 @@ export class DesktopRealtimeController {
   private rotationProvider: (() => Promise<{
     realtimeSessionId: string;
     clientSecret: string;
+    webRtcUrl?: string;
     model: string;
     voice: string;
     instructions: string;
@@ -184,6 +186,7 @@ export class DesktopRealtimeController {
     provider: () => Promise<{
       realtimeSessionId: string;
       clientSecret: string;
+      webRtcUrl?: string;
       model: string;
       voice: string;
       instructions: string;
@@ -274,7 +277,11 @@ export class DesktopRealtimeController {
     });
 
     try {
-      await session.connect({ apiKey: input.clientSecret, model: input.model });
+      await session.connect({
+        apiKey: input.clientSecret,
+        model: input.model,
+        ...(input.webRtcUrl ? { url: input.webRtcUrl } : {})
+      });
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let actualExternalSessionId: string;
       try {

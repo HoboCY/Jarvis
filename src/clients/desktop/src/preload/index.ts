@@ -104,6 +104,8 @@ const jarvisApi = {
     ipcRenderer.invoke("backend:applyNotificationAction", input) as Promise<unknown>,
   getApprovals: (): Promise<unknown> =>
     ipcRenderer.invoke("backend:getApprovals") as Promise<unknown>,
+  getBackendConnectionState: (): Promise<unknown> =>
+    ipcRenderer.invoke("backend:getConnectionState") as Promise<unknown>,
   decideApproval: (input: {
     approvalId: string;
     decision: "approve" | "deny";

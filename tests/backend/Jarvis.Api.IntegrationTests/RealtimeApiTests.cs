@@ -525,7 +525,8 @@ public sealed class RealtimeApiTests
                 DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds(),
                 $"oai-session-test-{CallCount}",
                 "gpt-4o-realtime-preview",
-                "alloy"));
+                "alloy",
+                "https://api.openai.test/v1/realtime/calls"));
         }
     }
 }

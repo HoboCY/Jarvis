@@ -62,6 +62,12 @@ await mkdir(distRoot, { recursive: true });
 const buildResults = await Promise.all([
   build({
     ...commonOptions,
+    // Electron 44's main process already provides fetch and WebSocket. Force
+    // SignalR onto that self-contained path so its Node-only dynamic requires
+    // (ws/eventsource/cookie jars) are not executed from this ESM bundle.
+    define: {
+      "process.release.name": '"electron"'
+    },
     entryPoints: [join(sourceRoot, "main/main.ts")],
     external: ["electron", ...nodeBuiltins],
     format: "esm",

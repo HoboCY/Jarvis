@@ -21,6 +21,7 @@ artifacts/releases/
 artifacts/services/
 artifacts/test-reports/
 src/clients/desktop/out/
+src/backend/Jarvis.Api/jarvis.db*
 
 *.user
 *.suo

@@ -319,6 +319,7 @@ public sealed class Phase5RealtimeContextTests
                 DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds(),
                 "oai-context",
                 "gpt-4o-realtime-preview",
-                "alloy"));
+                "alloy",
+                "https://api.openai.test/v1/realtime/calls"));
     }
 }

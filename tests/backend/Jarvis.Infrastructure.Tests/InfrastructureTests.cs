@@ -119,6 +119,25 @@ public sealed class InfrastructureTests
     }
 
     [Fact]
+    public void UnknownRealtimeAuthenticationModeFailsStartupValidation()
+    {
+        var configuration = CreateConfiguration(new Dictionary<string, string?>
+        {
+            ["OpenAI:AuthenticationMode"] = "Unsupported",
+            ["Responses:Provider"] = "OpenAI",
+            ["Responses:Model"] = "gpt-response",
+            ["Responses:SummarizerModel"] = "gpt-summary"
+        });
+        var services = new ServiceCollection();
+        services.AddJarvisInfrastructure(configuration);
+        using var provider = services.BuildServiceProvider();
+
+        var exception = Assert.Throws<OptionsValidationException>(
+            () => provider.GetRequiredService<IStartupValidator>().Validate());
+        Assert.Contains("OpenAI:AuthenticationMode must be Bearer or ApiKey", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DeepSeekCredentialsAreRequiredOnlyForTheDeepSeekProvider()
     {
         var configuration = CreateConfiguration(new Dictionary<string, string?>

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Jarvis.Infrastructure.Realtime;
 using Xunit;
+using Xunit.Sdk;
 
 namespace Jarvis.Infrastructure.Tests;
 
@@ -140,16 +141,94 @@ public sealed class LocalEnvironmentFileTests
     }
 
     [Fact]
-    public void DefaultPathResolverUsesOnlyTheSelectedWorkingDirectory()
+    public void PathResolverUsesSelectedWorkingDirectoryWhenNoRepositoryBoundaryExists()
     {
         using var directory = TemporaryDirectory.Create();
 
         Assert.Equal(
             Path.Combine(directory.Path, ".env"),
             LocalEnvironmentFile.ResolvePath(directory.Path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DefaultPathResolverUsesCurrentEnvThenRecognizedRepositoryRootOnly(bool gitMarkerIsDirectory)
+    {
+        using var repository = TemporaryDirectory.Create();
+        var nestedDirectory = repository.CreateSubdirectory("src", "backend", "Jarvis.Api");
+        var repositoryEnvPath = repository.Write(".env", "root-value\n");
+        repository.Write("Jarvis.sln", "solution\n");
+        if (gitMarkerIsDirectory)
+        {
+            Directory.CreateDirectory(System.IO.Path.Combine(repository.Path, ".git"));
+        }
+        else
+        {
+            repository.Write(".git", "gitdir: /tmp/jarvis-test-git\n");
+        }
+
+        Assert.Equal(repositoryEnvPath, LocalEnvironmentFile.ResolvePath(nestedDirectory));
+
+        var localEnvPath = System.IO.Path.Combine(nestedDirectory, ".env");
+        File.WriteAllText(localEnvPath, "local-value\n");
+        Assert.Equal(localEnvPath, LocalEnvironmentFile.ResolvePath(nestedDirectory));
+
+        using var unrelatedDirectory = TemporaryDirectory.Create();
+        var unrelatedNestedDirectory = unrelatedDirectory.CreateSubdirectory("nested");
+        unrelatedDirectory.Write(".env", "unrelated-value\n");
         Assert.Equal(
-            Path.Combine(Directory.GetCurrentDirectory(), ".env"),
-            LocalEnvironmentFile.ResolvePath());
+            System.IO.Path.Combine(unrelatedNestedDirectory, ".env"),
+            LocalEnvironmentFile.ResolvePath(unrelatedNestedDirectory));
+    }
+
+    [Fact]
+    public void DefaultPathResolverDoesNotCrossRepositorySymlinkToAnExternalDirectory()
+    {
+        using var repository = TemporaryDirectory.Create();
+        using var outside = TemporaryDirectory.Create();
+        var linkedDirectory = System.IO.Path.Combine(repository.Path, "linked");
+        outside.CreateSubdirectory("nested");
+        repository.Write(".env", "root-value\n");
+        repository.Write("Jarvis.sln", "solution\n");
+        Directory.CreateDirectory(System.IO.Path.Combine(repository.Path, ".git"));
+        CreateDirectorySymbolicLinkOrSkip(linkedDirectory, outside.Path);
+
+        var workingDirectory = System.IO.Path.Combine(linkedDirectory, "nested");
+
+        Assert.Equal(
+            System.IO.Path.Combine(workingDirectory, ".env"),
+            LocalEnvironmentFile.ResolvePath(workingDirectory));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ASingleRepositoryMarkerDoesNotCreateARepositoryBoundary(bool includeGitMarker)
+    {
+        using var repository = TemporaryDirectory.Create();
+        var nestedDirectory = repository.CreateSubdirectory("nested");
+        repository.Write(".env", "root-value\n");
+        if (includeGitMarker)
+        {
+            repository.Write(".git", "gitdir: /tmp/jarvis-test-git\n");
+        }
+        else
+        {
+            repository.Write("Jarvis.sln", "solution\n");
+        }
+
+        Assert.Equal(
+            System.IO.Path.Combine(nestedDirectory, ".env"),
+            LocalEnvironmentFile.ResolvePath(nestedDirectory));
+    }
+
+    [Fact]
+    public void ResolvePathWithoutArgumentUsesTheCurrentWorkingDirectory()
+    {
+        var expected = LocalEnvironmentFile.ResolvePath(Directory.GetCurrentDirectory());
+
+        Assert.Equal(expected, LocalEnvironmentFile.ResolvePath());
     }
 
     [Theory]
@@ -166,6 +245,24 @@ public sealed class LocalEnvironmentFileTests
         Assert.Contains(Path.GetFileName(path), exception.Message, StringComparison.Ordinal);
         Assert.Contains("line 1", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret-value", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    private static void CreateDirectorySymbolicLinkOrSkip(string linkPath, string targetPath)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (PlatformNotSupportedException exception)
+        {
+            _ = exception;
+            throw SkipException.ForSkip("The current platform does not support directory symbolic links.");
+        }
+        catch (UnauthorizedAccessException exception) when (OperatingSystem.IsWindows())
+        {
+            _ = exception;
+            throw SkipException.ForSkip("The Windows test host cannot create a directory symbolic link without the required capability.");
+        }
     }
 
     private sealed class TemporaryDirectory : IDisposable
@@ -189,6 +286,18 @@ public sealed class LocalEnvironmentFileTests
         {
             var path = System.IO.Path.Combine(Path, fileName);
             File.WriteAllText(path, contents);
+            return path;
+        }
+
+        public string CreateSubdirectory(params string[] segments)
+        {
+            var path = Path;
+            foreach (var segment in segments)
+            {
+                path = System.IO.Path.Combine(path, segment);
+            }
+
+            Directory.CreateDirectory(path);
             return path;
         }
 

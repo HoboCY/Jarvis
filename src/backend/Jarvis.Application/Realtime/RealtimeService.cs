@@ -120,6 +120,7 @@ public sealed class RealtimeService(
             providerResponse.ExpiresAtMs,
             stored.Response.Model,
             stored.Response.Voice,
+            providerResponse.WebRtcUrl,
             stored.Response.ContextVersion,
             stored.Response.StartedAtMs + TimeSpan.FromMinutes(50).Ticks / TimeSpan.TicksPerMillisecond);
         replayCache.Set(userId, normalizedKey, requestHash, response);

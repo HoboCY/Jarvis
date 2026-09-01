@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { decodeSignalREventEnvelope } from "@jarvis/contracts-ts";
 import { ensureConversation } from "./conversation-flow.js";
+import { canSendRealtimeText, RealtimeConnectGate } from "./realtime-connect-flow.js";
 import {
   DesktopRealtimeController,
   mapRealtimeCancelResponse,
@@ -23,6 +24,10 @@ import {
 } from "./approval-feed.js";
 import { parseDiagnostics, type DesktopDiagnostics } from "./diagnostics.js";
 import { buildDesktopMobilePairingInput, mobilePairingFrom, type MobilePairing } from "./mobile-pairing.js";
+import {
+  applyBackendConnectionState,
+  initialBackendConnectionState
+} from "./backend-connection-state.js";
 
 type Message = {
   id: string;
@@ -43,6 +48,7 @@ type Conversation = {
 type ClientSecret = {
   realtimeSessionId: string;
   clientSecret: string;
+  webRtcUrl: string;
   model: string;
   voice: string;
   instructions: string;
@@ -263,13 +269,19 @@ function clientSecretFrom(value: unknown): ClientSecret {
   const item = asRecord(value);
   if (typeof item.clientSecret !== "string"
     || typeof item.realtimeSessionId !== "string"
+    || typeof item.webRtcUrl !== "string"
     || typeof item.instructions !== "string"
     || !item.instructions.trim()) {
     throw new Error("Backend returned an invalid ephemeral realtime secret.");
   }
+  const webRtcUrl = new URL(item.webRtcUrl);
+  if (webRtcUrl.protocol !== "https:") {
+    throw new Error("Backend returned an invalid Realtime WebRTC URL.");
+  }
   return {
     realtimeSessionId: item.realtimeSessionId,
     clientSecret: item.clientSecret,
+    webRtcUrl: webRtcUrl.toString(),
     model: String(item.model),
     voice: String(item.voice),
     instructions: item.instructions
@@ -295,14 +307,17 @@ export function App() {
   const [approvals, setApprovals] = useState<readonly DesktopApproval[]>([]);
   const [resolvingApprovalId, setResolvingApprovalId] = useState<string | undefined>();
   const [backendConnectionState, setBackendConnectionState] = useState("connecting");
+  const backendConnection = useRef(initialBackendConnectionState);
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | undefined>();
   const [mobilePairing, setMobilePairing] = useState<MobilePairing | undefined>();
   const [creatingMobilePairing, setCreatingMobilePairing] = useState(false);
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
+  const connectGate = useRef<RealtimeConnectGate | undefined>(undefined);
   const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
   const approvalFeed = useRef<DesktopApprovalFeed | undefined>(undefined);
   const activeConversationId = useRef<string | undefined>(undefined);
   activeConversationId.current = conversation?.id;
+  connectGate.current ??= new RealtimeConnectGate();
 
   feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
   approvalFeed.current ??= createApprovalFeed();
@@ -395,9 +410,14 @@ export function App() {
         }
       }
     });
-    const removeConnectionListener = window.jarvis.onBackendConnectionState(value => {
-      const state = asRecord(value).state;
-      setBackendConnectionState(typeof state === "string" ? state : "disconnected");
+    const applyConnectionState = (value: unknown): void => {
+      const next = applyBackendConnectionState(backendConnection.current, value);
+      if (next === backendConnection.current) {
+        return;
+      }
+      backendConnection.current = next;
+      const state = next.state;
+      setBackendConnectionState(state);
       void refreshOnBackendConnectionState(state, refreshFeed, activeConversationId.current).catch(reason => {
         if (effectActive) {
           setError(reason instanceof Error ? reason.message : "Task feed refresh failed.");
@@ -410,7 +430,23 @@ export function App() {
           }
         });
       }
+    };
+    const removeConnectionListener = window.jarvis.onBackendConnectionState(value => {
+      try {
+        applyConnectionState(value);
+      } catch (reason) {
+        if (effectActive) {
+          setError(reason instanceof Error ? reason.message : "Invalid backend connection state.");
+        }
+      }
     });
+    void window.jarvis.getBackendConnectionState()
+      .then(applyConnectionState)
+      .catch(reason => {
+        if (effectActive) {
+          setError(reason instanceof Error ? reason.message : "Backend connection state request failed.");
+        }
+      });
     return () => {
       effectActive = false;
       removeEventListener();
@@ -459,16 +495,19 @@ export function App() {
   }
 
   async function connect(): Promise<void> {
+    setStatus("connecting");
     setError(undefined);
     try {
       const activeConversation = await ensureConversation(conversation, createConversation);
       if (!activeConversation) {
+        setStatus("degraded");
         return;
       }
       const activeDevice = device ?? deviceFrom(await window.jarvis.getDesktopDevice());
       setDevice(activeDevice);
       if (controller.current) {
         if (!await controller.current.disconnect("reconnect")) {
+          setStatus(controller.current.status);
           setError("旧 Realtime Session 的消息尚未保存，请先重试保存。");
           return;
         }
@@ -534,6 +573,10 @@ export function App() {
     }
   }
 
+  function requestConnect(): Promise<void> {
+    return connectGate.current!.run(connect);
+  }
+
   async function disconnect(): Promise<void> {
     const activeController = controller.current;
     if (!activeController) {
@@ -576,6 +619,13 @@ export function App() {
     if (!text || !conversation) {
       return;
     }
+
+    const activeController = controller.current;
+    if (!canSendRealtimeText(status, connectGate.current?.isRunning ?? false) || !activeController) {
+      setError("请等待 Realtime 连接成功后再发送文字。");
+      return;
+    }
+
     setDraft("");
 
     const persistTyped = async (persistedText: string): Promise<void> => {
@@ -583,7 +633,7 @@ export function App() {
         conversationId: conversation.id,
         clientRequestId: crypto.randomUUID(),
         text: persistedText,
-        realtimeSessionId: status === "connected" ? controller.current?.realtimeSessionId : undefined,
+        realtimeSessionId: activeController.realtimeSessionId,
         idempotencyKey: crypto.randomUUID()
       });
       const refreshed = await window.jarvis.getConversation(conversation.id);
@@ -591,13 +641,7 @@ export function App() {
     };
 
     try {
-      if (status === "connected" && controller.current) {
-        await controller.current.sendTyped(text, persistTyped);
-      } else {
-        // A provider/network failure leaves the conversation usable through the
-        // durable text endpoint until Realtime can be connected again.
-        await persistTyped(text);
-      }
+      await activeController.sendTyped(text, persistTyped);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Typed message failed.");
     }
@@ -666,7 +710,7 @@ export function App() {
         <button type="button" onClick={() => void loadConversation()}>加载会话</button>
       </div>
       <div>
-        <button type="button" onClick={() => void connect()} disabled={status === "connecting" || status === "connected"}>
+        <button type="button" onClick={() => void requestConnect()} disabled={status === "connecting" || status === "connected"}>
           连接 Realtime
         </button>
         <button type="button" onClick={() => void disconnect()} disabled={status === "disconnected"}>
@@ -698,7 +742,12 @@ export function App() {
           onChange={event => setDraft(event.target.value)}
           placeholder="输入文字，发送到当前 Realtime Session"
         />
-        <button type="submit" disabled={!conversation || status === "connecting" || !draft.trim()}>发送文字</button>
+        <button
+          type="submit"
+          disabled={!conversation || !canSendRealtimeText(status, connectGate.current?.isRunning ?? false) || !draft.trim()}
+        >
+          发送文字
+        </button>
       </form>
       {error ? <p role="alert">{error}</p> : null}
       {popupNotification ? (

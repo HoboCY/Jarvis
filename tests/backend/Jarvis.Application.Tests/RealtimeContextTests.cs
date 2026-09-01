@@ -59,6 +59,7 @@ public sealed class RealtimeContextTests
             2_000,
             "model",
             "voice",
+            "https://api.openai.test/v1/realtime/calls",
             1,
             1_500);
         cache.Set(userId, "same-key", "original-hash", response);

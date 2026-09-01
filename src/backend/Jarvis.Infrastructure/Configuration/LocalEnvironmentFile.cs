@@ -16,7 +16,31 @@ public static class LocalEnvironmentFile
     {
         var directory = workingDirectory ?? Directory.GetCurrentDirectory();
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
-        return Path.Combine(directory, DefaultFileName);
+        var fullDirectory = Path.GetFullPath(directory);
+        var localPath = Path.Combine(fullDirectory, DefaultFileName);
+        var physicalDirectory = ResolvePhysicalDirectory(fullDirectory);
+        if (File.Exists(localPath) || physicalDirectory is null)
+        {
+            return localPath;
+        }
+
+        var repositoryRoot = FindRepositoryRoot(physicalDirectory);
+        if (repositoryRoot is null)
+        {
+            return localPath;
+        }
+
+        var logicalRepositoryRoot = FindRepositoryRoot(fullDirectory);
+        if (logicalRepositoryRoot is not null
+            && string.Equals(
+                ResolvePhysicalDirectory(logicalRepositoryRoot),
+                repositoryRoot,
+                GetPathComparison()))
+        {
+            return Path.Combine(logicalRepositoryRoot, DefaultFileName);
+        }
+
+        return Path.Combine(repositoryRoot, DefaultFileName);
     }
 
     public static IReadOnlyDictionary<string, string> Parse(string path)
@@ -181,6 +205,71 @@ public static class LocalEnvironmentFile
 
     private static bool IsAsciiLetter(char character) =>
         character is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
+
+    private static StringComparison GetPathComparison() =>
+        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+    private static string? FindRepositoryRoot(string directory)
+    {
+        for (var current = new DirectoryInfo(directory); current is not null; current = current.Parent)
+        {
+            var gitMarker = Path.Combine(current.FullName, ".git");
+            var solution = Path.Combine(current.FullName, "Jarvis.sln");
+            if ((File.Exists(gitMarker) || Directory.Exists(gitMarker))
+                && File.Exists(solution))
+            {
+                return current.FullName;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ResolvePhysicalDirectory(string directory)
+    {
+        try
+        {
+            var segments = new Stack<string>();
+            var current = new DirectoryInfo(directory);
+            while (current.Parent is not null)
+            {
+                segments.Push(current.Name);
+                current = current.Parent;
+            }
+
+            var resolved = current.FullName;
+            while (segments.Count > 0)
+            {
+                var segment = segments.Pop();
+                var candidate = Path.Combine(resolved, segment);
+                var candidateInfo = new DirectoryInfo(candidate);
+                if (candidateInfo.Exists)
+                {
+                    resolved = candidateInfo.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? candidate;
+                }
+                else
+                {
+                    resolved = candidate;
+                }
+            }
+
+            return resolved;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+        catch (PlatformNotSupportedException)
+        {
+            return null;
+        }
+    }
 
     private static LocalEnvironmentFileFormatException InvalidEntry(
         string path,

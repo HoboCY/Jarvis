@@ -121,6 +121,7 @@ public sealed record RealtimeClientSecretResponse(
     long ExpiresAt,
     string Model,
     string Voice,
+    string WebRtcUrl,
     long ContextVersion,
     long SessionRotationAt);
 

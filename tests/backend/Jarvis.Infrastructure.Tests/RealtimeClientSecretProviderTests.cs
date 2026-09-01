@@ -23,6 +23,7 @@ public sealed class RealtimeClientSecretProviderTests
         var options = Options.Create(new OpenAiRealtimeOptions
         {
             ApiKey = "server-key-placeholder",
+            AuthenticationMode = "Bearer",
             BaseUrl = "https://api.openai.test/",
             RealtimeModel = "gpt-4o-realtime-preview",
             RealtimeVoice = "alloy",
@@ -45,6 +46,7 @@ public sealed class RealtimeClientSecretProviderTests
         Assert.Equal("oai-session-1", result.ExternalSessionId);
         Assert.Equal("gpt-4o-realtime-preview", result.Model);
         Assert.Equal("alloy", result.Voice);
+        Assert.Equal("https://api.openai.test/v1/realtime/calls", result.WebRtcUrl);
         Assert.Equal("Bearer server-key-placeholder", handler.Authorization);
         Assert.Equal(HttpMethod.Post, handler.Method);
         Assert.Equal("/v1/realtime/client_secrets", handler.Path);
@@ -74,9 +76,50 @@ public sealed class RealtimeClientSecretProviderTests
         Assert.DoesNotContain("server-key-placeholder", handler.Body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task PreservesAzureOpenAiV1PrefixAndUsesApiKeyAuthentication()
+    {
+        var handler = new RecordingHandler();
+        using var httpClient = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://example.openai.azure.com/openai/v1")
+        };
+        var options = Options.Create(new OpenAiRealtimeOptions
+        {
+            ApiKey = "azure-key-placeholder",
+            AuthenticationMode = "ApiKey",
+            BaseUrl = "https://example.openai.azure.com/openai/v1",
+            RealtimeModel = "realtime-deployment",
+            RealtimeVoice = "alloy",
+            AllowedVoices = ["alloy"],
+            SafetyIdentifierSalt = "test-salt",
+            ClientSecretLifetimeSeconds = 600
+        });
+        var provider = new OpenAiRealtimeClientSecretProvider(httpClient, options);
+        var userId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+
+        var result = await provider.CreateAsync(
+            new RealtimeClientSecretProviderRequest(
+                userId,
+                new ContextPackage(7, "fixed safety", "", "", [], "", ""),
+                SafetyIdentifier.Create(userId, "test-salt"),
+                null),
+            CancellationToken.None);
+
+        Assert.Null(handler.Authorization);
+        Assert.Equal("azure-key-placeholder", handler.ApiKey);
+        Assert.Equal("/openai/v1/realtime/client_secrets", handler.Path);
+        Assert.Equal("https://example.openai.azure.com/openai/v1/realtime/calls", result.WebRtcUrl);
+        Assert.NotNull(handler.Body);
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.False(body.RootElement.GetProperty("session").TryGetProperty("tracing", out _));
+    }
+
     private sealed class RecordingHandler : HttpMessageHandler
     {
         public string? Authorization { get; private set; }
+
+        public string? ApiKey { get; private set; }
 
         public HttpMethod? Method { get; private set; }
 
@@ -89,6 +132,7 @@ public sealed class RealtimeClientSecretProviderTests
             CancellationToken cancellationToken)
         {
             Authorization = request.Headers.Authorization?.ToString();
+            ApiKey = request.Headers.TryGetValues("api-key", out var values) ? values.Single() : null;
             Method = request.Method;
             Path = request.RequestUri?.PathAndQuery;
             Body = await request.Content!.ReadAsStringAsync(cancellationToken);

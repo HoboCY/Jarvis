@@ -456,7 +456,8 @@ public sealed class Phase7MobilePairingTests
                 DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds(),
                 "external-session",
                 "gpt-4o-realtime-preview",
-                "alloy"));
+                "alloy",
+                "https://api.openai.test/v1/realtime/calls"));
         }
     }
 }

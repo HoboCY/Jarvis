@@ -965,7 +965,8 @@ done
                 DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds(),
                 $"oai-e2e-session-{sequence}",
                 "gpt-4o-realtime-preview",
-                "alloy"));
+                "alloy",
+                "https://api.openai.test/v1/realtime/calls"));
         }
     }
 

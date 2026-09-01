@@ -92,6 +92,7 @@ interface Window {
     dismissNotification: (input: { notificationId: string; idempotencyKey: string }) => Promise<unknown>;
     applyNotificationAction: (input: { notificationId: string; actionId: "acknowledge"; idempotencyKey: string }) => Promise<unknown>;
     getApprovals: () => Promise<unknown>;
+    getBackendConnectionState: () => Promise<unknown>;
     decideApproval: (input: {
       approvalId: string;
       decision: "approve" | "deny";

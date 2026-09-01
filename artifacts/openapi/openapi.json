@@ -5277,6 +5277,7 @@
           "expiresAt",
           "model",
           "voice",
+          "webRtcUrl",
           "contextVersion",
           "sessionRotationAt"
         ],
@@ -5312,6 +5313,9 @@
             "type": "string"
           },
           "voice": {
+            "type": "string"
+          },
+          "webRtcUrl": {
             "type": "string"
           },
           "contextVersion": {
