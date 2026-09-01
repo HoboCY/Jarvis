@@ -26,7 +26,8 @@ public sealed class RealtimeService(
     IRealtimeSafetyIdentifierProvider safetyIdentifierProvider,
     TimeProvider timeProvider,
     EphemeralSecretReplayCache replayCache,
-    RealtimeClientSecretSingleFlight singleFlight)
+    RealtimeClientSecretSingleFlight singleFlight,
+    IWakeWordConfigurationProvider wakeWordConfigurationProvider)
 {
     private const int MaxIdempotencyKeyLength = 200;
     private const int MaxEventCount = 100;
@@ -57,6 +58,7 @@ public sealed class RealtimeService(
         var requestHash = RequestHash.Create(request);
         await using var singleFlightLease = await singleFlight.AcquireAsync(userId, normalizedKey, cancellationToken);
         var nowMs = timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+
         if (replayCache.TryGet(userId, normalizedKey, requestHash, nowMs, out var cachedResponse))
         {
             return new(RealtimeOperationStatus.Replayed, cachedResponse);
@@ -78,6 +80,9 @@ public sealed class RealtimeService(
             return new(RealtimeOperationStatus.NotFound);
         }
 
+        var wakeWord = bootstrap.DeviceType == DeviceTypeValue.Desktop
+            ? wakeWordConfigurationProvider.GetRequired()
+            : null;
         var providerResponse = await clientSecretProvider.CreateAsync(
             new RealtimeClientSecretProviderRequest(
                 userId,
@@ -122,7 +127,10 @@ public sealed class RealtimeService(
             stored.Response.Voice,
             providerResponse.WebRtcUrl,
             stored.Response.ContextVersion,
-            stored.Response.StartedAtMs + TimeSpan.FromMinutes(50).Ticks / TimeSpan.TicksPerMillisecond);
+            stored.Response.StartedAtMs + TimeSpan.FromMinutes(50).Ticks / TimeSpan.TicksPerMillisecond,
+            wakeWord is null
+                ? null
+                : new WakeWordBootstrapResponse(wakeWord.Enabled, wakeWord.Keyword, wakeWord.PicovoiceAccessKey));
         replayCache.Set(userId, normalizedKey, requestHash, response);
         return new(existing is null ? RealtimeOperationStatus.Succeeded : RealtimeOperationStatus.Replayed, response);
     }

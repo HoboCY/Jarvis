@@ -1183,6 +1183,7 @@ export interface components {
             contextVersion: number | string;
             /** Format: int64 */
             sessionRotationAt: number | string;
+            wakeWord?: null | components["schemas"]["WakeWordBootstrapResponse"];
         };
         RealtimeEventsIngestRequest: {
             /** Format: int32 */
@@ -1394,6 +1395,11 @@ export interface components {
             /** Format: int64 */
             sequence: number | string;
             accepted: boolean;
+        };
+        WakeWordBootstrapResponse: {
+            enabled: boolean;
+            keyword: string;
+            picovoiceAccessKey: string;
         };
         /** @enum {unknown} */
         WorkerKindValue: "internal" | "responses" | "codex";

@@ -6,8 +6,10 @@ import {
   DesktopRealtimeController,
   mapRealtimeCancelResponse,
   mapRealtimeTaskStatusResponse,
-  type DesktopRealtimeStatus
+  type DesktopRealtimeStatus,
+  type DesktopRealtimeWakeState
 } from "./realtime.js";
+import { createPorcupineWakeWordDetector } from "./wake-word.js";
 import {
   DesktopTaskNotificationFeed,
   ensureActiveDesktopTaskNotificationFeed,
@@ -52,6 +54,11 @@ type ClientSecret = {
   model: string;
   voice: string;
   instructions: string;
+  wakeWord: {
+    enabled: boolean;
+    keyword: "Jarvis";
+    picovoiceAccessKey: string;
+  };
 };
 
 type Device = { deviceId: string; name: string; platform: string };
@@ -274,6 +281,16 @@ function clientSecretFrom(value: unknown): ClientSecret {
     || !item.instructions.trim()) {
     throw new Error("Backend returned an invalid ephemeral realtime secret.");
   }
+  if (typeof item.wakeWord !== "object" || item.wakeWord === null || Array.isArray(item.wakeWord)) {
+    throw new Error("本地唤醒词未配置，请设置 WakeWord:PicovoiceAccessKey 后重试。");
+  }
+  const wakeWord = item.wakeWord as Record<string, unknown>;
+  if (wakeWord.enabled !== true
+    || wakeWord.keyword !== "Jarvis"
+    || typeof wakeWord.picovoiceAccessKey !== "string"
+    || !wakeWord.picovoiceAccessKey.trim()) {
+    throw new Error("本地唤醒词未配置，请设置 WakeWord:PicovoiceAccessKey 后重试。");
+  }
   const webRtcUrl = new URL(item.webRtcUrl);
   if (webRtcUrl.protocol !== "https:") {
     throw new Error("Backend returned an invalid Realtime WebRTC URL.");
@@ -284,8 +301,46 @@ function clientSecretFrom(value: unknown): ClientSecret {
     webRtcUrl: webRtcUrl.toString(),
     model: String(item.model),
     voice: String(item.voice),
-    instructions: item.instructions
+    instructions: item.instructions,
+    wakeWord: {
+      enabled: true,
+      keyword: "Jarvis",
+      picovoiceAccessKey: wakeWord.picovoiceAccessKey.trim()
+    }
   };
+}
+
+async function requestApplicationAudioStream(): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("当前环境不支持麦克风，请使用已打包的桌面应用。");
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (error) {
+    const detail = error instanceof Error ? ` ${error.message}` : "";
+    throw new Error(`无法访问麦克风；请在系统设置中授予 Jarvis 麦克风权限后重试。${detail}`);
+  }
+}
+
+function playWakeTone(): void {
+  try {
+    if (typeof AudioContext === "undefined") {
+      return;
+    }
+    const context = new AudioContext();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.frequency.value = 880;
+    gain.gain.setValueAtTime(0.03, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.08);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.08);
+    oscillator.addEventListener("ended", () => void context.close());
+  } catch {
+    // A prompt tone is best effort; it must not affect the realtime turn.
+  }
 }
 
 function deviceFrom(value: unknown): Device {
@@ -300,7 +355,8 @@ export function App() {
   const [status, setStatus] = useState<DesktopRealtimeStatus>("disconnected");
   const [error, setError] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(true);
+  const [wakeState, setWakeState] = useState<DesktopRealtimeWakeState>("standby");
   const [conversationIdInput, setConversationIdInput] = useState("");
   const [tasks, setTasks] = useState<readonly DesktopTask[]>([]);
   const [notifications, setNotifications] = useState<readonly DesktopNotification[]>([]);
@@ -497,6 +553,9 @@ export function App() {
   async function connect(): Promise<void> {
     setStatus("connecting");
     setError(undefined);
+    setWakeState("standby");
+    setMuted(true);
+    let ownedMediaStream: MediaStream | undefined;
     try {
       const activeConversation = await ensureConversation(conversation, createConversation);
       if (!activeConversation) {
@@ -519,6 +578,8 @@ export function App() {
         preferredVoice: null,
         idempotencyKey: crypto.randomUUID()
       }));
+      ownedMediaStream = await requestApplicationAudioStream();
+      const wakeWordDetector = createPorcupineWakeWordDetector(secret.wakeWord.picovoiceAccessKey);
       const voice = secret.voice;
       const nextController = new DesktopRealtimeController(
         activeConversation.id,
@@ -559,6 +620,13 @@ export function App() {
           }
         }
       );
+      nextController.setWakeWordDetector(wakeWordDetector, nextWakeState => {
+        setWakeState(nextWakeState);
+        setMuted(nextWakeState === "standby");
+        if (nextWakeState === "awake") {
+          playWakeTone();
+        }
+      });
       nextController.setRotationProvider(async () => clientSecretFrom(await window.jarvis.createRealtimeClientSecret({
         conversationId: activeConversation.id,
         deviceId: activeDevice.deviceId,
@@ -566,8 +634,12 @@ export function App() {
         idempotencyKey: crypto.randomUUID()
       })));
       controller.current = nextController;
-      await nextController.connect(secret);
+      await nextController.connect({ ...secret, mediaStream: ownedMediaStream });
+      ownedMediaStream = undefined;
     } catch (reason) {
+      for (const track of ownedMediaStream?.getTracks() ?? []) {
+        track.stop();
+      }
       setStatus("degraded");
       setError(reason instanceof Error ? reason.message : "Realtime connection failed.");
     }
@@ -586,6 +658,8 @@ export function App() {
     try {
       if (await activeController.disconnect()) {
         controller.current = undefined;
+        setWakeState("standby");
+        setMuted(true);
       } else {
         setError("消息尚未保存，Realtime Session 仍可重试。");
       }
@@ -676,6 +750,11 @@ export function App() {
       <h1>Jarvis</h1>
       <p>Desktop voice and typed input share one persisted Conversation.</p>
       <p aria-live="polite">状态：{status}{device ? ` · ${device.name}` : ""}</p>
+      <p aria-live="polite">
+        麦克风：{status === "connected"
+          ? wakeState === "awake" ? "已唤醒" : "等待唤醒词 Jarvis（音频仅在本机检测）"
+          : "未连接"}
+      </p>
       <button type="button" onClick={() => void loadDiagnostics()}>运行诊断</button>
       {diagnostics ? (
         <section aria-label="运行诊断">
@@ -724,12 +803,19 @@ export function App() {
         <button
           type="button"
           onClick={() => {
-            controller.current?.setMicrophoneMuted(!muted);
-            setMuted(value => !value);
+            const activeController = controller.current;
+            if (!activeController) {
+              return;
+            }
+            if (muted && wakeState === "standby") {
+              setError("请先说 Jarvis 唤醒本轮语音输入；文字输入始终可用。");
+              return;
+            }
+            activeController.setMicrophoneMuted(!muted);
           }}
           disabled={status !== "connected"}
         >
-          {muted ? "打开麦克风" : "关闭麦克风"}
+          {muted ? "等待 Jarvis 唤醒" : "关闭麦克风"}
         </button>
         <button type="button" onClick={() => controller.current?.interrupt()} disabled={status !== "connected"}>
           停止助手回答

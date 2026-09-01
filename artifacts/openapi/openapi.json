@@ -5333,6 +5333,16 @@
               "string"
             ],
             "format": "int64"
+          },
+          "wakeWord": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WakeWordBootstrapResponse"
+              }
+            ]
           }
         }
       },
@@ -6208,6 +6218,25 @@
           },
           "accepted": {
             "type": "boolean"
+          }
+        }
+      },
+      "WakeWordBootstrapResponse": {
+        "required": [
+          "enabled",
+          "keyword",
+          "picovoiceAccessKey"
+        ],
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "keyword": {
+            "type": "string"
+          },
+          "picovoiceAccessKey": {
+            "type": "string"
           }
         }
       },

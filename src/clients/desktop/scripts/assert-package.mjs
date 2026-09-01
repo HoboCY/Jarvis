@@ -9,6 +9,7 @@ export const expectedPackageFiles = new Set([
   "package.json",
   "dist/assets/JarvisTemplate.png",
   "dist/assets/JarvisTemplate@2x.png",
+  "dist/assets/porcupine_params.pv",
   "dist/main/main.js",
   "dist/preload/index.cjs",
   "dist/preload/overlay.cjs",

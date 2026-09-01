@@ -10,3 +10,15 @@ test("Desktop CSP allows Realtime WebRTC calls to Azure OpenAI resource origins"
   assert.ok(policy, "Renderer Content-Security-Policy is missing.");
   assert.match(policy, /connect-src[^;]*https:\/\/\*\.openai\.azure\.com(?:\s|;)/);
 });
+
+test("Desktop CSP permits Picovoice blob workers and WASM without general eval or external scripts", () => {
+  const policy = html.match(/content="([^"]*connect-src[^"]*)"/)?.[1];
+
+  assert.ok(policy, "Renderer Content-Security-Policy is missing.");
+  assert.match(policy, /script-src[^;]*blob:/);
+  assert.match(policy, /script-src[^;]*'wasm-unsafe-eval'/);
+  assert.match(policy, /worker-src[^;]*'self'[^;]*blob:/);
+  assert.doesNotMatch(policy, /script-src[^;]*'unsafe-eval'/);
+  assert.doesNotMatch(policy, /script-src[^;]*https?:/);
+  assert.doesNotMatch(policy, /worker-src[^;]*https?:/);
+});

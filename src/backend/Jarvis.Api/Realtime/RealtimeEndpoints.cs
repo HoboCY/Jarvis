@@ -121,6 +121,10 @@ public static class RealtimeEndpoints
         {
             return Problem(StatusCodes.Status502BadGateway, "Realtime provider unavailable", "The realtime client secret could not be created.");
         }
+        catch (WakeWordConfigurationException exception)
+        {
+            return Problem(StatusCodes.Status502BadGateway, "Realtime provider unavailable", exception.Message);
+        }
         catch (InvalidOperationException)
         {
             return Problem(StatusCodes.Status502BadGateway, "Realtime provider unavailable", "The realtime client secret could not be created.");

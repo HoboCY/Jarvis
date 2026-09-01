@@ -123,6 +123,13 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<EphemeralSecretReplayCache>();
         services.AddSingleton<RealtimeClientSecretSingleFlight>();
         services
+            .AddOptions<WakeWordOptions>()
+            .Bind(configuration.GetSection(WakeWordOptions.SectionName))
+            .Validate(options => string.Equals(options.Keyword, "Jarvis", StringComparison.Ordinal),
+                "WakeWord:Keyword must be the built-in Jarvis keyword.")
+            .ValidateOnStart();
+        services.AddSingleton<IWakeWordConfigurationProvider, ConfiguredWakeWordConfigurationProvider>();
+        services
             .AddOptions<OpenAiRealtimeOptions>()
             .Bind(configuration.GetSection(OpenAiRealtimeOptions.SectionName))
             .Validate(options => !string.IsNullOrWhiteSpace(options.ApiKey), "OpenAI:ApiKey is required.")

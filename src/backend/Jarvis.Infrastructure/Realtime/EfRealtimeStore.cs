@@ -140,7 +140,7 @@ public sealed class EfRealtimeStore(
             messages,
             string.Join("\n", taskText),
             string.Join("\n", memoryText)));
-        return new(userId, request.ConversationId, request.DeviceId, context, request.PreferredVoice);
+        return new(userId, request.ConversationId, request.DeviceId, context, request.PreferredVoice, (DeviceTypeValue)device.DeviceType);
     }
 
     public async Task<StoredClientSecretRequest?> FindClientSecretRequestAsync(

@@ -146,6 +146,7 @@ await mkdir(join(distRoot, "renderer"), { recursive: true });
 await Promise.all([
   copyFile(join(sourceRoot, "assets/JarvisTemplate.png"), join(distRoot, "assets/JarvisTemplate.png")),
   copyFile(join(sourceRoot, "assets/JarvisTemplate@2x.png"), join(distRoot, "assets/JarvisTemplate@2x.png")),
+  copyFile(join(sourceRoot, "assets/porcupine_params.pv"), join(distRoot, "assets/porcupine_params.pv")),
   copyFile(join(sourceRoot, "renderer/index.html"), join(distRoot, "renderer/index.html")),
   copyFile(join(sourceRoot, "renderer/overlay.html"), join(distRoot, "renderer/overlay.html"))
 ]);

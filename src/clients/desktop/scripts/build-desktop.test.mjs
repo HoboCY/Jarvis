@@ -14,6 +14,7 @@ const distRoot = new URL("../dist/", import.meta.url);
 const expectedFiles = new Set([
   "assets/JarvisTemplate.png",
   "assets/JarvisTemplate@2x.png",
+  "assets/porcupine_params.pv",
   "main/main.js",
   "preload/index.cjs",
   "preload/overlay.cjs",

@@ -8,6 +8,7 @@ import {
   mapRealtimeCancelResponse,
   mapRealtimeTaskStatusResponse
 } from "./realtime.js";
+import type { WakeWordDetector, WakeWordState } from "./wake-word.js";
 
 type Listener = (...args: never[]) => void;
 
@@ -186,10 +187,246 @@ class FakeSession {
     this.calls.push("close");
   }
 
-  public mute(): void {
-    this.calls.push("mute");
+  public mute(muted = true): void {
+    this.calls.push(`mute:${muted}`);
   }
 }
+
+function fakeMediaStream(): { stream: MediaStream; track: MediaStreamTrack; stopCalls: () => number } {
+  let enabled = true;
+  let stopped = false;
+  let stopCalls = 0;
+  const track = {
+    get enabled() {
+      return enabled && !stopped;
+    },
+    set enabled(value: boolean) {
+      enabled = value;
+    },
+    stop: () => {
+      stopCalls++;
+      stopped = true;
+    }
+  } as unknown as MediaStreamTrack;
+  const stream = {
+    getTracks: () => [track]
+  } as unknown as MediaStream;
+  return { stream, track, stopCalls: () => stopCalls };
+}
+
+function fakeWakeWordDetector(): {
+  detector: WakeWordDetector;
+  detect: () => void;
+  started: boolean;
+  stopped: boolean;
+} {
+  let onDetected: (() => void) | undefined;
+  let onStateChange: ((state: WakeWordState) => void) | undefined;
+  let started = false;
+  let stopped = false;
+  const detector: WakeWordDetector = {
+    state: "stopped",
+    start: async () => {
+      started = true;
+      onStateChange?.("listening");
+    },
+    stop: async () => {
+      stopped = true;
+      onStateChange?.("stopped");
+    },
+    onDetected: listener => {
+      onDetected = listener;
+      return () => {
+        onDetected = undefined;
+      };
+    },
+    onStateChange: listener => {
+      onStateChange = listener;
+      return () => {
+        onStateChange = undefined;
+      };
+    }
+  };
+  return {
+    detector,
+    detect: () => onDetected?.(),
+    get started() {
+      return started;
+    },
+    get stopped() {
+      return stopped;
+    }
+  };
+}
+
+test("Desktop controller keeps application-owned realtime audio muted until wake and remutes after one turn", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  let transportCreated = false;
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-word",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    (_agent, options) => {
+      transportCreated = typeof options.transport !== "string";
+      return fakeSession as unknown as RealtimeSession;
+    },
+    mediaStream => {
+      assert.equal(mediaStream, stream);
+      assert.equal(track.enabled, false);
+      return new FakeTransport() as never;
+    }
+  );
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000081",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+    assert.equal(transportCreated, true);
+    assert.equal(track.enabled, false);
+    assert.equal(wakeWord.started, true);
+
+    wakeWord.detect();
+    assert.equal(track.enabled, true);
+    assert.equal(controller.wakeState, "awake");
+    fakeSession.transport.emit("turn_done", { response: { output: [] } });
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+  } finally {
+    await controller.disconnect();
+  }
+
+  assert.equal(wakeWord.stopped, true);
+  assert.equal(track.enabled, false);
+});
+
+test("Desktop controller fails closed when an awake turn is explicitly interrupted", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-word-interrupt",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000083",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+    wakeWord.detect();
+    assert.equal(track.enabled, true);
+    assert.equal(controller.wakeState, "awake");
+
+    controller.interrupt();
+
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+    assert.equal(fakeSession.calls.at(-1), "interrupt");
+    assert.equal(fakeSession.calls.at(-2), "mute:true");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("Desktop controller fails closed on both realtime audio interruption event paths", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-word-audio-interrupted",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000084",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+
+    wakeWord.detect();
+    fakeSession.transport.emit("audio_interrupted");
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+
+    wakeWord.detect();
+    fakeSession.emit("audio_interrupted");
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("Desktop controller releases owned audio after a failed connect", async () => {
+  const failedSession = new FakeSession(false, new Error("network unavailable"));
+  const { stream, stopCalls } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-word-failure",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => failedSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  await assert.rejects(
+    controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000082",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    }),
+    /network unavailable/
+  );
+  assert.equal(stopCalls() > 0, true);
+});
 
 test("Desktop controller uses the injected session and preserves typed persistence order", async () => {
   const fakeSession = new FakeSession();

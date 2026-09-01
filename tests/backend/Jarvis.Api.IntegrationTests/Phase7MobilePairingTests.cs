@@ -300,6 +300,7 @@ public sealed class Phase7MobilePairingTests
         Assert.NotEqual(Guid.Empty, provider.LastRequest!.UserId);
         Assert.Contains("Jarvis", provider.LastRequest.Context.Instructions, StringComparison.Ordinal);
         var realtime = (await accepted.Content.ReadFromJsonAsync<RealtimeClientSecretResponse>())!;
+        Assert.Null(realtime.WakeWord);
 
         using (var connected = new HttpRequestMessage(
             HttpMethod.Post,

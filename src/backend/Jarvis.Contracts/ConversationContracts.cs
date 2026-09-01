@@ -112,6 +112,11 @@ public sealed record RealtimeClientSecretRequest(
     Guid DeviceId,
     string? PreferredVoice = null);
 
+public sealed record WakeWordBootstrapResponse(
+    bool Enabled,
+    string Keyword,
+    string PicovoiceAccessKey);
+
 public sealed record RealtimeClientSecretResponse(
     Guid RealtimeSessionId,
     Guid ConversationId,
@@ -123,7 +128,8 @@ public sealed record RealtimeClientSecretResponse(
     string Voice,
     string WebRtcUrl,
     long ContextVersion,
-    long SessionRotationAt);
+    long SessionRotationAt,
+    WakeWordBootstrapResponse? WakeWord = null);
 
 public sealed record RealtimeSessionConnectedRequest(string ExternalSessionId);
 

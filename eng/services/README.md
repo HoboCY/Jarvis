@@ -12,6 +12,7 @@ dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:ApiKey" "<opena
 dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:RealtimeModel" "<enabled-realtime-model>"
 dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:SafetyIdentifierSalt" "<random-local-salt>"
 dotnet user-secrets set --project src/backend/Jarvis.Api "DeepSeek:ApiKey" "<deepseek-api-key>"
+dotnet user-secrets set --project src/backend/Jarvis.Api "WakeWord:PicovoiceAccessKey" "<picovoice-access-key>"
 
 DOTNET_ENVIRONMENT=Development dotnet run --project src/backend/Jarvis.Api --urls http://127.0.0.1:5004
 ```
@@ -23,6 +24,23 @@ continue to provide `JARVIS_LOCAL_BEARER` to the Desktop process separately.
 
 Production `appsettings.Production.json` and the launchd service configuration
 continue to work unchanged.
+
+Desktop Realtime bootstrap requires a Picovoice AccessKey. Request one from
+the Picovoice Console and keep it in ASP.NET Core User Secrets; never commit
+the value or place it in the Desktop bundle, source, logs, or database. The
+non-secret `WakeWord:Enabled=true` and `WakeWord:Keyword=Jarvis` defaults live
+in `src/backend/Jarvis.Api/appsettings.json`. The authenticated Desktop
+bootstrap response delivers the key only in memory to the local renderer; a
+Mobile bootstrap response does not include it. If the key is missing, the
+Desktop bootstrap fails closed with an actionable configuration error.
+
+After a Desktop Realtime connection is established, its outgoing WebRTC track
+starts disabled. While the UI says `等待唤醒词 Jarvis`, microphone audio is
+processed only locally by Picovoice Porcupine and is not sent to OpenAI. Saying
+`Jarvis` enables one voice turn; after the assistant's response completes the
+track is disabled again. Typed input remains available in standby. Disconnect,
+failed connection, and rotation cleanup stop only the application-owned
+microphone tracks.
 
 The API and Device Node are independent launchd services. Their templates hold
 only bounded paths, the loopback API port, and non-secret environment values;

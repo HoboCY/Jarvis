@@ -303,12 +303,31 @@ public static class SafetyIdentifier
     }
 }
 
+public sealed record WakeWordConfiguration(
+    bool Enabled,
+    string Keyword,
+    string PicovoiceAccessKey);
+
+public sealed class WakeWordConfigurationException : InvalidOperationException
+{
+    public WakeWordConfigurationException(string message)
+        : base(message)
+    {
+    }
+}
+
+public interface IWakeWordConfigurationProvider
+{
+    WakeWordConfiguration GetRequired();
+}
+
 public sealed record RealtimeBootstrapContext(
     Guid UserId,
     Guid ConversationId,
     Guid DeviceId,
     ContextPackage Context,
-    string? PreferredVoice);
+    string? PreferredVoice,
+    DeviceTypeValue DeviceType);
 
 public sealed record StoredClientSecretRequest(
     string RequestHash,

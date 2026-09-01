@@ -97,6 +97,15 @@ importers:
       '@microsoft/signalr':
         specifier: 8.0.7
         version: 8.0.7(encoding@0.1.13)
+      '@openai/agents-realtime':
+        specifier: 0.17.0
+        version: 0.17.0(zod@4.4.3)
+      '@picovoice/porcupine-web':
+        specifier: 4.0.1
+        version: 4.0.1
+      '@picovoice/web-voice-processor':
+        specifier: 4.0.10
+        version: 4.0.10
       '@types/node':
         specifier: 24.3.0
         version: 24.3.0
@@ -1430,6 +1439,22 @@ packages:
     peerDependencies:
       zod: ^4.0.0
 
+  '@picovoice/porcupine-web@4.0.1':
+    resolution: {integrity: sha512-FtmVJmxcyZS0zLf3X7Uo2ecnX49gTmw5hqI44LHTlf3VScfqoUT5h7CRSbX9Rqi478bexFpK7fnyMeALDniQ4Q==}
+    engines: {node: '>=18'}
+
+  '@picovoice/web-utils@1.3.1':
+    resolution: {integrity: sha512-jcDqdULtTm+yJrnHDjg64hARup+Z4wNkYuXHNx6EM8+qZkweBq9UA6XJrHAlUkPnlkso4JWjaIKhz3x8vZcd3g==}
+    hasBin: true
+
+  '@picovoice/web-utils@1.4.4':
+    resolution: {integrity: sha512-jmwzU3v7ZvL98LbHI0Df99RNz/THCvp8S7DCFvH4KH7GL6kO1YqHDuqdkuy7/xLt+76nbj8R/2LSeVbLsSFGAw==}
+    engines: {node: '>=14'}
+    hasBin: true
+
+  '@picovoice/web-voice-processor@4.0.10':
+    resolution: {integrity: sha512-8ZSf0/NoNTxLrampYWKvwMLr7Uwr1dHYEqDcwaMby1vq4za/mgbKMQmv0mZSrBkkWK67lZHYb4mxJg0MQFlD4w==}
+
   '@react-native-community/cli-clean@20.2.0':
     resolution: {integrity: sha512-krqbhFiwHN8l5wZ2XTcrNq9N+DqDWHxW8RK0bIcrK0O+fMvjYi9e/1Pnx2W0CTotOVcZpHzUbgZ4TQVF231Skw==}
 
@@ -2307,6 +2332,10 @@ packages:
 
   command-exists@1.2.9:
     resolution: {integrity: sha512-LTQ/SGc+s0Xc0Fu5WaKnR0YiygZkm9eKFvyS+fRsU7/ZWFF8ykFM6Pc9aCVf1+xasOOZpO3BAVgVrKvsqKHV7w==}
+
+  commander@10.0.1:
+    resolution: {integrity: sha512-y4Mg2tXshplEbSGzx7amzPwKKOCGuoSRP/CjEdwwk0FOGlUbq6lKuoyDZTNZkmxHdJtp54hdfY/JUrdL7Xfdug==}
+    engines: {node: '>=14'}
 
   commander@11.1.0:
     resolution: {integrity: sha512-yPVavfyCcRhmorC7rWlkHn15b4wDVgVmBA7kV4QVBsF7kv/9TKJAbAXVTxvTnwP8HHKjRCJDClKbciiYS7p0DQ==}
@@ -7005,6 +7034,22 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@picovoice/porcupine-web@4.0.1':
+    dependencies:
+      '@picovoice/web-utils': 1.4.4
+
+  '@picovoice/web-utils@1.3.1':
+    dependencies:
+      commander: 9.5.0
+
+  '@picovoice/web-utils@1.4.4':
+    dependencies:
+      commander: 10.0.1
+
+  '@picovoice/web-voice-processor@4.0.10':
+    dependencies:
+      '@picovoice/web-utils': 1.3.1
+
   '@react-native-community/cli-clean@20.2.0':
     dependencies:
       '@react-native-community/cli-tools': 20.2.0
@@ -8249,6 +8294,8 @@ snapshots:
   colorette@2.0.20: {}
 
   command-exists@1.2.9: {}
+
+  commander@10.0.1: {}
 
   commander@11.1.0: {}
 
