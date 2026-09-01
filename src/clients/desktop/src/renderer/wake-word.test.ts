@@ -1,79 +1,86 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
-  WakeWordDetectorAdapter,
-  type WakeWordEngine,
-  type WakeWordProcessor
+  IpcWakeWordDetector,
+  builtInWakeWord,
+  type WakeWordBridge
 } from "./wake-word.js";
 
-test("WakeWordDetectorAdapter starts local processing, publishes Jarvis detections, and releases it", async () => {
+function fakeBridge(): {
+  bridge: WakeWordBridge;
+  detect: () => void;
+  fail: () => void;
+  lifecycle: string[];
+} {
   const lifecycle: string[] = [];
-  let detect: (() => void) | undefined;
-  const engine: WakeWordEngine = {
-    release: async () => {
-      lifecycle.push("release");
+  let detectionListener: (() => void) | undefined;
+  let errorListener: ((message: string) => void) | undefined;
+  return {
+    bridge: {
+      startWakeWordDetection: async keyword => {
+        lifecycle.push(`start:${keyword}`);
+      },
+      stopWakeWordDetection: async () => {
+        lifecycle.push("stop");
+      },
+      onWakeWordDetected: listener => {
+        detectionListener = listener;
+        lifecycle.push("listen:detected");
+        return () => {
+          detectionListener = undefined;
+          lifecycle.push("remove:detected");
+        };
+      },
+      onWakeWordError: listener => {
+        errorListener = listener;
+        lifecycle.push("listen:error");
+        return () => {
+          errorListener = undefined;
+          lifecycle.push("remove:error");
+        };
+      }
     },
-    terminate: () => {
-      lifecycle.push("terminate");
-    }
+    detect: () => detectionListener?.(),
+    fail: () => errorListener?.("microphone failed"),
+    lifecycle
   };
-  const processor: WakeWordProcessor = {
-    subscribe: async subscribed => {
-      assert.equal(subscribed, engine);
-      lifecycle.push("subscribe");
-    },
-    unsubscribe: async unsubscribed => {
-      assert.equal(unsubscribed, engine);
-      lifecycle.push("unsubscribe");
-    }
-  };
-  const detector = new WakeWordDetectorAdapter(
-    async onDetected => {
-      detect = onDetected;
-      lifecycle.push("create");
-      return engine;
-    },
-    processor);
+}
+
+test("IpcWakeWordDetector publishes Chinese Jarvis detections and releases main-process audio", async () => {
+  const fake = fakeBridge();
+  const detector = new IpcWakeWordDetector(fake.bridge, builtInWakeWord);
   const states: string[] = [];
-  detector.onStateChange(state => states.push(state));
   let detections = 0;
+  detector.onStateChange(state => states.push(state));
   detector.onDetected(() => detections++);
 
   await detector.start();
-  assert.equal(detector.state, "listening");
-  detect?.();
+  fake.detect();
   assert.equal(detections, 1);
+  assert.equal(detector.state, "listening");
 
   await detector.stop();
-  assert.equal(detector.state, "stopped");
-  assert.deepEqual(lifecycle, ["create", "subscribe", "unsubscribe", "release", "terminate"]);
+  fake.detect();
+  assert.equal(detections, 1);
   assert.deepEqual(states, ["starting", "listening", "stopped"]);
+  assert.deepEqual(fake.lifecycle, [
+    "listen:detected",
+    "listen:error",
+    "start:贾维斯",
+    "remove:detected",
+    "remove:error",
+    "stop"
+  ]);
 });
 
-test("WakeWordDetectorAdapter cleans up a processor that fails while subscribing", async () => {
-  const lifecycle: string[] = [];
-  const engine: WakeWordEngine = {
-    release: async () => {
-      lifecycle.push("release");
-    },
-    terminate: () => {
-      lifecycle.push("terminate");
-    }
-  };
-  const processor: WakeWordProcessor = {
-    subscribe: async () => {
-      lifecycle.push("subscribe");
-      throw new Error("processor microphone setup failed");
-    },
-    unsubscribe: async unsubscribed => {
-      assert.equal(unsubscribed, engine);
-      lifecycle.push("unsubscribe");
-    }
-  };
-  const detector = new WakeWordDetectorAdapter(async () => engine, processor);
+test("IpcWakeWordDetector fails closed when the main-process detector reports an error", async () => {
+  const fake = fakeBridge();
+  const detector = new IpcWakeWordDetector(fake.bridge, builtInWakeWord);
 
-  await assert.rejects(detector.start(), /processor microphone setup failed/);
+  await detector.start();
+  fake.fail();
 
   assert.equal(detector.state, "error");
-  assert.deepEqual(lifecycle, ["subscribe", "unsubscribe", "release", "terminate"]);
+  await detector.stop();
+  assert.equal(detector.state, "stopped");
 });

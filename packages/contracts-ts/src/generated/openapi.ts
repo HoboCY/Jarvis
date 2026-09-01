@@ -1399,7 +1399,6 @@ export interface components {
         WakeWordBootstrapResponse: {
             enabled: boolean;
             keyword: string;
-            picovoiceAccessKey: string;
         };
         /** @enum {unknown} */
         WorkerKindValue: "internal" | "responses" | "codex";

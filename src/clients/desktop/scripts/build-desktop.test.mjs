@@ -14,8 +14,30 @@ const distRoot = new URL("../dist/", import.meta.url);
 const expectedFiles = new Set([
   "assets/JarvisTemplate.png",
   "assets/JarvisTemplate@2x.png",
-  "assets/porcupine_params.pv",
+  "assets/sherpa-kws-wenetspeech-3.3M/MODEL_INFO.md",
+  "assets/sherpa-kws-wenetspeech-3.3M/decoder.int8.onnx",
+  "assets/sherpa-kws-wenetspeech-3.3M/encoder.int8.onnx",
+  "assets/sherpa-kws-wenetspeech-3.3M/joiner.int8.onnx",
+  "assets/sherpa-kws-wenetspeech-3.3M/tokens.txt",
   "main/main.js",
+  "node_modules/node-cpal/bin/darwin-arm64/index.node",
+  "node_modules/node-cpal/cpal-values.js",
+  "node_modules/node-cpal/facade.js",
+  "node_modules/node-cpal/index.js",
+  "node_modules/node-cpal/package.json",
+  "node_modules/sherpa-onnx/README.md",
+  "node_modules/sherpa-onnx/index.js",
+  "node_modules/sherpa-onnx/package.json",
+  "node_modules/sherpa-onnx/sherpa-onnx-asr.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-kws.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-punctuation.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-speaker-diarization.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-speech-enhancement.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-tts.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-vad.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-wasm-nodejs.js",
+  "node_modules/sherpa-onnx/sherpa-onnx-wasm-nodejs.wasm",
+  "node_modules/sherpa-onnx/sherpa-onnx-wave.js",
   "preload/index.cjs",
   "preload/overlay.cjs",
   "renderer/index.html",
@@ -87,6 +109,9 @@ test("main bundle points to CommonJS preload entry files", async () => {
 test("desktop build metadata removes unused API client and pins esbuild", async () => {
   const packageJson = JSON.parse(await readFile(new URL("package.json", desktopRoot), "utf8"));
   assert.equal(packageJson.dependencies?.["@jarvis/api-client-ts"], undefined);
+  assert.equal(packageJson.dependencies?.["node-cpal"], "1.0.0");
+  assert.equal(packageJson.dependencies?.["sherpa-onnx"], "1.13.7");
+  assert.equal(packageJson.devDependencies?.["@picovoice/porcupine-web"], undefined);
   assert.equal(packageJson.devDependencies?.esbuild, "0.25.0");
 });
 

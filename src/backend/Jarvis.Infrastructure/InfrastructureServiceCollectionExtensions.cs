@@ -125,8 +125,9 @@ public static class InfrastructureServiceCollectionExtensions
         services
             .AddOptions<WakeWordOptions>()
             .Bind(configuration.GetSection(WakeWordOptions.SectionName))
-            .Validate(options => string.Equals(options.Keyword, "Jarvis", StringComparison.Ordinal),
-                "WakeWord:Keyword must be the built-in Jarvis keyword.")
+            .Validate(options => options.Enabled, "WakeWord:Enabled must remain true for Desktop Realtime.")
+            .Validate(options => string.Equals(options.Keyword, "贾维斯", StringComparison.Ordinal),
+                "WakeWord:Keyword must be the supported Chinese keyword 贾维斯.")
             .ValidateOnStart();
         services.AddSingleton<IWakeWordConfigurationProvider, ConfiguredWakeWordConfigurationProvider>();
         services

@@ -13,9 +13,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
-cleanup() {
-  result_code=$?
-  set +e
+stop_app() {
   if [[ -n "$app_pid" ]] && kill -0 "$app_pid" 2>/dev/null; then
     kill -TERM "$app_pid" 2>/dev/null || true
     for _ in {1..20}; do
@@ -29,6 +27,13 @@ cleanup() {
     fi
     wait "$app_pid" 2>/dev/null || true
   fi
+  app_pid=""
+}
+
+cleanup() {
+  result_code=$?
+  set +e
+  stop_app
   if [[ -n "$install_root" ]]; then
     rm -rf "$install_root"
   fi
@@ -101,11 +106,58 @@ fi
 
 marker_event="$(jq -r '.event // empty' "$marker_path")"
 marker_pid="$(jq -r '.pid // empty' "$marker_path")"
-if [[ "$marker_event" != "renderer.ready" || "$marker_pid" != "$app_pid" ]]; then
+marker_bearer="$(jq -r '.backendBearerConfigured // false' "$marker_path")"
+if [[ "$marker_event" != "renderer.ready" || "$marker_pid" != "$app_pid" || "$marker_bearer" != "true" ]]; then
   echo "Electron smoke marker did not prove the installed process mounted the renderer." >&2
   exit 1
 fi
-echo "Desktop install/start smoke passed: Jarvis.app pid $app_pid mounted the renderer."
+
+credential_path="$user_data_root/credentials/local-api-bearer.bin"
+if [[ ! -s "$credential_path" || "$(stat -f '%Lp' "$credential_path")" != "600" ]]; then
+  echo "Desktop did not persist an owner-only encrypted backend bearer." >&2
+  exit 1
+fi
+if LC_ALL=C grep -aFq "desktop-smoke-not-a-real-secret-0001" "$credential_path"; then
+  echo "Desktop persisted the backend bearer as plaintext." >&2
+  exit 1
+fi
+
+stop_app
+persisted_marker_path="$install_root/renderer-ready-from-keychain.json"
+JARVIS_DESKTOP_SMOKE_MARKER="$persisted_marker_path" \
+JARVIS_DESKTOP_SMOKE_ROOT="$install_root" \
+  "$installed_app/Contents/MacOS/Jarvis" --disable-gpu \
+  --user-data-dir="$user_data_root" \
+  >"$install_root/electron-keychain.stdout.log" 2>"$install_root/electron-keychain.stderr.log" &
+app_pid=$!
+
+persisted_marker_ready=0
+for _ in {1..80}; do
+  if [[ -s "$persisted_marker_path" ]] && kill -0 "$app_pid" 2>/dev/null; then
+    persisted_marker_ready=1
+    break
+  fi
+  if ! kill -0 "$app_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if [[ "$persisted_marker_ready" -ne 1 ]]; then
+  echo "Installed Jarvis.app did not restart with the persisted backend bearer." >&2
+  tail -80 "$install_root/electron-keychain.stderr.log" >&2 || true
+  exit 1
+fi
+
+persisted_marker_event="$(jq -r '.event // empty' "$persisted_marker_path")"
+persisted_marker_pid="$(jq -r '.pid // empty' "$persisted_marker_path")"
+persisted_marker_bearer="$(jq -r '.backendBearerConfigured // false' "$persisted_marker_path")"
+if [[ "$persisted_marker_event" != "renderer.ready" \
+  || "$persisted_marker_pid" != "$app_pid" \
+  || "$persisted_marker_bearer" != "true" ]]; then
+  echo "Desktop restart did not load the persisted backend bearer." >&2
+  exit 1
+fi
+echo "Desktop install/start smoke passed: Jarvis.app persisted and reloaded its Keychain-backed backend bearer."
 
 artifact="$forge_artifact"
 if [[ -z "$artifact" ]]; then

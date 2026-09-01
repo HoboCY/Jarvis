@@ -6224,8 +6224,7 @@
       "WakeWordBootstrapResponse": {
         "required": [
           "enabled",
-          "keyword",
-          "picovoiceAccessKey"
+          "keyword"
         ],
         "type": "object",
         "properties": {
@@ -6233,9 +6232,6 @@
             "type": "boolean"
           },
           "keyword": {
-            "type": "string"
-          },
-          "picovoiceAccessKey": {
             "type": "string"
           }
         }

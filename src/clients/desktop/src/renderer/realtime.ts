@@ -215,7 +215,7 @@ export class DesktopRealtimeController {
     this.removeWakeWordDetection = detector.onDetected(() => this.wake());
     this.removeWakeWordState = detector.onStateChange(state => {
       if (state === "error") {
-        this.onStatus(this.statusValue, "本地唤醒词检测不可用，请检查 Picovoice 配置和麦克风权限。");
+        this.onStatus(this.statusValue, "本地中文唤醒词检测不可用，请检查模型文件和麦克风权限。");
       }
     });
     this.onWakeStateChange = onWakeStateChange;

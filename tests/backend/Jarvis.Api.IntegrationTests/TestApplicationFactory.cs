@@ -22,7 +22,6 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
     private readonly string? _workerDeviceId;
     private readonly IResponsesRuntime? _responsesRuntime;
     private readonly ISummaryProvider? _summaryProvider;
-    private readonly string? _wakeWordAccessKey;
 
     public TestApplicationFactory()
         : this(null, true, null)
@@ -39,8 +38,7 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         IFakeDelayAdapter? fakeDelayAdapter = null,
         string? workerDeviceId = null,
         IResponsesRuntime? responsesRuntime = null,
-        ISummaryProvider? summaryProvider = null,
-        string? wakeWordAccessKey = "test-picovoice-access-key")
+        ISummaryProvider? summaryProvider = null)
     {
         DatabasePath = databasePath ?? Path.Combine(
             Path.GetTempPath(),
@@ -54,7 +52,6 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
         _workerDeviceId = workerDeviceId;
         _responsesRuntime = responsesRuntime;
         _summaryProvider = summaryProvider;
-        _wakeWordAccessKey = wakeWordAccessKey;
     }
 
     public string DatabasePath { get; }
@@ -85,7 +82,7 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             ["OpenAI:SafetyIdentifierSalt"] = "test-safety-salt",
             ["OpenAI:ClientSecretLifetimeSeconds"] = "600",
             ["WakeWord:Enabled"] = "true",
-            ["WakeWord:Keyword"] = "Jarvis",
+            ["WakeWord:Keyword"] = "贾维斯",
             ["Responses:Provider"] = "OpenAI",
             ["Responses:Model"] = "gpt-4.1-mini",
             ["Responses:SummarizerModel"] = "gpt-4.1-mini",
@@ -96,10 +93,6 @@ public sealed class TestApplicationFactory : WebApplicationFactory<Program>
             ["DeepSeek:BaseUrl"] = "https://api.deepseek.com/",
             ["Diagnostics:AllowTestServerLoopback"] = "true"
         };
-        if (_wakeWordAccessKey is not null)
-        {
-            settings["WakeWord:PicovoiceAccessKey"] = _wakeWordAccessKey;
-        }
         if (_workerDeviceId is not null)
         {
             settings["FakeWorker:WorkerDeviceId"] = _workerDeviceId;

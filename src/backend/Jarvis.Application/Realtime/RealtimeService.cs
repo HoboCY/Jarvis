@@ -130,7 +130,7 @@ public sealed class RealtimeService(
             stored.Response.StartedAtMs + TimeSpan.FromMinutes(50).Ticks / TimeSpan.TicksPerMillisecond,
             wakeWord is null
                 ? null
-                : new WakeWordBootstrapResponse(wakeWord.Enabled, wakeWord.Keyword, wakeWord.PicovoiceAccessKey));
+                : new WakeWordBootstrapResponse(wakeWord.Enabled, wakeWord.Keyword));
         replayCache.Set(userId, normalizedKey, requestHash, response);
         return new(existing is null ? RealtimeOperationStatus.Succeeded : RealtimeOperationStatus.Replayed, response);
     }

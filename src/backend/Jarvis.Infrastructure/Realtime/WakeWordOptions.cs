@@ -9,9 +9,7 @@ public sealed class WakeWordOptions
 
     public bool Enabled { get; set; } = true;
 
-    public string Keyword { get; set; } = "Jarvis";
-
-    public string? PicovoiceAccessKey { get; set; }
+    public string Keyword { get; set; } = "贾维斯";
 }
 
 public sealed class ConfiguredWakeWordConfigurationProvider(
@@ -20,15 +18,8 @@ public sealed class ConfiguredWakeWordConfigurationProvider(
     public WakeWordConfiguration GetRequired()
     {
         var settings = options.Value;
-        if (string.IsNullOrWhiteSpace(settings.PicovoiceAccessKey))
-        {
-            throw new WakeWordConfigurationException(
-                "WakeWord:PicovoiceAccessKey is required for Desktop Realtime bootstrap. Configure it with ASP.NET Core User Secrets.");
-        }
-
         return new WakeWordConfiguration(
             settings.Enabled,
-            settings.Keyword,
-            settings.PicovoiceAccessKey.Trim());
+            settings.Keyword);
     }
 }

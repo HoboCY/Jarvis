@@ -12,32 +12,45 @@ dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:ApiKey" "<opena
 dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:RealtimeModel" "<enabled-realtime-model>"
 dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:SafetyIdentifierSalt" "<random-local-salt>"
 dotnet user-secrets set --project src/backend/Jarvis.Api "DeepSeek:ApiKey" "<deepseek-api-key>"
-dotnet user-secrets set --project src/backend/Jarvis.Api "WakeWord:PicovoiceAccessKey" "<picovoice-access-key>"
 
 DOTNET_ENVIRONMENT=Development dotnet run --project src/backend/Jarvis.Api --urls http://127.0.0.1:5004
 ```
 
 Secret Manager loads `secrets.json` only when the API runs in the Development
 environment. Environment variables and command-line arguments remain supported
-and take precedence. The Desktop and Renderer do not read the API secret store;
-continue to provide `JARVIS_LOCAL_BEARER` to the Desktop process separately.
+and take precedence. The Desktop and Renderer do not read the API secret store.
+
+For the first packaged Desktop launch, provide the same bearer once:
+
+```sh
+JARVIS_LOCAL_BEARER="<same-bearer-as-Authentication:BearerToken>" \
+  src/clients/desktop/out/Jarvis-darwin-arm64/Jarvis.app/Contents/MacOS/Jarvis
+```
+
+Jarvis validates the value, uses Electron `safeStorage` to encrypt it with
+macOS Keychain-backed protection, and writes only the ciphertext to the current
+user's Jarvis data directory with owner-only permissions. Quit an already
+running Jarvis instance before this one-time launch. Later launches can be made
+normally from Finder without `JARVIS_LOCAL_BEARER`. Supplying the environment
+variable again always overrides and replaces the stored value, which is also
+the rotation procedure after changing `Authentication:BearerToken` in User
+Secrets. An invalid environment override fails closed instead of falling back
+to an older stored token.
 
 Production `appsettings.Production.json` and the launchd service configuration
 continue to work unchanged.
 
-Desktop Realtime bootstrap requires a Picovoice AccessKey. Request one from
-the Picovoice Console and keep it in ASP.NET Core User Secrets; never commit
-the value or place it in the Desktop bundle, source, logs, or database. The
-non-secret `WakeWord:Enabled=true` and `WakeWord:Keyword=Jarvis` defaults live
-in `src/backend/Jarvis.Api/appsettings.json`. The authenticated Desktop
-bootstrap response delivers the key only in memory to the local renderer; a
-Mobile bootstrap response does not include it. If the key is missing, the
-Desktop bootstrap fails closed with an actionable configuration error.
+Desktop Realtime uses the bundled sherpa-onnx WenetSpeech model for local
+Chinese wake-word detection. It requires no account, network request, API key,
+or User Secret. The required `WakeWord:Enabled=true` and
+`WakeWord:Keyword=贾维斯` settings live in
+`src/backend/Jarvis.Api/appsettings.json`; a Mobile bootstrap response does not
+include the Desktop wake-word configuration.
 
 After a Desktop Realtime connection is established, its outgoing WebRTC track
-starts disabled. While the UI says `等待唤醒词 Jarvis`, microphone audio is
-processed only locally by Picovoice Porcupine and is not sent to OpenAI. Saying
-`Jarvis` enables one voice turn; after the assistant's response completes the
+starts disabled. While the UI says `等待唤醒词 贾维斯`, microphone audio is
+processed only locally by sherpa-onnx and is not sent to OpenAI. Saying
+`贾维斯` enables one voice turn; after the assistant's response completes the
 track is disabled again. Typed input remains available in standby. Disconnect,
 failed connection, and rotation cleanup stop only the application-owned
 microphone tracks.

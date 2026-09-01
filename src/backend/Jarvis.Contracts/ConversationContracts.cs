@@ -114,8 +114,7 @@ public sealed record RealtimeClientSecretRequest(
 
 public sealed record WakeWordBootstrapResponse(
     bool Enabled,
-    string Keyword,
-    string PicovoiceAccessKey);
+    string Keyword);
 
 public sealed record RealtimeClientSecretResponse(
     Guid RealtimeSessionId,

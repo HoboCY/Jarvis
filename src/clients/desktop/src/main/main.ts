@@ -1,9 +1,9 @@
 import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, systemPreferences, Tray } from "electron";
 import { randomUUID } from "node:crypto";
 import { chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getRendererEntryUrl,
@@ -17,8 +17,14 @@ import {
   shouldHideWindowOnClose
 } from "./desktop-lifecycle.js";
 import { resolveBackendBaseUrl } from "./backend-config.js";
+import {
+  DesktopBearerStore,
+  desktopBearerEnvironmentVariable,
+  resolveDesktopBearer
+} from "./desktop-bearer-store.js";
 import { isUuid } from "./input-validation.js";
 import { desktopSignalRLogLevel } from "./signalr-config.js";
+import { SherpaWakeWordService, supportedWakeWord } from "./wake-word-service.js";
 
 type JsonRecord = Record<string, unknown>;
 type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
@@ -29,7 +35,6 @@ type BackendConnectionState = {
 };
 
 const backendBaseUrl = resolveBackendBaseUrl();
-const backendBearer = process.env.JARVIS_LOCAL_BEARER;
 const clientHubPath = "/hubs/client";
 const taskApiPath = "/api/v1/tasks";
 const memoryFactApiPath = "/api/v1/memory-facts";
@@ -55,11 +60,84 @@ let signalRConnection: HubConnection | undefined;
 let rendererEntryUrl: string | undefined;
 let isQuitting = false;
 let overlayHideTimer: NodeJS.Timeout | undefined;
+let wakeWordService: SherpaWakeWordService | undefined;
+let backendBearer: string | undefined;
+let backendBearerConfigurationError: Error | undefined;
 let backendConnectionState: BackendConnectionState = {
-  state: backendBearer && backendBearer.length >= 32 ? "connecting" : "disconnected",
+  state: "disconnected",
   revision: 0
 };
 const notificationProjectionCache = new NotificationProjectionCache();
+
+function configureBackendBearer(): void {
+  try {
+    const resolution = resolveDesktopBearer(
+      process.env[desktopBearerEnvironmentVariable],
+      new DesktopBearerStore(
+        join(app.getPath("userData"), "credentials", "local-api-bearer.bin"),
+        safeStorage));
+    backendBearer = resolution.token;
+    backendBearerConfigurationError = resolution.token
+      ? undefined
+      : new Error(
+        `The Desktop backend bearer is not configured. Launch Jarvis once with ${desktopBearerEnvironmentVariable}.`);
+    if (resolution.persistenceError) {
+      console.error(
+        "The Desktop backend bearer is available for this process but could not be persisted with macOS Keychain encryption.",
+        resolution.persistenceError);
+    }
+  } catch (error) {
+    backendBearer = undefined;
+    backendBearerConfigurationError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  backendConnectionState = {
+    state: backendBearer ? "connecting" : "disconnected",
+    revision: 0,
+    ...(backendBearerConfigurationError?.message
+      ? { error: backendBearerConfigurationError.message }
+      : {})
+  };
+}
+
+function wakeWordModelRoot(): string {
+  const assetPath = fileURLToPath(new URL("../assets/sherpa-kws-wenetspeech-3.3M/", import.meta.url));
+  if (!app.isPackaged) {
+    return assetPath;
+  }
+
+  return assetPath.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
+}
+
+function publishWakeWordEvent(channel: "wake-word:detected" | "wake-word:error", value?: string): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, value);
+  }
+}
+
+function stopWakeWordService(): void {
+  try {
+    wakeWordService?.stop();
+  } catch (error) {
+    console.error("Failed to stop local wake-word detection.", error);
+  }
+}
+
+async function ensureMicrophoneAccess(): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  const status = systemPreferences.getMediaAccessStatus("microphone");
+  if (status === "granted") {
+    return;
+  }
+  if (status === "not-determined" && await systemPreferences.askForMediaAccess("microphone")) {
+    return;
+  }
+
+  throw new Error("Microphone access is required for local Chinese wake-word detection.");
+}
 
 function publishBackendConnectionState(
   window: BrowserWindow,
@@ -118,6 +196,7 @@ async function writeDesktopSmokeMarker(window: BrowserWindow): Promise<void> {
       const rendererMounted = await window.webContents.executeJavaScript(rendererMountProbe);
       if (rendererMounted === true) {
         writeFileSync(markerFullPath, `${JSON.stringify({
+          backendBearerConfigured: Boolean(backendBearer && backendBearer.length >= 32),
           event: "renderer.ready",
           pid: process.pid,
           version: app.getVersion(),
@@ -142,7 +221,8 @@ async function requestBackend(
   idempotencyKey?: string
 ): Promise<unknown> {
   if (!backendBearer || backendBearer.length < 32) {
-    throw new Error("The Desktop backend bearer is not configured in the Electron main process.");
+    throw backendBearerConfigurationError
+      ?? new Error("The Desktop backend bearer is not configured in the Electron main process.");
   }
 
   const headers = new Headers({ Authorization: `Bearer ${backendBearer}` });
@@ -384,6 +464,7 @@ function configureMainWindow(window: BrowserWindow): void {
   });
   window.on("closed", () => {
     if (mainWindow === window) {
+      stopWakeWordService();
       mainWindow = undefined;
     }
   });
@@ -454,13 +535,14 @@ function createTray(): void {
 }
 
 function startSignalR(window: BrowserWindow): HubConnection | undefined {
-  if (!backendBearer || backendBearer.length < 32) {
+  const bearer = backendBearer;
+  if (!bearer || bearer.length < 32) {
     return undefined;
   }
 
   const connection = new HubConnectionBuilder()
     .withUrl(new URL(clientHubPath, backendBaseUrl).toString(), {
-      accessTokenFactory: () => backendBearer
+      accessTokenFactory: () => bearer
     })
     .configureLogging(desktopSignalRLogLevel)
     .withAutomaticReconnect()
@@ -502,7 +584,23 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.whenReady().then(() => {
+    configureBackendBearer();
+    wakeWordService = new SherpaWakeWordService({
+      modelRoot: wakeWordModelRoot(),
+      onDetected: () => publishWakeWordEvent("wake-word:detected"),
+      onError: error => publishWakeWordEvent("wake-word:error", error.message)
+    });
     ipcMain.handle("app:getVersion", () => app.getVersion());
+    ipcMain.handle("wake-word:start", async (_event, value: unknown) => {
+      const input = requiredBody(value);
+      const keyword = requiredString(input.keyword, "keyword", 20);
+      if (keyword !== supportedWakeWord) {
+        throw new Error("Unsupported Desktop wake word.");
+      }
+      await ensureMicrophoneAccess();
+      wakeWordService?.start(keyword);
+    });
+    ipcMain.handle("wake-word:stop", () => wakeWordService?.stop());
     ipcMain.handle("backend:getConnectionState", () => backendConnectionState);
     ipcMain.handle("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
     ipcMain.handle("backend:getDesktopDevice", () =>
@@ -774,6 +872,7 @@ app.on("activate", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stopWakeWordService();
   if (signalRConnection) {
     void signalRConnection.stop();
   }

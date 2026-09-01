@@ -1,29 +1,6 @@
-import { BuiltInKeyword, PorcupineWorker } from "@picovoice/porcupine-web/dist/esm/index.js";
-import { WebVoiceProcessor } from "@picovoice/web-voice-processor/dist/esm/index.js";
-
-type PvEngine = {
-  onmessage?: ((event: MessageEvent) => unknown) | null;
-  postMessage?: (event: unknown) => void;
-  worker?: {
-    onmessage?: ((event: MessageEvent) => unknown) | null;
-    postMessage?: (event: unknown) => void;
-  };
-};
-
-export const builtInWakeWord = "Jarvis" as const;
+export const builtInWakeWord = "贾维斯" as const;
 
 export type WakeWordState = "stopped" | "starting" | "listening" | "error";
-
-export type WakeWordEngine = {
-  release: () => Promise<void>;
-  terminate: () => void;
-  worker?: unknown;
-};
-
-export type WakeWordProcessor = {
-  subscribe: (engine: WakeWordEngine) => Promise<void>;
-  unsubscribe: (engine: WakeWordEngine) => Promise<void>;
-};
 
 export type WakeWordDetector = {
   readonly state: WakeWordState;
@@ -33,18 +10,23 @@ export type WakeWordDetector = {
   onStateChange: (listener: (state: WakeWordState) => void) => () => void;
 };
 
-export type WakeWordEngineFactory = (onDetected: () => void) => Promise<WakeWordEngine>;
+export type WakeWordBridge = {
+  startWakeWordDetection: (keyword: string) => Promise<void>;
+  stopWakeWordDetection: () => Promise<void>;
+  onWakeWordDetected: (listener: () => void) => () => void;
+  onWakeWordError: (listener: (message: string) => void) => () => void;
+};
 
-export class WakeWordDetectorAdapter implements WakeWordDetector {
-  private engine: WakeWordEngine | undefined;
-  private subscribed = false;
+export class IpcWakeWordDetector implements WakeWordDetector {
   private stateValue: WakeWordState = "stopped";
+  private removeBridgeDetection: (() => void) | undefined;
+  private removeBridgeError: (() => void) | undefined;
   private readonly detectionListeners = new Set<() => void>();
   private readonly stateListeners = new Set<(state: WakeWordState) => void>();
 
   public constructor(
-    private readonly createEngine: WakeWordEngineFactory,
-    private readonly processor: WakeWordProcessor
+    private readonly bridge: WakeWordBridge,
+    private readonly keyword: typeof builtInWakeWord
   ) {}
 
   public get state(): WakeWordState {
@@ -67,87 +49,55 @@ export class WakeWordDetectorAdapter implements WakeWordDetector {
     }
 
     this.setState("starting");
-    let engine: WakeWordEngine | undefined;
+    this.removeBridgeDetection = this.bridge.onWakeWordDetected(() => {
+      if (this.stateValue !== "listening") {
+        return;
+      }
+      for (const listener of this.detectionListeners) {
+        listener();
+      }
+    });
+    this.removeBridgeError = this.bridge.onWakeWordError(() => this.setState("error"));
+
     try {
-      engine = await this.createEngine(() => {
-        if (this.stateValue !== "listening") {
-          return;
-        }
-        for (const listener of this.detectionListeners) {
-          listener();
-        }
-      });
-      this.subscribed = true;
-      await this.processor.subscribe(engine);
-      this.engine = engine;
+      await this.bridge.startWakeWordDetection(this.keyword);
       this.setState("listening");
     } catch (error) {
-      await this.releaseEngine(engine, true);
-      this.subscribed = false;
+      this.releaseBridgeListeners();
+      try {
+        await this.bridge.stopWakeWordDetection();
+      } catch {
+        // Preserve the startup failure while still attempting local cleanup.
+      }
       this.setState("error");
       throw error;
     }
   }
 
   public async stop(): Promise<void> {
-    const engine = this.engine;
-    if (!engine && this.stateValue === "stopped") {
+    if (this.stateValue === "stopped" && !this.removeBridgeDetection && !this.removeBridgeError) {
       return;
     }
 
-    this.engine = undefined;
-    const subscribed = this.subscribed;
-    this.subscribed = false;
-    let failure: unknown;
-    if (engine && subscribed) {
-      try {
-        await this.processor.unsubscribe(engine);
-      } catch (error) {
-        failure = error;
-      }
-    }
-    if (engine) {
-      try {
-        await engine.release();
-      } catch (error) {
-        failure ??= error;
-      }
-      try {
-        engine.terminate();
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-    this.setState("stopped");
-    if (failure) {
-      throw failure;
+    this.releaseBridgeListeners();
+    try {
+      await this.bridge.stopWakeWordDetection();
+    } finally {
+      this.setState("stopped");
     }
   }
 
-  private async releaseEngine(engine: WakeWordEngine | undefined, unsubscribe: boolean): Promise<void> {
-    if (!engine) {
-      return;
-    }
-    if (unsubscribe && this.subscribed) {
-      try {
-        await this.processor.unsubscribe(engine);
-      } catch {
-        // Preserve the initialization failure while still releasing the engine.
-      }
-    }
-    try {
-      await engine.release();
-    } catch {
-      // Preserve the initialization failure while still terminating the worker.
-    }
-    try {
-      engine.terminate();
-    } catch {
-      // Preserve the initialization failure while still reporting the error state.
-    }
+  private releaseBridgeListeners(): void {
+    this.removeBridgeDetection?.();
+    this.removeBridgeError?.();
+    this.removeBridgeDetection = undefined;
+    this.removeBridgeError = undefined;
   }
 
   private setState(state: WakeWordState): void {
+    if (this.stateValue === state) {
+      return;
+    }
     this.stateValue = state;
     for (const listener of this.stateListeners) {
       listener(state);
@@ -155,27 +105,12 @@ export class WakeWordDetectorAdapter implements WakeWordDetector {
   }
 }
 
-export function createPorcupineWakeWordDetector(
-  accessKey: string,
-  modelPublicPath = new URL("../assets/porcupine_params.pv", import.meta.url).toString()
+export function createSherpaWakeWordDetector(
+  bridge: WakeWordBridge,
+  keyword: string
 ): WakeWordDetector {
-  const normalizedAccessKey = accessKey.trim();
-  if (!normalizedAccessKey) {
-    throw new Error("Wake word is unavailable because Picovoice access is not configured.");
+  if (keyword !== builtInWakeWord) {
+    throw new Error(`Unsupported wake word: ${keyword}`);
   }
-
-  const processor: WakeWordProcessor = {
-    subscribe: engine => WebVoiceProcessor.subscribe(engine as PvEngine),
-    unsubscribe: engine => WebVoiceProcessor.unsubscribe(engine as PvEngine)
-  };
-  return new WakeWordDetectorAdapter(
-    async onDetected => {
-      const engine = await PorcupineWorker.create(
-        normalizedAccessKey,
-        BuiltInKeyword.Jarvis,
-        () => onDetected(),
-        { publicPath: modelPublicPath });
-      return engine;
-    },
-    processor);
+  return new IpcWakeWordDetector(bridge, keyword);
 }

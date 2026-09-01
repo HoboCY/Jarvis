@@ -9,7 +9,7 @@ import {
   type DesktopRealtimeStatus,
   type DesktopRealtimeWakeState
 } from "./realtime.js";
-import { createPorcupineWakeWordDetector } from "./wake-word.js";
+import { builtInWakeWord, createSherpaWakeWordDetector } from "./wake-word.js";
 import {
   DesktopTaskNotificationFeed,
   ensureActiveDesktopTaskNotificationFeed,
@@ -56,8 +56,7 @@ type ClientSecret = {
   instructions: string;
   wakeWord: {
     enabled: boolean;
-    keyword: "Jarvis";
-    picovoiceAccessKey: string;
+    keyword: typeof builtInWakeWord;
   };
 };
 
@@ -282,14 +281,12 @@ function clientSecretFrom(value: unknown): ClientSecret {
     throw new Error("Backend returned an invalid ephemeral realtime secret.");
   }
   if (typeof item.wakeWord !== "object" || item.wakeWord === null || Array.isArray(item.wakeWord)) {
-    throw new Error("本地唤醒词未配置，请设置 WakeWord:PicovoiceAccessKey 后重试。");
+    throw new Error("本地中文唤醒词未配置，请检查 WakeWord 设置。");
   }
   const wakeWord = item.wakeWord as Record<string, unknown>;
   if (wakeWord.enabled !== true
-    || wakeWord.keyword !== "Jarvis"
-    || typeof wakeWord.picovoiceAccessKey !== "string"
-    || !wakeWord.picovoiceAccessKey.trim()) {
-    throw new Error("本地唤醒词未配置，请设置 WakeWord:PicovoiceAccessKey 后重试。");
+    || wakeWord.keyword !== builtInWakeWord) {
+    throw new Error("本地中文唤醒词未配置，请检查 WakeWord 设置。");
   }
   const webRtcUrl = new URL(item.webRtcUrl);
   if (webRtcUrl.protocol !== "https:") {
@@ -304,8 +301,7 @@ function clientSecretFrom(value: unknown): ClientSecret {
     instructions: item.instructions,
     wakeWord: {
       enabled: true,
-      keyword: "Jarvis",
-      picovoiceAccessKey: wakeWord.picovoiceAccessKey.trim()
+      keyword: builtInWakeWord
     }
   };
 }
@@ -579,7 +575,7 @@ export function App() {
         idempotencyKey: crypto.randomUUID()
       }));
       ownedMediaStream = await requestApplicationAudioStream();
-      const wakeWordDetector = createPorcupineWakeWordDetector(secret.wakeWord.picovoiceAccessKey);
+      const wakeWordDetector = createSherpaWakeWordDetector(window.jarvis, secret.wakeWord.keyword);
       const voice = secret.voice;
       const nextController = new DesktopRealtimeController(
         activeConversation.id,
@@ -752,7 +748,7 @@ export function App() {
       <p aria-live="polite">状态：{status}{device ? ` · ${device.name}` : ""}</p>
       <p aria-live="polite">
         麦克风：{status === "connected"
-          ? wakeState === "awake" ? "已唤醒" : "等待唤醒词 Jarvis（音频仅在本机检测）"
+          ? wakeState === "awake" ? "已唤醒" : "等待唤醒词“贾维斯”（音频仅在本机检测）"
           : "未连接"}
       </p>
       <button type="button" onClick={() => void loadDiagnostics()}>运行诊断</button>
@@ -808,14 +804,14 @@ export function App() {
               return;
             }
             if (muted && wakeState === "standby") {
-              setError("请先说 Jarvis 唤醒本轮语音输入；文字输入始终可用。");
+              setError("请先说“贾维斯”唤醒本轮语音输入；文字输入始终可用。");
               return;
             }
             activeController.setMicrophoneMuted(!muted);
           }}
           disabled={status !== "connected"}
         >
-          {muted ? "等待 Jarvis 唤醒" : "关闭麦克风"}
+          {muted ? "等待“贾维斯”唤醒" : "关闭麦克风"}
         </button>
         <button type="button" onClick={() => controller.current?.interrupt()} disabled={status !== "connected"}>
           停止助手回答

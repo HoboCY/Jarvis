@@ -113,6 +113,22 @@ const jarvisApi = {
     clientRequestId: string;
     idempotencyKey: string;
   }): Promise<unknown> => ipcRenderer.invoke("backend:decideApproval", input) as Promise<unknown>,
+  startWakeWordDetection: (keyword: string): Promise<void> =>
+    ipcRenderer.invoke("wake-word:start", { keyword }) as Promise<void>,
+  stopWakeWordDetection: (): Promise<void> =>
+    ipcRenderer.invoke("wake-word:stop") as Promise<void>,
+  onWakeWordDetected: (listener: () => void): (() => void) => {
+    const handler = (): void => listener();
+    ipcRenderer.on("wake-word:detected", handler);
+    return () => ipcRenderer.removeListener("wake-word:detected", handler);
+  },
+  onWakeWordError: (listener: (message: string) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+      listener(typeof value === "string" ? value : "Local wake-word detection failed.");
+    };
+    ipcRenderer.on("wake-word:error", handler);
+    return () => ipcRenderer.removeListener("wake-word:error", handler);
+  },
   onBackendEvent: (listener: (event: unknown) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => listener(value);
     ipcRenderer.on("backend:event", handler);

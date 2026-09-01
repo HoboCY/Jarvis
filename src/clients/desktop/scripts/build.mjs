@@ -1,5 +1,5 @@
-import { mkdir, copyFile, rm } from "node:fs/promises";
-import { builtinModules } from "node:module";
+import { cp, mkdir, copyFile, rm } from "node:fs/promises";
+import { builtinModules, createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -11,6 +11,7 @@ const desktopRoot = resolve(scriptsRoot, "..");
 const sourceRoot = join(desktopRoot, "src");
 const distRoot = join(desktopRoot, "dist");
 const repositoryRoot = resolve(desktopRoot, "../../..");
+const requireFromDesktop = createRequire(join(desktopRoot, "package.json"));
 
 const nodeBuiltins = [
   ...new Set([
@@ -142,11 +143,23 @@ assertBuildMetafiles([
 ]);
 
 await mkdir(join(distRoot, "assets"), { recursive: true });
+await mkdir(join(distRoot, "node_modules/node-cpal/bin/darwin-arm64"), { recursive: true });
 await mkdir(join(distRoot, "renderer"), { recursive: true });
+const nodeCpalRoot = dirname(requireFromDesktop.resolve("node-cpal/package.json"));
+const sherpaOnnxRoot = dirname(requireFromDesktop.resolve("sherpa-onnx/package.json"));
 await Promise.all([
   copyFile(join(sourceRoot, "assets/JarvisTemplate.png"), join(distRoot, "assets/JarvisTemplate.png")),
   copyFile(join(sourceRoot, "assets/JarvisTemplate@2x.png"), join(distRoot, "assets/JarvisTemplate@2x.png")),
-  copyFile(join(sourceRoot, "assets/porcupine_params.pv"), join(distRoot, "assets/porcupine_params.pv")),
+  cp(
+    join(sourceRoot, "assets/sherpa-kws-wenetspeech-3.3M"),
+    join(distRoot, "assets/sherpa-kws-wenetspeech-3.3M"),
+    { recursive: true }),
+  cp(sherpaOnnxRoot, join(distRoot, "node_modules/sherpa-onnx"), { recursive: true }),
+  ...["cpal-values.js", "facade.js", "index.js", "package.json"].map(file =>
+    copyFile(join(nodeCpalRoot, file), join(distRoot, "node_modules/node-cpal", file))),
+  copyFile(
+    join(nodeCpalRoot, "bin/darwin-arm64/index.node"),
+    join(distRoot, "node_modules/node-cpal/bin/darwin-arm64/index.node")),
   copyFile(join(sourceRoot, "renderer/index.html"), join(distRoot, "renderer/index.html")),
   copyFile(join(sourceRoot, "renderer/overlay.html"), join(distRoot, "renderer/overlay.html"))
 ]);

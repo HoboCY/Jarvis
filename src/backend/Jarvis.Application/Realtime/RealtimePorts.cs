@@ -305,16 +305,7 @@ public static class SafetyIdentifier
 
 public sealed record WakeWordConfiguration(
     bool Enabled,
-    string Keyword,
-    string PicovoiceAccessKey);
-
-public sealed class WakeWordConfigurationException : InvalidOperationException
-{
-    public WakeWordConfigurationException(string message)
-        : base(message)
-    {
-    }
-}
+    string Keyword);
 
 public interface IWakeWordConfigurationProvider
 {

@@ -56,8 +56,8 @@ public sealed class RealtimeApiTests
         Assert.Contains("Never identify yourself as ChatGPT", secret.Instructions, StringComparison.Ordinal);
         Assert.NotNull(secret.WakeWord);
         Assert.True(secret.WakeWord!.Enabled);
-        Assert.Equal("Jarvis", secret.WakeWord.Keyword);
-        Assert.Equal("test-picovoice-access-key", secret.WakeWord.PicovoiceAccessKey);
+        Assert.Equal("贾维斯", secret.WakeWord.Keyword);
+        Assert.False(secretJson.RootElement.GetProperty("wakeWord").TryGetProperty("picovoiceAccessKey", out _));
         Assert.True(secret.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         Assert.True(secret.SessionRotationAt > secret.ExpiresAt);
 
@@ -184,7 +184,6 @@ public sealed class RealtimeApiTests
             "\n",
             await db.IdempotencyRecords.Select(record => record.ResponseJson).ToListAsync());
         Assert.DoesNotContain("ek_test_ephemeral", durableJson, StringComparison.Ordinal);
-        Assert.DoesNotContain("test-picovoice-access-key", durableJson, StringComparison.Ordinal);
         Assert.DoesNotContain("ek_test_ephemeral", JsonSerializer.Serialize(await db.RealtimeSessions.ToListAsync()), StringComparison.Ordinal);
         Assert.DoesNotContain(
             "ek_test_ephemeral",
@@ -197,37 +196,6 @@ public sealed class RealtimeApiTests
         Assert.Equal(2, invalidations.Count);
         Assert.Contains(invalidations, payload => payload.Contains(secret.RealtimeSessionId.ToString(), StringComparison.Ordinal));
         Assert.Contains(invalidations, payload => payload.Contains(rotatedSecret.RealtimeSessionId.ToString(), StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task DesktopBootstrapFailsClosedWhenPicovoiceAccessKeyIsMissing()
-    {
-        using var factory = new TestApplicationFactory(
-            null,
-            true,
-            null,
-            null,
-            null,
-            new FakeRealtimeClientSecretProvider(),
-            null,
-            null,
-            null,
-            null,
-            null);
-        using var client = CreateAuthenticatedClient(factory);
-        var conversation = await CreateConversationAsync(client, "missing-key", "missing-key-conversation");
-        var deviceResponse = await PostAsync(client, "/api/v1/realtime/desktop-device", new { }, "missing-key-device");
-        var device = (await deviceResponse.Content.ReadFromJsonAsync<DesktopDeviceBootstrapResponse>())!;
-
-        using var response = await PostAsync(
-            client,
-            "/api/v1/realtime/client-secrets",
-            new RealtimeClientSecretRequest(conversation.Id, device.DeviceId),
-            "missing-key-secret");
-
-        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
-        var problem = await response.Content.ReadFromJsonAsync<ProblemDetails>();
-        Assert.Contains("WakeWord:PicovoiceAccessKey is required", problem?.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

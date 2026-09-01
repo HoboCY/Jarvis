@@ -100,6 +100,10 @@ interface Window {
       clientRequestId: string;
       idempotencyKey: string;
     }) => Promise<unknown>;
+    startWakeWordDetection: (keyword: string) => Promise<void>;
+    stopWakeWordDetection: () => Promise<void>;
+    onWakeWordDetected: (listener: () => void) => () => void;
+    onWakeWordError: (listener: (message: string) => void) => () => void;
     onBackendEvent: (listener: (event: unknown) => void) => () => void;
     onBackendConnectionState: (listener: (event: unknown) => void) => () => void;
   };
