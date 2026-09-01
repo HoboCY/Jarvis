@@ -41,6 +41,7 @@ const expectedFiles = new Set([
   "preload/index.cjs",
   "preload/overlay.cjs",
   "renderer/index.html",
+  "renderer/main.css",
   "renderer/main.js",
   "renderer/overlay.html",
   "renderer/overlay.js"
@@ -87,6 +88,14 @@ test("renderer bundles have no bare external imports", async () => {
     () => assertBundleImports("import(dynamicSpecifier)", "renderer-fixture.js", new Set()),
     /dynamic-or-nonliteral/
   );
+});
+
+test("renderer html loads the bundled control-panel stylesheet", async () => {
+  const html = await readBuiltFile("renderer/index.html");
+  const css = await readBuiltFile("renderer/main.css");
+  assert.match(html, /href="\.\/main\.css"/);
+  assert.match(css, /\.jarvis-shell/);
+  assert.match(css, /prefers-reduced-motion/);
 });
 
 test("main and preload bundles externalize only Electron and Node modules", async () => {

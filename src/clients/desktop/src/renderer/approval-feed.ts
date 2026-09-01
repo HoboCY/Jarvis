@@ -49,6 +49,10 @@ export class DesktopApprovalFeed {
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
   }
 
+  public get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   public async refresh(): Promise<void> {
     const generation = ++this.refreshGeneration;
     const approvals = await this.backend.getPendingApprovals();
@@ -130,4 +134,11 @@ export class DesktopApprovalFeed {
       this.approvalById.delete(approvalId);
     }
   }
+}
+
+export function ensureActiveDesktopApprovalFeed(
+  feed: DesktopApprovalFeed | undefined,
+  create: () => DesktopApprovalFeed
+): DesktopApprovalFeed {
+  return feed && !feed.isDisposed ? feed : create();
 }

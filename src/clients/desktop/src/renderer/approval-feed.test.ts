@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   DesktopApprovalFeed,
   approvalDecisionKey,
+  ensureActiveDesktopApprovalFeed,
   type DesktopApproval
 } from "./approval-feed.js";
 
@@ -92,4 +93,23 @@ test("uses SignalR as a hint, deduplicates event ids, and ignores stale refresh 
   release?.([pending]);
   await stale;
   assert.deepEqual(feed.approvals, []);
+});
+
+test("recreates a disposed approval feed during a StrictMode setup-cleanup-setup cycle", () => {
+  let creations = 0;
+  const create = (): DesktopApprovalFeed => {
+    creations++;
+    return new DesktopApprovalFeed({
+      getPendingApprovals: async () => [],
+      decideApproval: async () => pending
+    });
+  };
+
+  const first = ensureActiveDesktopApprovalFeed(undefined, create);
+  first.dispose();
+  const second = ensureActiveDesktopApprovalFeed(first, create);
+
+  assert.notEqual(second, first);
+  assert.equal(second.isDisposed, false);
+  assert.equal(creations, 2);
 });
