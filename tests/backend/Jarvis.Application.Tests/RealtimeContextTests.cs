@@ -6,6 +6,15 @@ namespace Jarvis.Application.Tests;
 public sealed class RealtimeContextTests
 {
     [Fact]
+    public void DefinesJarvisAsTheAssistantProductIdentity()
+    {
+        Assert.StartsWith("You are Jarvis.", ContextAssembler.FixedInstructions, StringComparison.Ordinal);
+        Assert.Contains("Jarvis is your sole product identity and public name.", ContextAssembler.FixedInstructions, StringComparison.Ordinal);
+        Assert.Contains("Never identify yourself as ChatGPT", ContextAssembler.FixedInstructions, StringComparison.Ordinal);
+        Assert.Contains("我是 Jarvis，你的个人助手。", ContextAssembler.FixedInstructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void KeepsFixedSafetyInstructionsAndIndependentBudgets()
     {
         var assembler = new ContextAssembler();

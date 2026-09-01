@@ -50,7 +50,9 @@ public sealed class RealtimeApiTests
         Assert.False(secretJson.RootElement.TryGetProperty("expiresAtMs", out _));
         Assert.False(secretJson.RootElement.TryGetProperty("sessionRotationAtMs", out _));
         Assert.False(secretJson.RootElement.TryGetProperty("externalSessionId", out _));
-        Assert.Contains("You are Jarvis", secret.Instructions, StringComparison.Ordinal);
+        Assert.StartsWith("You are Jarvis.", secret.Instructions, StringComparison.Ordinal);
+        Assert.Contains("Jarvis is your sole product identity and public name.", secret.Instructions, StringComparison.Ordinal);
+        Assert.Contains("Never identify yourself as ChatGPT", secret.Instructions, StringComparison.Ordinal);
         Assert.True(secret.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         Assert.True(secret.SessionRotationAt > secret.ExpiresAt);
 

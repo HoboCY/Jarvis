@@ -3,6 +3,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>Jarvis.Api</AssemblyName>
     <RootNamespace>Jarvis.Api</RootNamespace>
+    <UserSecretsId>Jarvis.Api-e06d4bd7-6d95-4129-9f28-cc7520010f9f</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>

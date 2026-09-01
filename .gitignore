@@ -3,7 +3,6 @@
 .vscode/
 .env
 .env.*
-!.env.example
 
 **/bin/
 **/obj/

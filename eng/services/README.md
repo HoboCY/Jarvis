@@ -2,22 +2,24 @@
 
 ## Local API configuration
 
-For local development, copy the safe template and start only the API:
+`Jarvis.Api` uses the ASP.NET Core Secret Manager for local development. Store
+only secrets and developer-specific values there; non-secret defaults live in
+`src/backend/Jarvis.Api/appsettings.json`.
 
 ```sh
-cp .env.example .env
-chmod 600 .env
-dotnet run --project src/backend/Jarvis.Api --urls http://127.0.0.1:5004
+dotnet user-secrets set --project src/backend/Jarvis.Api "Authentication:BearerToken" "<random-token-at-least-32-characters>"
+dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:ApiKey" "<openai-or-azure-openai-api-key>"
+dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:RealtimeModel" "<enabled-realtime-model>"
+dotnet user-secrets set --project src/backend/Jarvis.Api "OpenAI:SafetyIdentifierSalt" "<random-local-salt>"
+dotnet user-secrets set --project src/backend/Jarvis.Api "DeepSeek:ApiKey" "<deepseek-api-key>"
+
+DOTNET_ENVIRONMENT=Development dotnet run --project src/backend/Jarvis.Api --urls http://127.0.0.1:5004
 ```
 
-Fill the blank required secrets in `.env` before starting the API.
-
-Only `Jarvis.Api` reads `.env`, from the process working directory. Desktop and
-Renderer do not load this file. The file is ignored by Git and must never be
-committed. Existing process environment variables, command-line arguments, and
-`appsettings*.json` values take precedence; `.env` only supplies missing
-configuration. The `--urls` argument remains the way to select the local API
-port.
+Secret Manager loads `secrets.json` only when the API runs in the Development
+environment. Environment variables and command-line arguments remain supported
+and take precedence. The Desktop and Renderer do not read the API secret store;
+continue to provide `JARVIS_LOCAL_BEARER` to the Desktop process separately.
 
 Production `appsettings.Production.json` and the launchd service configuration
 continue to work unchanged.
