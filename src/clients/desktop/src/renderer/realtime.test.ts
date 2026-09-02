@@ -2,7 +2,11 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { NormalizedRealtimeEvent, RealtimeSession } from "@jarvis/realtime-agent";
 import { ensureConversation } from "./conversation-flow.js";
-import { canSendRealtimeText, RealtimeConnectGate } from "./realtime-connect-flow.js";
+import {
+  canSendRealtimeText,
+  RealtimeAutoConnectGate,
+  RealtimeConnectGate
+} from "./realtime-connect-flow.js";
 import {
   DesktopRealtimeController,
   mapRealtimeCancelResponse,
@@ -55,6 +59,35 @@ test("Realtime connect gate collapses concurrent connect attempts into one sessi
   await first;
 
   assert.equal(gate.isRunning, false);
+});
+
+test("startup voice connection runs once and leaves manual retry available after failure", async () => {
+  const connectGate = new RealtimeConnectGate();
+  const startupGate = new RealtimeAutoConnectGate(connectGate);
+  let attempts = 0;
+  let failStartup = true;
+  const connect = async (): Promise<void> => {
+    attempts++;
+    if (failStartup) {
+      throw new Error("startup connection failed");
+    }
+  };
+
+  const first = startupGate.run(connect);
+  const duplicate = startupGate.run(connect);
+  assert.ok(first);
+  assert.equal(duplicate, first);
+  await assert.rejects(first, /startup connection failed/);
+  assert.equal(attempts, 1);
+
+  // React effect replay/rerender must not start another automatic session.
+  assert.equal(startupGate.run(connect), undefined);
+
+  // The normal user-facing connect path still uses the single-flight gate and
+  // can retry after the one-shot startup attempt fails.
+  failStartup = false;
+  await connectGate.run(connect);
+  assert.equal(attempts, 2);
 });
 
 test("typed Realtime input is accepted only by one fully connected session", () => {

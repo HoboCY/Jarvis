@@ -2,7 +2,11 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { decodeSignalREventEnvelope } from "@jarvis/contracts-ts";
 import "./app.css";
 import { ensureConversation } from "./conversation-flow.js";
-import { canSendRealtimeText, RealtimeConnectGate } from "./realtime-connect-flow.js";
+import {
+  canSendRealtimeText,
+  RealtimeAutoConnectGate,
+  RealtimeConnectGate
+} from "./realtime-connect-flow.js";
 import {
   DesktopRealtimeController,
   mapRealtimeCancelResponse,
@@ -634,6 +638,7 @@ export function App() {
   const [creatingMobilePairing, setCreatingMobilePairing] = useState(false);
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
   const connectGate = useRef<RealtimeConnectGate | undefined>(undefined);
+  const autoConnectGate = useRef<RealtimeAutoConnectGate | undefined>(undefined);
   const actionRunner = useRef<DesktopActionRunner | undefined>(undefined);
   const realtimeActionCycle = useRef<DesktopRealtimeActionCycle | undefined>(undefined);
   const mobilePairingAttempts = useRef(new DesktopLogicalActionAttemptLedger("mobile-pairing:create"));
@@ -643,6 +648,7 @@ export function App() {
   const activeConversationId = useRef<string | undefined>(undefined);
   activeConversationId.current = conversation?.id;
   connectGate.current ??= new RealtimeConnectGate();
+  autoConnectGate.current ??= new RealtimeAutoConnectGate(connectGate.current);
   actionRunner.current ??= new DesktopActionRunner({
     onStateChange: state => {
       setActionStates(current => ({ ...current, [state.key]: state }));
@@ -819,6 +825,11 @@ export function App() {
           setError(desktopActionMessage(reason));
         }
       });
+    const startupConnection = autoConnectGate.current!.run(() =>
+      runAction("realtime-connect", () => connect()).catch(reason => {
+        setError(desktopActionMessage(reason));
+      }));
+    void startupConnection?.catch(() => undefined);
     return () => {
       effectActive = false;
       removeEventListener();

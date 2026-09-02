@@ -98,6 +98,7 @@ const scenarioDiagnosticsFailure = scenarioIpcFailure("retryable", "backend_unav
 const retryableDeliveryFailure = scenarioIpcFailure("retryable", "backend_unavailable");
 const terminalDeliveryFailure = scenarioIpcFailure("terminal", "not_pending");
 let diagnosticsAttempts = 0;
+let realtimeClientSecretRequests = 0;
 const approvalDecisions = [];
 const taskInputSubmissions = [];
 const taskStatusRequests = [];
@@ -421,7 +422,7 @@ function registerScenarioIpc() {
     name: "Scenario Mac",
     deviceType: "desktop",
     platform: "macos",
-    status: "online"
+    status: "offline"
   }));
   registerHandler("backend:getConnectionState", () => ({ state: "connected", revision: 1 }));
   registerHandler("backend:getConversation", () => conversation);
@@ -551,15 +552,18 @@ function registerScenarioIpc() {
       expiresAtMs: Date.now() + 60_000
     };
   });
-  registerHandler("backend:createRealtimeClientSecret", () => ({
-    realtimeSessionId: "0198b0a1-0000-7000-8000-000000000209",
-    clientSecret: "scenario-client-secret",
-    webRtcUrl: "https://example.invalid/realtime",
-    model: "scenario",
-    voice: "scenario",
-    instructions: "scenario",
-    wakeWord: { enabled: true, keyword: "贾维斯" }
-  }));
+  registerHandler("backend:createRealtimeClientSecret", () => {
+    realtimeClientSecretRequests++;
+    return {
+      realtimeSessionId: "0198b0a1-0000-7000-8000-000000000209",
+      clientSecret: "scenario-client-secret",
+      webRtcUrl: "https://example.invalid/realtime",
+      model: "scenario",
+      voice: "scenario",
+      instructions: "scenario",
+      wakeWord: { enabled: true, keyword: "贾维斯" }
+    };
+  });
   registerHandler("backend:addTypedMessage", () => ({ accepted: true }));
   registerHandler("backend:realtimeConnected", () => ({ accepted: true }));
   registerHandler("backend:realtimeEnded", () => ({ accepted: true }));
@@ -841,13 +845,17 @@ async function runScenario() {
       persistedConversationPresent: document.querySelector(".workspace-context")?.textContent === "Renderer scenario conversation"
         && document.body.textContent?.includes("控制面板已连接") === true,
       secretFree: !document.body.textContent?.includes("scenario-client-secret"),
-      deviceStatus: document.body.textContent?.includes("Desktop 设备在线") === true,
+      deviceStatus: document.body.textContent?.includes("Desktop 设备离线") === true,
       localAudioAvailable: document.body.textContent?.includes("音频在 Scenario Mac 本机处理") === true,
       wakeState: document.querySelector("[data-wake-state]")?.getAttribute("data-wake-state"),
       bodyWidth: document.body.getBoundingClientRect().width,
       scrollWidth: document.documentElement.scrollWidth
     };
   })()`);
+  // Startup Realtime is intentionally one-shot. Let its success/failure
+  // settle before exercising an unrelated diagnostics failure so the two
+  // user-facing action messages cannot race in this scenario.
+  await wait(250);
 
   await evaluate(window, `document.querySelector(".diagnostics-button")?.click()`);
   await wait(120);
@@ -883,6 +891,9 @@ async function runScenario() {
     recovered: document.querySelector(".diagnostics-panel")?.textContent?.includes("scenario") === true,
     failureAttemptCount: ${diagnosticsAttempts}
   }))()`);
+  const startupRealtime = {
+    clientSecretRequests: realtimeClientSecretRequests
+  };
   const initialDeliveryFeedback = await readInitialNotificationDeliveryFeedback(window);
   const expectedInitialDeliveryFeedback = [
     {
@@ -1497,6 +1508,7 @@ async function runScenario() {
     ipcFailure,
     ipcBridgeProbe,
     ipcRecovery,
+    startupRealtime,
     dist: {
       canonical: canonicalDistProof,
       identity: "src/clients/desktop/dist",
@@ -1531,6 +1543,7 @@ async function runScenario() {
     || !ipcFailure.secretFree
     || !ipcRecovery.recovered
     || ipcRecovery.failureAttemptCount !== 3
+    || startupRealtime.clientSecretRequests !== 1
     || !["connected", "degraded"].includes(realtimeRecoveryPersistence.failure.status)
     || realtimeRecoveryPersistence.failure.persistenceRetryReason !== "event-ingest"
     || realtimeRecoveryPersistence.failure.ingestCalls !== 1

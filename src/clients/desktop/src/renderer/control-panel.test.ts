@@ -25,6 +25,7 @@ import {
 } from "./desktop-ipc.js";
 import {
   desktopDeviceAudioLabel,
+  desktopDeviceCanUseLocalAudio,
   desktopDeviceStatusLabel,
   parseDesktopDeviceBootstrap
 } from "./device-status.js";
@@ -731,8 +732,13 @@ test("strictly parses device type and status before presenting audio availabilit
   });
   assert.equal(desktopDeviceStatusLabel(online), "在线");
   assert.match(desktopDeviceAudioLabel(online), /本机处理/);
-  assert.match(desktopDeviceAudioLabel({ ...online, status: "offline" }), /离线/);
-  assert.match(desktopDeviceAudioLabel({ ...online, status: "disabled" }), /禁用/);
+  const offline = { ...online, status: "offline" as const };
+  assert.equal(desktopDeviceCanUseLocalAudio(offline), true);
+  assert.match(desktopDeviceAudioLabel(offline), /本机处理/);
+  const disabled = { ...online, status: "disabled" as const };
+  assert.equal(desktopDeviceCanUseLocalAudio(disabled), false);
+  assert.match(desktopDeviceAudioLabel(disabled), /禁用/);
+  assert.equal(desktopDeviceCanUseLocalAudio({ ...online, deviceType: "mobile" }), false);
   assert.throws(() => parseDesktopDeviceBootstrap({ ...online, status: "unknown" }));
   assert.throws(() => parseDesktopDeviceBootstrap({ ...online, deviceType: "phone" }));
 });

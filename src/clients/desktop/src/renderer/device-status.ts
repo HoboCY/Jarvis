@@ -58,13 +58,12 @@ export function desktopDeviceAudioLabel(device: DesktopDevice): string {
   if (device.deviceType !== "desktop") {
     return `${device.name} 不是 Desktop 设备，语音不可用`;
   }
-  switch (device.status) {
-    case "online": return `音频在 ${device.name} 本机处理`;
-    case "offline": return `${device.name} 当前离线，语音不可用`;
-    case "disabled": return `${device.name} 已禁用，语音不可用`;
+  if (device.status === "disabled") {
+    return `${device.name} 已禁用，语音不可用`;
   }
+  return `音频在 ${device.name} 本机处理`;
 }
 
 export function desktopDeviceCanUseLocalAudio(device: DesktopDevice): boolean {
-  return device.deviceType === "desktop" && device.status === "online";
+  return device.deviceType === "desktop" && device.status !== "disabled";
 }
