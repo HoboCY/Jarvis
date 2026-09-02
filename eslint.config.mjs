@@ -55,5 +55,22 @@ export default [
         }
       ]
     }
+  },
+  {
+    files: ["src/clients/desktop/src/renderer/csp.test.ts"],
+    rules: {
+      // This test reads the renderer HTML fixture; production renderer modules
+      // remain covered by the complete restricted-import rule above.
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            { name: "fs", message: "Renderer must use the preload boundary." },
+            { name: "child_process", message: "Renderer must use the preload boundary." },
+            { name: "node:child_process", message: "Renderer must use the preload boundary." }
+          ]
+        }
+      ]
+    }
   }
 ];

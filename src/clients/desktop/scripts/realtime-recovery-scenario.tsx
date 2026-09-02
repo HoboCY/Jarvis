@@ -264,7 +264,6 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
   const { stream, track } = createFakeMediaStream();
   const wakeWord = createFakeWakeWordDetector();
   let controller: DesktopRealtimeController | undefined;
-  let runner: DesktopActionRunner;
   let status: DesktopRealtimeStatus = "disconnected";
   let wakeState: "standby" | "awake" | "error" = "standby";
   let transportStream: MediaStream | undefined;
@@ -317,7 +316,7 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
     );
   };
 
-  runner = new DesktopActionRunner({
+  const runner = new DesktopActionRunner({
     onStateChange: state => {
       if (state.key === "realtime-retry-persistence" || state.key === "realtime-retry-wake") {
         render();
@@ -373,7 +372,7 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
           render();
         },
         undefined,
-        (_agent, _options) => session as unknown as RealtimeSession,
+        () => session as unknown as RealtimeSession,
         mediaStream => {
           transportStream = mediaStream;
           return session.transport as never;

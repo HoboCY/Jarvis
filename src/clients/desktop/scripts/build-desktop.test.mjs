@@ -235,6 +235,9 @@ test("macOS packaging gates on the copied sherpa runtime acceptance", async () =
   assert.match(
     packageGate,
     /wake-word-acceptance\.mjs --runtime-root dist\/node_modules\/sherpa-onnx --model-root dist\/assets\/sherpa-kws-wenetspeech-3\.3M/);
+  assert.match(
+    packageGate,
+    /wake-word-cpu-probe\.mjs --runtime-root dist\/node_modules\/sherpa-onnx --model-root dist\/assets\/sherpa-kws-wenetspeech-3\.3M --fixture silence --iterations 1 --warmup-iterations 0/);
   assert.match(packageJson.scripts?.["package:mac"], /check:package/);
   assert.match(packageJson.scripts?.["make:mac"], /check:package/);
 });

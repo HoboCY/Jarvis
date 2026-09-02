@@ -38,6 +38,11 @@ const modelFiles = {
   "tokens.txt": "72316508d9119696145abc6f1f8cdc46287535c34e5ce7e595f845cb1499cf2e"
 };
 
+const maxCpuProbeIterations = 10;
+const maxCpuProbeWarmupIterations = 3;
+const defaultCpuProbeIterations = 3;
+const defaultCpuProbeWarmupIterations = 1;
+
 function isSafeIdentity(value) {
   return typeof value === "string" && /^[A-Za-z0-9._+-]{1,64}$/.test(value);
 }
@@ -263,40 +268,167 @@ function createKeywordSpotter(runtime, modelRoot) {
   }
 }
 
-function detectWakeWord(runtime, modelRoot, audio) {
-  let kws;
-  let stream;
-  try {
-    kws = createKeywordSpotter(runtime, modelRoot);
-    stream = kws.createStream();
-    for (let offset = 0; offset < audio.samples.length; offset += chunkSize) {
-      const chunk = audio.samples.subarray(offset, offset + chunkSize);
-      stream.acceptWaveform(audio.sampleRate, chunk);
-      while (kws.isReady(stream)) {
-        kws.decode(stream);
-        if (kws.getResult(stream).keyword === wakeWordConfig.keyword) {
-          return true;
+function createWakeWordInference(runtime, modelRoot) {
+  const kws = createKeywordSpotter(runtime, modelRoot);
+  return {
+    detect(audio) {
+      let stream;
+      try {
+        stream = kws.createStream();
+        for (let offset = 0; offset < audio.samples.length; offset += chunkSize) {
+          const chunk = audio.samples.subarray(offset, offset + chunkSize);
+          stream.acceptWaveform(audio.sampleRate, chunk);
+          while (kws.isReady(stream)) {
+            kws.decode(stream);
+            if (kws.getResult(stream).keyword === wakeWordConfig.keyword) {
+              return true;
+            }
+          }
+        }
+        return false;
+      } catch {
+        throw new Error("Pinned sherpa-onnx runtime could not process the fixture audio.");
+      } finally {
+        try {
+          stream?.free();
+        } catch {
+          // The bounded processing error is more useful than a native cleanup detail.
         }
       }
+    },
+    free() {
+      try {
+        kws.free();
+      } catch {
+        // The bounded processing error is more useful than a native cleanup detail.
+      }
     }
-    return false;
-  } catch (error) {
-    if (error instanceof Error
-      && error.message === "Pinned sherpa-onnx wake-word model could not be loaded.") {
-      throw error;
-    }
-    throw new Error("Pinned sherpa-onnx runtime could not process the fixture audio.");
+  };
+}
+
+function detectWakeWord(runtime, modelRoot, audio) {
+  const inference = createWakeWordInference(runtime, modelRoot);
+  try {
+    return inference.detect(audio);
   } finally {
-    try {
-      stream?.free();
-    } catch {
-      // The bounded processing error is more useful than a native cleanup detail.
+    inference.free();
+  }
+}
+
+function roundMetric(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function assertCpuProbeIterations(iterations, warmupIterations) {
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > maxCpuProbeIterations) {
+    throw new Error("iterations must be an integer between 1 and 10.");
+  }
+  if (!Number.isInteger(warmupIterations)
+    || warmupIterations < 0 || warmupIterations > maxCpuProbeWarmupIterations) {
+    throw new Error("warmup-iterations must be an integer between 0 and 3.");
+  }
+}
+
+async function runCpuProbe({
+  runtimeRoot = defaultRuntimeRoot,
+  modelRoot = defaultModelRoot,
+  fixturesRoot = defaultFixturesRoot,
+  fixtureName = "silence",
+  iterations = defaultCpuProbeIterations,
+  warmupIterations = defaultCpuProbeWarmupIterations
+} = {}) {
+  try {
+    assertCpuProbeIterations(iterations, warmupIterations);
+    const definition = fixtureManifest[fixtureName];
+    if (!definition) {
+      throw new Error(
+        `Unknown fixture. Available fixtures: ${Object.keys(fixtureManifest).join(", ")}.`);
     }
+
+    const resolvedRuntimeRoot = resolve(runtimeRoot);
+    const resolvedModelRoot = resolve(modelRoot);
+    const resolvedFixturesRoot = resolve(fixturesRoot);
+    const [runtime, app] = await Promise.all([
+      loadSherpaRuntime(resolvedRuntimeRoot),
+      loadApplicationIdentity()
+    ]);
+    await assertModel(resolvedModelRoot);
+    const audio = await loadFixture(resolvedFixturesRoot, fixtureName, definition);
+    const inference = createWakeWordInference(runtime, resolvedModelRoot);
+
     try {
-      kws?.free();
-    } catch {
-      // The bounded processing error is more useful than a native cleanup detail.
+      for (let index = 0; index < warmupIterations; index++) {
+        inference.detect(audio);
+      }
+
+      const cpuBefore = process.cpuUsage();
+      const startedAt = performance.now();
+      const detections = [];
+      for (let index = 0; index < iterations; index++) {
+        detections.push(inference.detect(audio));
+      }
+      const wallTimeMs = roundMetric(Math.max(0, performance.now() - startedAt));
+      const cpu = process.cpuUsage(cpuBefore);
+      const cpuUserMs = roundMetric(cpu.user / 1_000);
+      const cpuSystemMs = roundMetric(cpu.system / 1_000);
+      const cpuTimeMs = roundMetric(cpuUserMs + cpuSystemMs);
+      const inputDurationMs = roundMetric(audio.samples.length / audio.sampleRate * 1_000);
+      const allDetectionsMatch = detections.every(
+        detected => detected === definition.expectedDetected);
+
+      return {
+        status: allDetectionsMatch ? "passed" : "failed",
+        probe: "wake-word-inference-cpu",
+        app,
+        runtime: {
+          name: "sherpa-onnx",
+          version: runtime.version,
+          onnxruntimeVersion: runtime.onnxruntimeVersion,
+          gitSha1: runtime.gitSha1
+        },
+        model: {
+          name: "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+          variant: "epoch 12 average 2, chunk 16, left context 64, INT8",
+          archiveSha256: "b2f7c89690dc8ce4c6ed6afeab7cd800c36ad1421fb6b6302b4a4b194cf7f35f",
+          license: "Apache-2.0",
+          keyword: wakeWordConfig.keyword
+        },
+        fixture: {
+          name: fixtureName,
+          kind: definition.kind,
+          expectedDetected: definition.expectedDetected,
+          detected: detections[0],
+          detections,
+          sampleRate: audio.sampleRate,
+          sampleCount: audio.samples.length,
+          inputDurationMs
+        },
+        config: {
+          provider: wakeWordConfig.provider,
+          numThreads: wakeWordConfig.numThreads,
+          samplingRate: wakeWordConfig.samplingRate,
+          chunkSamples: chunkSize
+        },
+        iterations,
+        warmupIterations,
+        inputDurationMs,
+        wallTimeMs,
+        cpuUserMs,
+        cpuSystemMs,
+        cpuTimeMs,
+        cpuPerIterationMs: roundMetric(cpuTimeMs / iterations),
+        realtimeFactor: wallTimeMs > 0
+          ? roundMetric(inputDurationMs * iterations / wallTimeMs)
+          : null,
+        cpuUtilizationPercent: wallTimeMs > 0
+          ? roundMetric(cpuTimeMs / wallTimeMs * 100)
+          : null
+      };
+    } finally {
+      inference.free();
     }
+  } catch (error) {
+    throw boundedError(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -409,4 +541,4 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   }
 }
 
-export { fixtureManifest, runAcceptance, wakeWordConfig };
+export { fixtureManifest, runAcceptance, runCpuProbe, wakeWordConfig };
