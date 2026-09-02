@@ -107,7 +107,13 @@ fi
 marker_event="$(jq -r '.event // empty' "$marker_path")"
 marker_pid="$(jq -r '.pid // empty' "$marker_path")"
 marker_bearer="$(jq -r '.backendBearerConfigured // false' "$marker_path")"
-if [[ "$marker_event" != "renderer.ready" || "$marker_pid" != "$app_pid" || "$marker_bearer" != "true" ]]; then
+marker_wake_bridge="$(jq -r '.wakeBridgeAvailable // false' "$marker_path")"
+marker_wake_state="$(jq -r '.wakeState // empty' "$marker_path")"
+if [[ "$marker_event" != "renderer.ready" \
+  || "$marker_pid" != "$app_pid" \
+  || "$marker_bearer" != "true" \
+  || "$marker_wake_bridge" != "true" \
+  || "$marker_wake_state" != "standby" ]]; then
   echo "Electron smoke marker did not prove the installed process mounted the renderer." >&2
   exit 1
 fi
@@ -151,9 +157,13 @@ fi
 persisted_marker_event="$(jq -r '.event // empty' "$persisted_marker_path")"
 persisted_marker_pid="$(jq -r '.pid // empty' "$persisted_marker_path")"
 persisted_marker_bearer="$(jq -r '.backendBearerConfigured // false' "$persisted_marker_path")"
+persisted_marker_wake_bridge="$(jq -r '.wakeBridgeAvailable // false' "$persisted_marker_path")"
+persisted_marker_wake_state="$(jq -r '.wakeState // empty' "$persisted_marker_path")"
 if [[ "$persisted_marker_event" != "renderer.ready" \
   || "$persisted_marker_pid" != "$app_pid" \
-  || "$persisted_marker_bearer" != "true" ]]; then
+  || "$persisted_marker_bearer" != "true" \
+  || "$persisted_marker_wake_bridge" != "true" \
+  || "$persisted_marker_wake_state" != "standby" ]]; then
   echo "Desktop restart did not load the persisted backend bearer." >&2
   exit 1
 fi

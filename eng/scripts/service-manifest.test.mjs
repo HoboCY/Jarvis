@@ -156,6 +156,12 @@ test("macOS service publish is self-contained and lockfile-repeatable", async ()
   const desktopScript = await readFile(join(process.cwd(), "eng/scripts/package-desktop-macos.sh"), "utf8");
   assert.match(desktopScript, /deterministic-archive\.mjs/);
   assert.match(desktopScript, /node "\$desktop_root\/scripts\/assert-package\.mjs" "\$app_source\/Contents\/Resources\/app\.asar"/);
+  assert.match(desktopScript, /marker_wake_bridge=/);
+  assert.match(desktopScript, /marker_wake_state=/);
+  assert.match(desktopScript, /\$marker_wake_bridge.*true/);
+  assert.match(desktopScript, /\$marker_wake_state.*standby/);
+  assert.match(desktopScript, /persisted_marker_wake_bridge=/);
+  assert.match(desktopScript, /persisted_marker_wake_state=/);
   const userDataAssignment = desktopScript.indexOf('user_data_root="$install_root/user-data"');
   const userDataMkdir = desktopScript.indexOf('mkdir -m 700 "$user_data_root"');
   const userDataArgument = desktopScript.indexOf('--user-data-dir="$user_data_root"');

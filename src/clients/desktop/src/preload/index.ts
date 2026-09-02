@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { mapWakeWordErrorCode } from "../wake-word-error.js";
 
 const jarvisApi = {
   getAppVersion: (): Promise<string> => ipcRenderer.invoke("app:getVersion") as Promise<string>,
@@ -124,7 +125,7 @@ const jarvisApi = {
   },
   onWakeWordError: (listener: (message: string) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
-      listener(typeof value === "string" ? value : "Local wake-word detection failed.");
+      listener(mapWakeWordErrorCode(value));
     };
     ipcRenderer.on("wake-word:error", handler);
     return () => ipcRenderer.removeListener("wake-word:error", handler);

@@ -69,6 +69,47 @@ function responseStatus(value: unknown, message: string): string {
   return responseString(value, message, 100);
 }
 
+function realtimeResponseId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const responseId = value.trim();
+  return responseId.length > 0 && responseId.length <= 200 ? responseId : undefined;
+}
+
+function responseIdFromTurnStarted(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  const providerData = (event as { providerData?: unknown }).providerData;
+  if (typeof providerData !== "object" || providerData === null) {
+    return undefined;
+  }
+  const response = (providerData as { response?: unknown }).response;
+  if (typeof response !== "object" || response === null) {
+    return undefined;
+  }
+  return realtimeResponseId((response as { id?: unknown }).id);
+}
+
+function responseIdFromDelta(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  return realtimeResponseId((event as { responseId?: unknown }).responseId);
+}
+
+function responseIdFromTurnDone(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  const response = (event as { response?: unknown }).response;
+  if (typeof response !== "object" || response === null) {
+    return undefined;
+  }
+  return realtimeResponseId((response as { id?: unknown }).id);
+}
+
 export function mapRealtimeTaskStatusResponse(value: unknown): RealtimeTaskStatusResponse {
   const message = "Invalid Realtime task status response.";
   const item = responseRecord(value, message);
@@ -110,7 +151,7 @@ export function mapRealtimeCancelResponse(value: unknown): RealtimeCancelRespons
 
 export type DesktopRealtimeStatus = "disconnected" | "connecting" | "connected" | "degraded";
 
-export type DesktopRealtimeWakeState = "standby" | "awake";
+export type DesktopRealtimeWakeState = "standby" | "awake" | "error";
 
 export type DesktopRealtimeConnectionInput = {
   realtimeSessionId: string;
@@ -172,6 +213,7 @@ export class DesktopRealtimeController {
   private removeWakeWordState: (() => void) | undefined;
   private wakeWordStarted = false;
   private wakeStateValue: DesktopRealtimeWakeState = "standby";
+  private activeWakeResponseId: string | undefined;
   private realtimeMediaStream: MediaStream | undefined;
   private onWakeStateChange: ((state: DesktopRealtimeWakeState) => void) | undefined;
   private rotationProvider: (() => Promise<{
@@ -215,6 +257,11 @@ export class DesktopRealtimeController {
     this.removeWakeWordDetection = detector.onDetected(() => this.wake());
     this.removeWakeWordState = detector.onStateChange(state => {
       if (state === "error") {
+        // The Main process has already stopped the native detector before
+        // publishing this state. Mark the local lifecycle as restartable
+        // without allowing audio to remain open during the retry.
+        this.wakeWordStarted = false;
+        this.failClosedAudio(this.session, "error");
         this.onStatus(this.statusValue, "本地中文唤醒词检测不可用，请检查模型文件和麦克风权限。");
       }
     });
@@ -379,6 +426,7 @@ export class DesktopRealtimeController {
     this.session = prepared.session;
     this.sessionId = prepared.sessionId;
     this.externalSessionId = prepared.externalSessionId;
+    this.activeWakeResponseId = undefined;
     this.textByItem.clear();
     this.modalityByItem.clear();
     this.rotation.connected(this.now());
@@ -478,10 +526,37 @@ export class DesktopRealtimeController {
     if (this.statusValue !== "connected" || !this.session) {
       return;
     }
+    if (this.wakeStateValue !== "standby") {
+      return;
+    }
 
+    this.activeWakeResponseId = undefined;
     this.setWakeState("awake");
     this.setMediaStreamEnabled(this.realtimeMediaStream, true);
     this.session.mute(false);
+  }
+
+  public async retryWakeWord(): Promise<void> {
+    if (this.statusValue !== "connected" || !this.session) {
+      throw new Error("Realtime is not connected.");
+    }
+    if (!this.wakeWordDetector) {
+      throw new Error("Local wake-word detector is not configured.");
+    }
+    if (this.wakeWordStarted && this.wakeStateValue !== "error") {
+      return;
+    }
+
+    this.failClosedAudio(this.session, "error");
+    try {
+      await this.startWakeWordDetector();
+      this.setWakeState("standby");
+    } catch {
+      this.failClosedAudio(this.session, "error");
+      const message = "本地中文唤醒词检测不可用，请检查模型文件和麦克风权限后重试。";
+      this.onStatus(this.statusValue, message);
+      throw new Error(message);
+    }
   }
 
   public interrupt(): void {
@@ -492,6 +567,7 @@ export class DesktopRealtimeController {
 
   public async disconnect(reason = "user-disconnected"): Promise<boolean> {
     this.stopRotationTimer();
+    this.failClosedAudio(this.session);
     if (!await this.flushPendingPersistence() || !await this.retryPendingSessionEnd()) {
       this.statusValue = "degraded";
       this.onStatus(
@@ -543,8 +619,15 @@ export class DesktopRealtimeController {
 
   private bindTransport(session: RealtimeSession, generation: number, boundSessionId: string): void {
     const isCurrent = (): boolean => this.isCurrent(session, generation, boundSessionId);
+    session.transport.on("turn_started", event => {
+      if (!isCurrent() || this.wakeStateValue !== "awake") {
+        return;
+      }
+      this.activeWakeResponseId = responseIdFromTurnStarted(event);
+    });
     session.transport.on("connection_change", status => {
       if (isCurrent() && status === "disconnected" && this.statusValue === "connected") {
+        this.failClosedAudio(session);
         const droppedSessionId = boundSessionId;
         this.session = undefined;
         this.sessionId = undefined;
@@ -561,9 +644,20 @@ export class DesktopRealtimeController {
     });
     session.transport.on("error", event => {
       if (isCurrent() && this.statusValue === "connected") {
+        this.failClosedAudio(session);
+        const droppedSessionId = boundSessionId;
+        this.session = undefined;
+        this.sessionId = undefined;
+        this.externalSessionId = undefined;
+        this.stopRotationTimer();
+        this.rotation.disconnected();
         const mapped = mapRealtimeConnectionError(event.error);
         this.statusValue = "degraded";
+        void this.releaseAudioResources();
         this.onStatus(this.statusValue, mapped.message);
+        if (droppedSessionId) {
+          void this.markFailed(droppedSessionId, "transport-error");
+        }
       }
     });
     session.transport.on("*", event => {
@@ -597,6 +691,10 @@ export class DesktopRealtimeController {
       if (!isCurrent()) {
         return;
       }
+      const responseId = responseIdFromDelta(event);
+      if (this.wakeStateValue === "awake" && responseId && !this.activeWakeResponseId) {
+        this.activeWakeResponseId = responseId;
+      }
       this.appendText(event.itemId, event.delta);
       this.modalityByItem.set(event.itemId, "audioWithTranscript");
       this.queuePersist({
@@ -626,6 +724,10 @@ export class DesktopRealtimeController {
     session.transport.on("output_text_delta", event => {
       if (!isCurrent()) {
         return;
+      }
+      const responseId = responseIdFromDelta(event);
+      if (this.wakeStateValue === "awake" && responseId && !this.activeWakeResponseId) {
+        this.activeWakeResponseId = responseId;
       }
       this.appendText(event.itemId, event.delta);
       this.modalityByItem.set(event.itemId, "text");
@@ -663,9 +765,16 @@ export class DesktopRealtimeController {
         });
       }
       this.rotation.setAssistantSpeaking(false, this.now());
-      this.setWakeState("standby");
-      this.setMediaStreamEnabled(this.realtimeMediaStream, false);
-      session.mute(true);
+      const doneResponseId = responseIdFromTurnDone(event);
+      const matchesActiveWakeResponse = this.activeWakeResponseId
+        ? doneResponseId === this.activeWakeResponseId
+        : doneResponseId === undefined;
+      if (this.wakeStateValue === "awake" && matchesActiveWakeResponse) {
+        this.activeWakeResponseId = undefined;
+        this.setWakeState("standby");
+        this.setMediaStreamEnabled(this.realtimeMediaStream, false);
+        session.mute(true);
+      }
     });
     session.transport.on("audio_interrupted", () => {
       if (isCurrent()) {
@@ -705,7 +814,11 @@ export class DesktopRealtimeController {
       return;
     }
 
-    await this.wakeWordDetector.start();
+    const detector = this.wakeWordDetector;
+    await detector.start();
+    if (detector.state !== "listening") {
+      throw new Error("Local wake-word detector did not enter listening state.");
+    }
     this.wakeWordStarted = true;
   }
 
@@ -726,6 +839,7 @@ export class DesktopRealtimeController {
     this.removeWakeWordDetection = undefined;
     this.removeWakeWordState = undefined;
     this.wakeWordDetector = undefined;
+    this.activeWakeResponseId = undefined;
 
     const mediaStream = this.realtimeMediaStream;
     this.realtimeMediaStream = undefined;
@@ -742,17 +856,24 @@ export class DesktopRealtimeController {
     }
   }
 
-  private failClosedAudio(session: RealtimeSession | undefined): void {
+  private failClosedAudio(
+    session: RealtimeSession | undefined,
+    nextWakeState: DesktopRealtimeWakeState = "standby"
+  ): void {
+    this.activeWakeResponseId = undefined;
+    this.setWakeState(nextWakeState);
     if (!this.realtimeMediaStream) {
       return;
     }
 
-    this.setWakeState("standby");
     this.setMediaStreamEnabled(this.realtimeMediaStream, false);
     session?.mute(true);
   }
 
   private setWakeState(state: DesktopRealtimeWakeState): void {
+    if (this.wakeStateValue === state) {
+      return;
+    }
     this.wakeStateValue = state;
     this.onWakeStateChange?.(state);
   }
@@ -845,14 +966,16 @@ export class DesktopRealtimeController {
   }
 
   private async markFailed(sessionId: string, reason: string): Promise<void> {
+    const pendingEnd: PendingSessionEnd = {
+      sessionId,
+      reason,
+      status: "failed",
+      idempotencyKey: crypto.randomUUID()
+    };
     try {
-      await this.backend.markEnded({
-        sessionId,
-        reason,
-        status: "failed",
-        idempotencyKey: crypto.randomUUID()
-      });
+      await this.backend.markEnded(pendingEnd);
     } catch (error) {
+      this.pendingSessionEnd ??= pendingEnd;
       this.onStatus(this.statusValue, error instanceof Error ? error.message : "Realtime failure could not be persisted.");
     }
   }
@@ -938,7 +1061,7 @@ export class DesktopRealtimeController {
 
     const oldSessionId = this.sessionId;
     const oldSession = this.session;
-    const oldWakeState = this.wakeStateValue;
+    this.failClosedAudio(oldSession);
     let nextSession: DesktopRealtimeConnectionInput;
     try {
       // Context assembly happens on the backend, so all transcript writes from
@@ -968,11 +1091,8 @@ export class DesktopRealtimeController {
       prepared = await this.prepareSession(nextSession);
     } catch (error) {
       const mapped = mapRealtimeConnectionError(error);
-      // The old generation and object references were never changed.
-      if (this.realtimeMediaStream) {
-        this.setMediaStreamEnabled(this.realtimeMediaStream, oldWakeState === "awake");
-        oldSession?.mute(oldWakeState !== "awake");
-      }
+      // Rotation owns the audio boundary from its first await onward. Keep
+      // the old session usable only through a later explicit wake request.
       this.statusValue = "connected";
       this.startRotationTimer();
       this.onStatus(this.statusValue, mapped.message);

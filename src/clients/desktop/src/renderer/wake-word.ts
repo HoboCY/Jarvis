@@ -17,12 +17,20 @@ export type WakeWordBridge = {
   onWakeWordError: (listener: (message: string) => void) => () => void;
 };
 
+export class WakeWordStartCancelledError extends Error {
+  public constructor() {
+    super("Wake-word detector start was cancelled.");
+    this.name = "WakeWordStartCancelledError";
+  }
+}
+
 export class IpcWakeWordDetector implements WakeWordDetector {
   private stateValue: WakeWordState = "stopped";
   private removeBridgeDetection: (() => void) | undefined;
   private removeBridgeError: (() => void) | undefined;
   private readonly detectionListeners = new Set<() => void>();
   private readonly stateListeners = new Set<(state: WakeWordState) => void>();
+  private startGeneration = 0;
 
   public constructor(
     private readonly bridge: WakeWordBridge,
@@ -48,6 +56,7 @@ export class IpcWakeWordDetector implements WakeWordDetector {
       return;
     }
 
+    const generation = ++this.startGeneration;
     this.setState("starting");
     this.removeBridgeDetection = this.bridge.onWakeWordDetected(() => {
       if (this.stateValue !== "listening") {
@@ -57,12 +66,29 @@ export class IpcWakeWordDetector implements WakeWordDetector {
         listener();
       }
     });
-    this.removeBridgeError = this.bridge.onWakeWordError(() => this.setState("error"));
+    this.removeBridgeError = this.bridge.onWakeWordError(() => {
+      if (generation !== this.startGeneration) {
+        return;
+      }
+      // The main process stops native capture before publishing this event.
+      // Detach the old bridge callbacks so a later explicit retry cannot
+      // deliver one detection through multiple generations.
+      this.startGeneration++;
+      this.releaseBridgeListeners();
+      this.setState("error");
+    });
 
     try {
       await this.bridge.startWakeWordDetection(this.keyword);
+      if (generation !== this.startGeneration) {
+        throw new WakeWordStartCancelledError();
+      }
       this.setState("listening");
     } catch (error) {
+      if (generation !== this.startGeneration) {
+        throw error;
+      }
+      this.startGeneration++;
       this.releaseBridgeListeners();
       try {
         await this.bridge.stopWakeWordDetection();
@@ -79,6 +105,7 @@ export class IpcWakeWordDetector implements WakeWordDetector {
       return;
     }
 
+    this.startGeneration++;
     this.releaseBridgeListeners();
     try {
       await this.bridge.stopWakeWordDetection();

@@ -203,3 +203,26 @@ test("SherpaWakeWordService stops after a non-recoverable microphone error", asy
     "host:close"
   ]);
 });
+
+test("SherpaWakeWordService bounds and redacts fatal native errors", async () => {
+  const fake = fakeRuntime();
+  let reportedError: Error | undefined;
+  const service = new SherpaWakeWordService({
+    modelRoot: "/models",
+    onDetected: () => assert.fail("audio received after a fatal model error"),
+    onError: error => {
+      reportedError = error;
+    }
+  }, () => fake.runtime as never);
+
+  service.start(supportedWakeWord);
+  fake.fail(new Error(
+    `model failed at /Applications/Jarvis.app/Contents/Resources/model.onnx `
+      + `/opt/jarvis/private/model.onnx Bearer sk-native-secret secret=provider-secret ${"x".repeat(500)}`));
+  await new Promise<void>(resolve => setImmediate(resolve));
+
+  assert.ok(reportedError);
+  assert.ok(reportedError.message.length <= 240);
+  assert.doesNotMatch(reportedError.message, /\/Applications\/|\/opt\/|Bearer\s+|sk-native-secret|secret=provider-secret/);
+  assert.ok(reportedError.message.length > 0);
+});

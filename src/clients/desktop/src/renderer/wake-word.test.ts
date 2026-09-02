@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   IpcWakeWordDetector,
+  WakeWordStartCancelledError,
   builtInWakeWord,
   type WakeWordBridge
 } from "./wake-word.js";
@@ -83,4 +84,73 @@ test("IpcWakeWordDetector fails closed when the main-process detector reports an
   assert.equal(detector.state, "error");
   await detector.stop();
   assert.equal(detector.state, "stopped");
+});
+
+test("IpcWakeWordDetector ignores a late successful start after a fatal bridge error", async () => {
+  let resolveStart: (() => void) | undefined;
+  let errorListener: ((message: string) => void) | undefined;
+  const bridge: WakeWordBridge = {
+    startWakeWordDetection: async () => new Promise<void>(resolve => {
+      resolveStart = resolve;
+    }),
+    stopWakeWordDetection: async () => undefined,
+    onWakeWordDetected: () => () => undefined,
+    onWakeWordError: listener => {
+      errorListener = listener;
+      return () => {
+        errorListener = undefined;
+      };
+    }
+  };
+  const detector = new IpcWakeWordDetector(bridge, builtInWakeWord);
+  const states: string[] = [];
+  detector.onStateChange(state => states.push(state));
+
+  const starting = detector.start();
+  errorListener?.("native detector failed");
+  assert.equal(detector.state, "error");
+
+  resolveStart?.();
+  await assert.rejects(starting, WakeWordStartCancelledError);
+
+  assert.equal(detector.state, "error");
+  assert.deepEqual(states, ["starting", "error"]);
+});
+
+test("IpcWakeWordDetector detaches failed bridge listeners before an explicit retry", async () => {
+  const detectionListeners = new Set<() => void>();
+  const errorListeners = new Set<(message: string) => void>();
+  const bridge: WakeWordBridge = {
+    startWakeWordDetection: async () => undefined,
+    stopWakeWordDetection: async () => undefined,
+    onWakeWordDetected: listener => {
+      detectionListeners.add(listener);
+      return () => detectionListeners.delete(listener);
+    },
+    onWakeWordError: listener => {
+      errorListeners.add(listener);
+      return () => errorListeners.delete(listener);
+    }
+  };
+  const detector = new IpcWakeWordDetector(bridge, builtInWakeWord);
+  let detections = 0;
+  detector.onDetected(() => detections++);
+
+  await detector.start();
+  for (const listener of errorListeners) {
+    listener("microphone failed");
+  }
+  assert.equal(detector.state, "error");
+  for (const listener of detectionListeners) {
+    listener();
+  }
+  assert.equal(detections, 0);
+
+  await detector.start();
+  for (const listener of detectionListeners) {
+    listener();
+  }
+  assert.equal(detections, 1);
+
+  await detector.stop();
 });

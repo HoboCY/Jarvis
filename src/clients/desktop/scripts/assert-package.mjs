@@ -36,6 +36,7 @@ export const expectedPackageFiles = new Set([
   "dist/preload/index.cjs",
   "dist/preload/overlay.cjs",
   "dist/renderer/index.html",
+  "dist/renderer/main.css",
   "dist/renderer/main.js",
   "dist/renderer/overlay.html",
   "dist/renderer/overlay.js"
@@ -129,6 +130,39 @@ export function assertBuildMetafiles(bundles) {
   }
 }
 
+export function assertWakeWordBundleContract({ main, preload, renderer }) {
+  for (const channel of [
+    "wake-word:start",
+    "wake-word:stop",
+    "wake-word:detected",
+    "wake-word:error"
+  ]) {
+    assert.match(main, new RegExp(channel));
+    assert.match(preload, new RegExp(channel));
+  }
+  assert.match(main, /SherpaWakeWordService/);
+  assert.match(main, /wakeBridgeAvailable/);
+  assert.match(main, /wakeState/);
+  assert.match(main, /data-wake-state/);
+  assert.match(preload, /contextBridge\.exposeInMainWorld/);
+  for (const method of [
+    "startWakeWordDetection",
+    "stopWakeWordDetection",
+    "onWakeWordDetected",
+    "onWakeWordError"
+  ]) {
+    assert.match(preload, new RegExp(method));
+  }
+  const rendererProjection = renderer.replace(/\\u([0-9a-f]{4})/gi, (_match, code) =>
+    String.fromCharCode(Number.parseInt(code, 16)));
+  assert.match(rendererProjection, /standby/);
+  assert.match(rendererProjection, /awake/);
+  assert.match(rendererProjection, /error/);
+  assert.match(rendererProjection, /data-wake-state/);
+  assert.match(rendererProjection, /唤醒不可用，请重试/);
+  assert.doesNotMatch(renderer, /node-cpal|sherpa-onnx|createRequire/);
+}
+
 export function assertPackagedAsar(asarPath) {
   const expectedEntries = new Set([
     ...expectedPackageFiles,
@@ -191,8 +225,11 @@ export function assertPackagedAsar(asarPath) {
   }
 
   const main = extractFile(asarPath, "dist/main/main.js").toString("utf8");
+  const preload = extractFile(asarPath, "dist/preload/index.cjs").toString("utf8");
+  const renderer = extractFile(asarPath, "dist/renderer/main.js").toString("utf8");
   assert.match(main, /preload\/index\.cjs/);
   assert.match(main, /preload\/overlay\.cjs/);
+  assertWakeWordBundleContract({ main, preload, renderer });
   return entries;
 }
 

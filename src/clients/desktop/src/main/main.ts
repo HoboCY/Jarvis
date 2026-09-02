@@ -24,7 +24,12 @@ import {
 } from "./desktop-bearer-store.js";
 import { isUuid } from "./input-validation.js";
 import { desktopSignalRLogLevel } from "./signalr-config.js";
-import { SherpaWakeWordService, supportedWakeWord } from "./wake-word-service.js";
+import { wakeWordErrorCode } from "../wake-word-error.js";
+import {
+  sanitizeWakeWordError,
+  SherpaWakeWordService,
+  supportedWakeWord
+} from "./wake-word-service.js";
 
 type JsonRecord = Record<string, unknown>;
 type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
@@ -49,7 +54,21 @@ const nonTerminalTaskStatuses = new Set([
   "recovering",
   "cancellationRequested"
 ]);
-const rendererMountProbe = "document.querySelector('#root')?.children.length > 0";
+const rendererMountProbe = `(() => {
+  const root = document.querySelector('#root');
+  const wakeElement = document.querySelector('[data-wake-state]');
+  const wakeBridge = window.jarvis;
+  return {
+    mounted: Boolean(root?.children.length),
+    wakeBridgeAvailable: [
+      wakeBridge?.startWakeWordDetection,
+      wakeBridge?.stopWakeWordDetection,
+      wakeBridge?.onWakeWordDetected,
+      wakeBridge?.onWakeWordError
+    ].every(value => typeof value === 'function'),
+    wakeState: wakeElement?.getAttribute('data-wake-state') ?? null
+  };
+})()`;
 const rendererMountProbeAttempts = 40;
 const rendererMountProbeDelayMs = 50;
 
@@ -111,7 +130,9 @@ function wakeWordModelRoot(): string {
 
 function publishWakeWordEvent(channel: "wake-word:detected" | "wake-word:error", value?: string): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, value);
+    mainWindow.webContents.send(
+      channel,
+      channel === "wake-word:error" ? wakeWordErrorCode : value);
   }
 }
 
@@ -119,7 +140,7 @@ function stopWakeWordService(): void {
   try {
     wakeWordService?.stop();
   } catch (error) {
-    console.error("Failed to stop local wake-word detection.", error);
+    console.error("Failed to stop local wake-word detection.", sanitizeWakeWordError(error).message);
   }
 }
 
@@ -193,11 +214,19 @@ async function writeDesktopSmokeMarker(window: BrowserWindow): Promise<void> {
     }
 
     for (let attempt = 0; attempt < rendererMountProbeAttempts; attempt++) {
-      const rendererMounted = await window.webContents.executeJavaScript(rendererMountProbe);
-      if (rendererMounted === true) {
+      const rendererProbe = await window.webContents.executeJavaScript(rendererMountProbe) as {
+        mounted?: unknown;
+        wakeBridgeAvailable?: unknown;
+        wakeState?: unknown;
+      };
+      if (rendererProbe?.mounted === true
+        && rendererProbe.wakeBridgeAvailable === true
+        && rendererProbe.wakeState === "standby") {
         writeFileSync(markerFullPath, `${JSON.stringify({
           backendBearerConfigured: Boolean(backendBearer && backendBearer.length >= 32),
           event: "renderer.ready",
+          wakeBridgeAvailable: true,
+          wakeState: "standby",
           pid: process.pid,
           version: app.getVersion(),
           occurredAt: Date.now()
@@ -588,19 +617,34 @@ if (!app.requestSingleInstanceLock()) {
     wakeWordService = new SherpaWakeWordService({
       modelRoot: wakeWordModelRoot(),
       onDetected: () => publishWakeWordEvent("wake-word:detected"),
-      onError: error => publishWakeWordEvent("wake-word:error", error.message)
+      onError: error => {
+        console.error("Local wake-word detection failed.", sanitizeWakeWordError(error).message);
+        publishWakeWordEvent("wake-word:error", wakeWordErrorCode);
+      }
     });
     ipcMain.handle("app:getVersion", () => app.getVersion());
     ipcMain.handle("wake-word:start", async (_event, value: unknown) => {
-      const input = requiredBody(value);
-      const keyword = requiredString(input.keyword, "keyword", 20);
-      if (keyword !== supportedWakeWord) {
-        throw new Error("Unsupported Desktop wake word.");
+      try {
+        const input = requiredBody(value);
+        const keyword = requiredString(input.keyword, "keyword", 20);
+        if (keyword !== supportedWakeWord) {
+          throw new Error("Unsupported Desktop wake word.");
+        }
+        await ensureMicrophoneAccess();
+        wakeWordService?.start(keyword);
+      } catch (error) {
+        console.error("Local wake-word detection could not start.", sanitizeWakeWordError(error).message);
+        throw new Error(wakeWordErrorCode);
       }
-      await ensureMicrophoneAccess();
-      wakeWordService?.start(keyword);
     });
-    ipcMain.handle("wake-word:stop", () => wakeWordService?.stop());
+    ipcMain.handle("wake-word:stop", () => {
+      try {
+        wakeWordService?.stop();
+      } catch (error) {
+        console.error("Local wake-word detection could not stop.", sanitizeWakeWordError(error).message);
+        throw new Error(wakeWordErrorCode);
+      }
+    });
     ipcMain.handle("backend:getConnectionState", () => backendConnectionState);
     ipcMain.handle("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
     ipcMain.handle("backend:getDesktopDevice", () =>

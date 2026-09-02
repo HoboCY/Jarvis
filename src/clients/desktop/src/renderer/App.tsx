@@ -707,7 +707,7 @@ export function App() {
       );
       nextController.setWakeWordDetector(wakeWordDetector, nextWakeState => {
         setWakeState(nextWakeState);
-        setMuted(nextWakeState === "standby");
+        setMuted(nextWakeState !== "awake");
         if (nextWakeState === "awake") {
           playWakeTone();
         }
@@ -770,6 +770,22 @@ export function App() {
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Message persistence retry failed.");
+    }
+  }
+
+  async function retryWakeWord(): Promise<void> {
+    const activeController = controller.current;
+    if (!activeController) {
+      return;
+    }
+
+    setError(undefined);
+    try {
+      await activeController.retryWakeWord();
+    } catch (reason) {
+      setError(reason instanceof Error
+        ? reason.message
+        : "本地中文唤醒词检测不可用，请检查模型文件和麦克风权限后重试。");
     }
   }
 
@@ -836,7 +852,9 @@ export function App() {
   }).format(new Date());
   const wakeLabel = status !== "connected"
     ? "连接后可使用语音"
-    : wakeState === "awake"
+    : wakeState === "error"
+      ? "唤醒不可用，请重试"
+      : wakeState === "awake"
       ? muted ? "麦克风已暂停" : "正在聆听"
       : "等待“贾维斯”唤醒";
 
@@ -908,6 +926,11 @@ export function App() {
                 重试保存
               </button>
             ) : null}
+            {status === "connected" && wakeState === "error" && controller.current ? (
+              <button className="quiet-button" type="button" onClick={() => void retryWakeWord()}>
+                重试唤醒
+              </button>
+            ) : null}
             <button
               className={`connection-button is-${status}`}
               type="button"
@@ -953,6 +976,7 @@ export function App() {
             <h1 id="assistant-heading">有什么需要我处理？</h1>
             <button
               className={`voice-presence is-${status} is-${wakeState}`}
+              data-wake-state={wakeState}
               type="button"
               onClick={toggleMicrophone}
               aria-label={status === "connected" ? wakeLabel : "连接 Realtime"}

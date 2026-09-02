@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { assertBundleImports } from "./assert-package.mjs";
+import { assertBundleImports, assertWakeWordBundleContract } from "./assert-package.mjs";
 import { resolveRendererDependencies } from "./renderer-dependencies.mjs";
 
 const desktopRoot = new URL("../", import.meta.url);
@@ -113,6 +113,14 @@ test("main bundle points to CommonJS preload entry files", async () => {
   const main = await readBuiltFile("main/main.js");
   assert.match(main, /preload\/index\.cjs/);
   assert.match(main, /preload\/overlay\.cjs/);
+});
+
+test("packaged wake loop keeps native detection behind the Main/Preload IPC boundary", async () => {
+  const main = await readBuiltFile("main/main.js");
+  const preload = await readBuiltFile("preload/index.cjs");
+  const renderer = await readBuiltFile("renderer/main.js");
+
+  assertWakeWordBundleContract({ main, preload, renderer });
 });
 
 test("desktop build metadata removes unused API client and pins esbuild", async () => {

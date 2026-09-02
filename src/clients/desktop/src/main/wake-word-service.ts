@@ -73,6 +73,22 @@ function asError(reason: unknown): Error {
   return reason instanceof Error ? reason : new Error(String(reason));
 }
 
+const maxWakeWordErrorLength = 240;
+
+export function sanitizeWakeWordError(reason: unknown): Error {
+  const message = asError(reason).message
+    .replace(/\bBearer\s+[^\s"'`]+/gi, "[REDACTED]")
+    .replace(/\b(?:api[_-]?key|secret|token|password)\s*[:=]\s*[^\s"'`,;]+/gi, "$1=[REDACTED]")
+    .replace(/\bsecret\s+[^\s"'`,;]+/gi, "secret [REDACTED]")
+    .replace(/\b(?:sk|ek|rk|sess)[-_][A-Za-z0-9_-]+/gi, "[REDACTED]")
+    .replace(/(?:[A-Za-z]:)?\/(?:[^/\s'"`]+\/)+[^/\s'"`]*/g, "[REDACTED_PATH]")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxWakeWordErrorLength);
+  return new Error(message || "Local wake-word detection failed.");
+}
+
 function isRecoverableInputStreamError(reason: unknown): boolean {
   return typeof reason === "object"
     && reason !== null
@@ -288,7 +304,7 @@ export class SherpaWakeWordService {
         () => device?.close(),
         () => host?.close()
       ]);
-      throw error;
+      throw sanitizeWakeWordError(error);
     }
   }
 
@@ -311,7 +327,7 @@ export class SherpaWakeWordService {
       () => active.host.close()
     ]);
     if (failure) {
-      throw failure;
+      throw sanitizeWakeWordError(failure);
     }
   }
 
@@ -395,12 +411,14 @@ export class SherpaWakeWordService {
     if (this.active?.generation !== generation) {
       return;
     }
+    const safeError = sanitizeWakeWordError(error);
     try {
       this.stop();
-      this.options.onError(error);
+      this.options.onError(safeError);
     } catch (cleanupError) {
       this.options.onError(new Error(
-        `${error.message} Cleanup also failed: ${asError(cleanupError).message}`));
+        `${safeError.message} Cleanup also failed: ${sanitizeWakeWordError(cleanupError).message}`
+          .slice(0, maxWakeWordErrorLength)));
     }
   }
 }
