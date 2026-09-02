@@ -6,11 +6,12 @@ import type {
   Stream as CpalStream,
   SupportedStreamConfig
 } from "node-cpal";
+import { wakeWordConfig } from "./wake-word-acceptance-config.js";
 
-export const supportedWakeWord = "贾维斯" as const;
-export const supportedWakeWordTokens = "j iǎ w éi s ī @贾维斯";
+export const supportedWakeWord = wakeWordConfig.keyword;
+export const supportedWakeWordTokens = wakeWordConfig.tokens;
 
-const targetSampleRate = 16_000;
+const targetSampleRate = wakeWordConfig.samplingRate;
 const maxBufferedAudioSeconds = 2;
 
 type CpalRuntime = typeof import("node-cpal");
@@ -220,8 +221,8 @@ export class SherpaWakeWordService {
       const runtime = this.loadRuntime();
       kws = runtime.sherpa.createKws({
         featConfig: {
-          samplingRate: targetSampleRate,
-          featureDim: 80
+          samplingRate: wakeWordConfig.samplingRate,
+          featureDim: wakeWordConfig.featureDim
         },
         modelConfig: {
           transducer: {
@@ -230,16 +231,16 @@ export class SherpaWakeWordService {
             joiner: join(this.options.modelRoot, "joiner.int8.onnx")
           },
           tokens: join(this.options.modelRoot, "tokens.txt"),
-          numThreads: 1,
-          provider: "cpu",
-          debug: 0,
-          modelingUnit: "ppinyin"
+          numThreads: wakeWordConfig.numThreads,
+          provider: wakeWordConfig.provider,
+          debug: wakeWordConfig.debug,
+          modelingUnit: wakeWordConfig.modelingUnit
         },
-        maxActivePaths: 4,
-        numTrailingBlanks: 1,
-        keywordsScore: 1.0,
-        keywordsThreshold: 0.25,
-        keywords: supportedWakeWordTokens
+        maxActivePaths: wakeWordConfig.maxActivePaths,
+        numTrailingBlanks: wakeWordConfig.numTrailingBlanks,
+        keywordsScore: wakeWordConfig.keywordsScore,
+        keywordsThreshold: wakeWordConfig.keywordsThreshold,
+        keywords: wakeWordConfig.tokens
       });
       stream = kws.createStream();
       host = runtime.cpal.defaultHost();

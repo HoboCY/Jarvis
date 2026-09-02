@@ -33,11 +33,42 @@ Porcupine 的 GitHub 仓库确实采用 Apache-2.0，但这不等于当前产品
 
 1. 已移除 Porcupine SDK、模型文件、AccessKey 后端配置与响应字段。
 2. 已通过现有 `WakeWordDetector` 接口接入 sherpa-onnx，不改变 Realtime 的单轮唤醒与回答后重新静音状态机。
-3. 已验证 INT8 模型在开发构建和打包后的 Electron Node 24 环境加载成功，静音不触发，macOS `Tingting` 合成的“贾维斯”能够触发。
+3. 已验证 INT8 模型在开发构建和打包后的 Electron Node 24 环境加载成功；离线验收使用
+   带明确再分发授权和固定 SHA-256 的 AISHELL-3 正样本，不把 macOS 系统语音输出
+   当作可发布证据。
 4. 仍需由实际使用者在同一台 Mac、同一麦克风验证：空闲 CPU、正常/远场/噪声下的漏唤醒，以及连续背景语音下的误唤醒。
 
 建议的替换验收线：连续背景音频误唤醒不高于 0.5 次/小时，20 次近场和 20 次远场唤醒分别统计漏唤醒率，并记录 30 分钟空闲 CPU 的平均值和峰值。这些是项目验收建议，不是各引擎之间已被统一基准验证的官方结论。
 
 ## 限制
 
-当前验证覆盖模型加载、合成中文正样本、静音负样本和 macOS arm64 打包，不等同于真人声学验收，也不构成法律意见。模型许可在正式分发前仍应再次核对。
+当前验证覆盖模型加载、AISHELL-3 合成中文固定正样本、静音/确定性负样本和 macOS arm64
+打包路径；不等同于真人声学验收或法律意见。模型和 AISHELL-3 数据许可在正式分发前仍应再次核对。
+
+## Phase 8 离线验收边界
+
+Desktop 提供一个有界、无网络的真实模型验收命令：
+
+```sh
+pnpm --filter @jarvis/desktop test:wake-word
+```
+
+命令直接调用锁定版本的 `sherpa-onnx` `createKws`，使用与主进程
+`SherpaWakeWordService` 相同的 CPU、16 kHz、partial-pinyin 配置，并输出只含
+应用、运行时、模型、每个夹具结果/耗时和总体状态的 JSON。模型四个文件和正样本
+均做 SHA-256 固定检查；输出不包含本机绝对路径或凭据。Desktop 的完整
+`test` 在构建后还会把同一命令指向 `dist/assets` 中的模型，作为包内容门禁。
+
+夹具分为离线固定资产、代码生成的确定性 PCM 和打包 smoke 三类：
+`jarvis-licensed-positive` 是通过官方 sherpa-onnx TTS Space、AISHELL-3
+speaker 50 生成并固定 SHA-256 的“贾维斯”正样本；`silence`、`negative-synthetic`
+和 `background-synthetic` 是命令内用固定种子生成的 PCM 非唤醒输入。它们是离线
+回归证据，不是麦克风录音、真人声学质量证明或生产误唤醒率证明。打包验收与离线
+夹具也不等同于已安装应用的启动 smoke。
+
+这里的“合成语音”特指由 TTS/系统声音生成的语音；没有明确再分发许可时，它不能
+成为提交的 fixture。这里的“打包 smoke”只验证 `dist` 中复制的 runtime、WASM
+和模型能够运行；真人麦克风试验（近场、远场、背景误唤醒、空闲 CPU）仍未执行。
+
+以下仍未执行：同一台 Mac 的真人近场 20 次、远场 20 次、背景误唤醒和 30 分钟
+空闲 CPU 测量；这些 live/human gates 必须在具备目标硬件和操作条件后单独记录。

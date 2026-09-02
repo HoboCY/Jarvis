@@ -124,6 +124,18 @@ test("desktop build metadata removes unused API client and pins esbuild", async 
   assert.equal(packageJson.devDependencies?.esbuild, "0.25.0");
 });
 
+test("macOS packaging gates on the copied sherpa runtime acceptance", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("package.json", desktopRoot), "utf8"));
+  const packageGate = packageJson.scripts?.["check:package"];
+
+  assert.match(packageGate, /pnpm build/);
+  assert.match(
+    packageGate,
+    /wake-word-acceptance\.mjs --runtime-root dist\/node_modules\/sherpa-onnx --model-root dist\/assets\/sherpa-kws-wenetspeech-3\.3M/);
+  assert.match(packageJson.scripts?.["package:mac"], /check:package/);
+  assert.match(packageJson.scripts?.["make:mac"], /check:package/);
+});
+
 test("renderer dependency resolution supports a hoisted react-dom package", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "jarvis-renderer-dependencies-"));
   const fixtureDesktopRoot = join(fixtureRoot, "src/clients/desktop");

@@ -7,10 +7,12 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "lint": "../../../node_modules/.bin/eslint --config ../../../eslint.config.mjs src",
-    "test": "tsx --test src/security.test.ts src/main/input-validation.test.ts src/main/backend-config.test.ts src/main/desktop-bearer-store.test.ts src/main/desktop-lifecycle.test.ts src/main/signalr-config.test.ts src/main/wake-word-service.test.ts src/renderer/backend-connection-state.test.ts src/renderer/csp.test.ts src/renderer/diagnostics.test.ts src/renderer/realtime.test.ts src/renderer/wake-word.test.ts src/renderer/task-feed.test.ts src/renderer/approval-feed.test.ts src/renderer/mobile-pairing.test.ts && pnpm build && node scripts/build-desktop.test.mjs",
+    "test": "tsx --test src/security.test.ts src/main/input-validation.test.ts src/main/backend-config.test.ts src/main/desktop-bearer-store.test.ts src/main/desktop-lifecycle.test.ts src/main/signalr-config.test.ts src/main/wake-word-service.test.ts src/renderer/backend-connection-state.test.ts src/renderer/csp.test.ts src/renderer/diagnostics.test.ts src/renderer/realtime.test.ts src/renderer/wake-word.test.ts src/renderer/task-feed.test.ts src/renderer/approval-feed.test.ts src/renderer/mobile-pairing.test.ts && node --test scripts/wake-word-acceptance.test.mjs && pnpm run check:package",
+    "test:wake-word": "node scripts/wake-word-acceptance.mjs",
     "build": "node scripts/build.mjs",
-    "package:mac": "pnpm build && ../../../node_modules/.bin/electron-forge package --platform darwin --arch arm64",
-    "make:mac": "pnpm build && ../../../node_modules/.bin/electron-forge make --platform darwin --arch arm64"
+    "check:package": "pnpm build && node scripts/build-desktop.test.mjs && node scripts/wake-word-acceptance.mjs --runtime-root dist/node_modules/sherpa-onnx --model-root dist/assets/sherpa-kws-wenetspeech-3.3M",
+    "package:mac": "pnpm run check:package && ../../../node_modules/.bin/electron-forge package --platform darwin --arch arm64",
+    "make:mac": "pnpm run check:package && ../../../node_modules/.bin/electron-forge make --platform darwin --arch arm64"
   },
   "devDependencies": {
     "@electron-forge/cli": "7.11.2",
