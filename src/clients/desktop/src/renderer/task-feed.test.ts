@@ -15,6 +15,7 @@ import {
   type DesktopNotification,
   type DesktopTask
 } from "./task-feed.js";
+import { createDesktopActionFailure, DesktopActionRunner } from "./control-panel.js";
 
 test("accepts only the exact allowlisted notification action projection", () => {
   assert.deepEqual(notificationActionsFrom('["acknowledge"]'), ["acknowledge"]);
@@ -267,6 +268,85 @@ test("keeps a failed delivered receipt pending and retries it on the next refres
   assert.deepEqual(deliveredKeys, [
     "notification-delivered:notification-retry",
     "notification-delivered:notification-retry"
+  ]);
+});
+
+test("routes concurrent delivered receipts through the action runner and exposes retry state", async () => {
+  let failDelivery = true;
+  const deliveredKeys: string[] = [];
+  const states: Array<{ key: string; status: string; message?: string }> = [];
+  const runner = new DesktopActionRunner({
+    createIdempotencyKey: key => `runner:${key}`,
+    onStateChange: state => states.push(state)
+  });
+  const backend = {
+    getTasks: async () => [],
+    getUnreadNotifications: async () => [
+      { id: "notification-runner", status: "pending", title: "送达", body: "结果" }
+    ],
+    markDelivered: async (_notificationId: string, idempotencyKey: string) => {
+      deliveredKeys.push(idempotencyKey);
+      if (failDelivery) {
+        throw createDesktopActionFailure("retryable", "backend_unavailable");
+      }
+    },
+    markRead: async () => undefined,
+    dismiss: async () => undefined,
+    runAction: <T>(key: string, execute: (idempotencyKey: string) => Promise<T>) =>
+      runner.run(key, execute)
+  };
+  const feed = new DesktopTaskNotificationFeed(backend);
+
+  await Promise.all([
+    feed.refresh("conversation-runner"),
+    feed.refresh("conversation-runner")
+  ]);
+  assert.equal(feed.notifications[0]?.status, "pending");
+  failDelivery = false;
+  await feed.refresh("conversation-runner");
+
+  assert.equal(feed.notifications[0]?.status, "delivered");
+  assert.deepEqual(deliveredKeys, [
+    "runner:notification-delivered:notification-runner",
+    "runner:notification-delivered:notification-runner"
+  ]);
+  assert.deepEqual(states
+    .filter(state => state.key === "notification-delivered:notification-runner")
+    .map(state => state.status), ["pending", "retryable", "pending", "succeeded"]);
+  assert.equal(states.some(state => state.message?.includes("scenario-client-secret")), false);
+});
+
+test("keeps a terminal delivered receipt pending without duplicate backend calls", async () => {
+  let deliveryCalls = 0;
+  const states: Array<{ key: string; status: string }> = [];
+  const runner = new DesktopActionRunner({
+    createIdempotencyKey: key => `runner:${key}`,
+    onStateChange: state => states.push({ key: state.key, status: state.status })
+  });
+  const backend = {
+    getTasks: async () => [],
+    getUnreadNotifications: async () => [
+      { id: "notification-terminal", status: "pending", title: "送达失败", body: "结果" }
+    ],
+    markDelivered: async () => {
+      deliveryCalls++;
+      throw createDesktopActionFailure("terminal", "invalid_input");
+    },
+    markRead: async () => undefined,
+    dismiss: async () => undefined,
+    runAction: <T>(key: string, execute: (idempotencyKey: string) => Promise<T>) =>
+      runner.run(key, execute)
+  };
+  const feed = new DesktopTaskNotificationFeed(backend);
+
+  await feed.refresh("conversation-terminal");
+  await feed.refresh("conversation-terminal");
+
+  assert.equal(feed.notifications[0]?.status, "pending");
+  assert.equal(deliveryCalls, 1);
+  assert.deepEqual(states, [
+    { key: "notification-delivered:notification-terminal", status: "pending" },
+    { key: "notification-delivered:notification-terminal", status: "terminal" }
   ]);
 });
 

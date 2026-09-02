@@ -30,6 +30,15 @@ import {
   SherpaWakeWordService,
   supportedWakeWord
 } from "./wake-word-service.js";
+import {
+  createDesktopActionFailureError,
+  createDesktopIpcFailure,
+  createDesktopIpcSuccess,
+  projectDesktopActionFailure,
+  type DesktopActionFailureCode,
+  type DesktopActionFailureKind,
+  type DesktopIpcHandler
+} from "../renderer/desktop-ipc.js";
 
 type JsonRecord = Record<string, unknown>;
 type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
@@ -38,6 +47,47 @@ type BackendConnectionState = {
   revision: number;
   error?: string;
 };
+
+function desktopActionFailure(kind: DesktopActionFailureKind, code: DesktopActionFailureCode): Error {
+  return createDesktopActionFailureError(kind, code);
+}
+
+function backendHttpFailure(status: number): Error {
+  switch (status) {
+    case 400:
+    case 405:
+    case 422:
+      return desktopActionFailure("terminal", "invalid_input");
+    case 401:
+      return desktopActionFailure("terminal", "unauthorized");
+    case 403:
+      return desktopActionFailure("terminal", "forbidden");
+    case 404:
+      return desktopActionFailure("terminal", "not_found");
+    case 409:
+      return desktopActionFailure("terminal", "conflict");
+    case 410:
+      return desktopActionFailure("terminal", "expired");
+    case 408:
+      return desktopActionFailure("retryable", "timeout");
+    case 429:
+      return desktopActionFailure("retryable", "backend_unavailable");
+    default:
+      return status >= 500 && status <= 599
+        ? desktopActionFailure("retryable", "backend_unavailable")
+        : desktopActionFailure("retryable", "unknown");
+  }
+}
+
+function handleDesktopIpc(channel: string, handler: DesktopIpcHandler): void {
+  ipcMain.handle(channel, async (event, ...args) => {
+    try {
+      return createDesktopIpcSuccess(await handler(event, ...args));
+    } catch (reason) {
+      return createDesktopIpcFailure(projectDesktopActionFailure(reason));
+    }
+  });
+}
 
 const backendBaseUrl = resolveBackendBaseUrl();
 const clientHubPath = "/hubs/client";
@@ -157,7 +207,7 @@ async function ensureMicrophoneAccess(): Promise<void> {
     return;
   }
 
-  throw new Error("Microphone access is required for local Chinese wake-word detection.");
+  throw desktopActionFailure("retryable", "wake_unavailable");
 }
 
 function publishBackendConnectionState(
@@ -250,8 +300,7 @@ async function requestBackend(
   idempotencyKey?: string
 ): Promise<unknown> {
   if (!backendBearer || backendBearer.length < 32) {
-    throw backendBearerConfigurationError
-      ?? new Error("The Desktop backend bearer is not configured in the Electron main process.");
+    throw desktopActionFailure("terminal", "not_configured");
   }
 
   const headers = new Headers({ Authorization: `Bearer ${backendBearer}` });
@@ -260,7 +309,7 @@ async function requestBackend(
   }
   if (method === "POST") {
     if (!idempotencyKey || idempotencyKey.length > 200) {
-      throw new Error("A bounded Idempotency-Key is required for Desktop writes.");
+      throw desktopActionFailure("terminal", "invalid_input");
     }
     headers.set("Idempotency-Key", idempotencyKey);
   }
@@ -271,7 +320,7 @@ async function requestBackend(
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   if (!response.ok) {
-    throw new Error(`Jarvis backend request failed with ${response.status}.`);
+    throw backendHttpFailure(response.status);
   }
 
   return response.json();
@@ -279,7 +328,7 @@ async function requestBackend(
 
 function record(value: unknown): JsonRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Invalid Desktop IPC request.");
+    throw desktopActionFailure("terminal", "invalid_input");
   }
   return value as JsonRecord;
 }
@@ -302,9 +351,9 @@ function isSignalREnvelope(value: unknown): value is JsonRecord {
     && !Array.isArray(envelope.payload);
 }
 
-function requiredString(value: unknown, name: string, maxLength = 200): string {
+function requiredString(value: unknown, _name: string, maxLength = 200): string {
   if (typeof value !== "string" || value.trim().length === 0 || value.length > maxLength) {
-    throw new Error(`Invalid ${name}.`);
+    throw desktopActionFailure("terminal", "invalid_input");
   }
   return value.trim();
 }
@@ -321,12 +370,12 @@ function optionalString(value: unknown, name: string, maxLength = 200): string |
   return requiredString(value, name, maxLength);
 }
 
-function requiredStringArray(value: unknown, name: string, maxItems = 100): string[] {
+function requiredStringArray(value: unknown, _name: string, maxItems = 100): string[] {
   if (!Array.isArray(value) || value.length > maxItems) {
-    throw new Error(`Invalid ${name}.`);
+    throw desktopActionFailure("terminal", "invalid_input");
   }
 
-  return value.map(item => requiredString(item, name));
+  return value.map(item => requiredString(item, _name));
 }
 
 function optionalStringArray(value: unknown, name: string, maxItems = 100): string[] {
@@ -341,7 +390,7 @@ function boundedUserInputAnswers(value: unknown): Record<string, { answers: stri
   const input = requiredBody(value);
   const entries = Object.entries(input);
   if (entries.length < 1 || entries.length > 3) {
-    throw new Error("Invalid user-input answers.");
+    throw desktopActionFailure("terminal", "invalid_input");
   }
 
   let totalLength = 0;
@@ -352,13 +401,13 @@ function boundedUserInputAnswers(value: unknown): Record<string, { answers: stri
     if (!Array.isArray(answerRecord.answers)
       || answerRecord.answers.length < 1
       || answerRecord.answers.length > 20) {
-      throw new Error("Invalid user-input answer values.");
+      throw desktopActionFailure("terminal", "invalid_input");
     }
 
     const normalizedAnswers = answerRecord.answers.map(answer => requiredString(answer, "answer", 4_000));
     totalLength += normalizedAnswers.reduce((sum, answer) => sum + answer.length, 0);
     if (totalLength > 20_000) {
-      throw new Error("User-input answers are too long.");
+      throw desktopActionFailure("terminal", "invalid_input");
     }
     answers[normalizedQuestionId] = { answers: normalizedAnswers };
   }
@@ -369,7 +418,7 @@ function boundedUserInputAnswers(value: unknown): Record<string, { answers: stri
 function requiredUuidArray(value: unknown, name: string, maxItems = 100): string[] {
   return requiredStringArray(value, name, maxItems).map(item => {
     if (!isUuid(item)) {
-      throw new Error(`Invalid ${name}.`);
+      throw desktopActionFailure("terminal", "invalid_input");
     }
     return item;
   });
@@ -383,11 +432,11 @@ function optionalCapabilityEnvelope(value: unknown): JsonRecord | null {
   const envelope = requiredBody(value);
   for (const name of ["readFiles", "writeFiles", "runCommands", "network"] as const) {
     if (typeof envelope[name] !== "boolean") {
-      throw new Error(`Invalid capabilityEnvelope.${name}.`);
+      throw desktopActionFailure("terminal", "invalid_input");
     }
   }
   if (!Array.isArray(envelope.allowedRoots) || envelope.allowedRoots.length > 20) {
-    throw new Error("Invalid capabilityEnvelope.allowedRoots.");
+    throw desktopActionFailure("terminal", "invalid_input");
   }
 
   return {
@@ -404,6 +453,8 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
     height: 900,
+    minWidth: 860,
+    minHeight: 620,
     webPreferences: {
       ...secureWebPreferences,
       preload: new URL("../preload/index.cjs", import.meta.url).pathname
@@ -622,34 +673,34 @@ if (!app.requestSingleInstanceLock()) {
         publishWakeWordEvent("wake-word:error", wakeWordErrorCode);
       }
     });
-    ipcMain.handle("app:getVersion", () => app.getVersion());
-    ipcMain.handle("wake-word:start", async (_event, value: unknown) => {
+    handleDesktopIpc("app:getVersion", () => app.getVersion());
+    handleDesktopIpc("wake-word:start", async (_event, value: unknown) => {
       try {
         const input = requiredBody(value);
         const keyword = requiredString(input.keyword, "keyword", 20);
         if (keyword !== supportedWakeWord) {
-          throw new Error("Unsupported Desktop wake word.");
+          throw desktopActionFailure("terminal", "invalid_input");
         }
         await ensureMicrophoneAccess();
         wakeWordService?.start(keyword);
       } catch (error) {
         console.error("Local wake-word detection could not start.", sanitizeWakeWordError(error).message);
-        throw new Error(wakeWordErrorCode);
+        throw desktopActionFailure("retryable", "wake_unavailable");
       }
     });
-    ipcMain.handle("wake-word:stop", () => {
+    handleDesktopIpc("wake-word:stop", () => {
       try {
         wakeWordService?.stop();
       } catch (error) {
         console.error("Local wake-word detection could not stop.", sanitizeWakeWordError(error).message);
-        throw new Error(wakeWordErrorCode);
+        throw desktopActionFailure("retryable", "wake_unavailable");
       }
     });
-    ipcMain.handle("backend:getConnectionState", () => backendConnectionState);
-    ipcMain.handle("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
-    ipcMain.handle("backend:getDesktopDevice", () =>
+    handleDesktopIpc("backend:getConnectionState", () => backendConnectionState);
+    handleDesktopIpc("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
+    handleDesktopIpc("backend:getDesktopDevice", () =>
       requestBackend("/api/v1/realtime/desktop-device", "POST", {}, randomUUID()));
-    ipcMain.handle("backend:createMobilePairing", (_event, value: unknown) => {
+    handleDesktopIpc("backend:createMobilePairing", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         "/api/v1/mobile-pairings",
@@ -661,7 +712,7 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:createConversation", (_event, value: unknown) => {
+    handleDesktopIpc("backend:createConversation", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         "/api/v1/conversations",
@@ -669,13 +720,13 @@ if (!app.requestSingleInstanceLock()) {
         { title: typeof input.title === "string" ? input.title.slice(0, 500) : null },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:getConversation", (_event, value: unknown) => {
+    handleDesktopIpc("backend:getConversation", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         `/api/v1/conversations/${encodeURIComponent(requiredString(input.conversationId, "conversationId"))}`,
         "GET");
     });
-    ipcMain.handle("backend:addTypedMessage", (_event, value: unknown) => {
+    handleDesktopIpc("backend:addTypedMessage", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         `/api/v1/conversations/${encodeURIComponent(requiredString(input.conversationId, "conversationId"))}/messages/typed`,
@@ -690,7 +741,7 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:createRealtimeClientSecret", (_event, value: unknown) => {
+    handleDesktopIpc("backend:createRealtimeClientSecret", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         "/api/v1/realtime/client-secrets",
@@ -702,7 +753,7 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:realtimeConnected", (_event, value: unknown) => {
+    handleDesktopIpc("backend:realtimeConnected", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         `/api/v1/realtime/sessions/${encodeURIComponent(requiredString(input.sessionId, "sessionId"))}/connected`,
@@ -710,11 +761,11 @@ if (!app.requestSingleInstanceLock()) {
         { externalSessionId: requiredString(input.externalSessionId, "externalSessionId") },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:realtimeEnded", (_event, value: unknown) => {
+    handleDesktopIpc("backend:realtimeEnded", (_event, value: unknown) => {
       const input = requiredBody(value);
       const status = input.status;
       if (status !== "rotated" && status !== "disconnected" && status !== "failed") {
-        throw new Error("Invalid realtime session end status.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       return requestBackend(
         `/api/v1/realtime/sessions/${encodeURIComponent(requiredString(input.sessionId, "sessionId"))}/ended`,
@@ -722,10 +773,10 @@ if (!app.requestSingleInstanceLock()) {
         { reason: requiredString(input.reason, "reason", 500), status },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:ingestRealtimeEvents", (_event, value: unknown) => {
+    handleDesktopIpc("backend:ingestRealtimeEvents", (_event, value: unknown) => {
       const input = requiredBody(value);
       if (!Array.isArray(input.events) || input.events.length < 1 || input.events.length > 100) {
-        throw new Error("Invalid realtime event batch.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       return requestBackend(
         `/api/v1/conversations/${encodeURIComponent(requiredString(input.conversationId, "conversationId"))}/realtime-events:ingest`,
@@ -733,7 +784,7 @@ if (!app.requestSingleInstanceLock()) {
         { version: 1, events: input.events },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:delegateTask", (_event, value: unknown) => {
+    handleDesktopIpc("backend:delegateTask", (_event, value: unknown) => {
       const input = requiredBody(value);
       const requiredCapabilities = requiredStringArray(input.requiredCapabilities, "requiredCapabilities", 20);
       const sourceMessageIds = requiredUuidArray(input.sourceMessageIds, "sourceMessageIds");
@@ -758,27 +809,27 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:getTaskStatus", (_event, value: unknown) => {
+    handleDesktopIpc("backend:getTaskStatus", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         `${taskApiPath}/${encodeURIComponent(requiredString(input.taskId, "taskId"))}`,
         "GET");
     });
-    ipcMain.handle("backend:submitTaskUserInput", (_event, value: unknown) => {
+    handleDesktopIpc("backend:submitTaskUserInput", (_event, value: unknown) => {
       const input = requiredBody(value);
       const taskId = requiredString(input.taskId, "taskId");
       if (!isUuid(taskId)) {
-        throw new Error("Invalid taskId.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       const executionId = optionalString(input.executionId, "executionId");
       if (executionId !== undefined && !isUuid(executionId)) {
-        throw new Error("Invalid executionId.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       const requestIdIsString = input.requestIdIsString === undefined
         ? true
         : input.requestIdIsString;
       if (typeof requestIdIsString !== "boolean") {
-        throw new Error("Invalid requestIdIsString.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       return requestBackend(
         `${taskApiPath}/${encodeURIComponent(taskId)}/user-input`,
@@ -791,7 +842,7 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:cancelTask", (_event, value: unknown) => {
+    handleDesktopIpc("backend:cancelTask", (_event, value: unknown) => {
       const input = requiredBody(value);
       return requestBackend(
         `${taskApiPath}/${encodeURIComponent(requiredString(input.taskId, "taskId"))}/cancel`,
@@ -799,14 +850,14 @@ if (!app.requestSingleInstanceLock()) {
         {},
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:rememberFact", (_event, value: unknown) => {
+    handleDesktopIpc("backend:rememberFact", (_event, value: unknown) => {
       const input = requiredBody(value);
       const sourceMessageId = requiredString(input.sourceMessageId, "sourceMessageId");
       if (!isUuid(sourceMessageId)) {
-        throw new Error("Invalid sourceMessageId.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       if (typeof input.sensitive !== "boolean") {
-        throw new Error("Invalid sensitive.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       return requestBackend(
         memoryFactApiPath,
@@ -819,13 +870,13 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:getTasks", (_event, value: unknown) => {
+    handleDesktopIpc("backend:getTasks", (_event, value: unknown) => {
       const input = requiredBody(value);
       const conversationId = optionalString(input.conversationId, "conversationId");
       const cursor = optionalString(input.cursor, "cursor");
       const status = optionalString(input.status, "status");
       if (status && !nonTerminalTaskStatuses.has(status)) {
-        throw new Error("Invalid task status filter.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       const query = new URLSearchParams({ limit: "100" });
       if (conversationId) {
@@ -840,7 +891,7 @@ if (!app.requestSingleInstanceLock()) {
       const suffix = query.toString();
       return requestBackend(`${taskApiPath}${suffix ? `?${suffix}` : ""}`, "GET");
     });
-    ipcMain.handle("backend:getNotifications", (_event, value: unknown) => {
+    handleDesktopIpc("backend:getNotifications", (_event, value: unknown) => {
       const input = requiredBody(value);
       const conversationId = optionalString(input.conversationId, "conversationId");
       const query = new URLSearchParams({ status: "unread" });
@@ -850,7 +901,7 @@ if (!app.requestSingleInstanceLock()) {
       return requestBackend(`${notificationApiPath}?${query.toString()}`, "GET");
     });
     for (const action of ["delivered", "read", "dismiss"] as const) {
-      ipcMain.handle(`backend:${action}Notification`, (_event, value: unknown) => {
+      handleDesktopIpc(`backend:${action}Notification`, (_event, value: unknown) => {
         const input = requiredBody(value);
         return requestBackend(
           `${notificationApiPath}/${encodeURIComponent(requiredString(input.notificationId, "notificationId"))}/${action}`,
@@ -859,11 +910,11 @@ if (!app.requestSingleInstanceLock()) {
           requiredString(input.idempotencyKey, "idempotencyKey"));
       });
     }
-    ipcMain.handle("backend:applyNotificationAction", (_event, value: unknown) => {
+    handleDesktopIpc("backend:applyNotificationAction", (_event, value: unknown) => {
       const input = requiredBody(value);
       const actionId = requiredString(input.actionId, "actionId");
       if (actionId !== "acknowledge") {
-        throw new Error("Invalid notification action.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       return requestBackend(
         `${notificationApiPath}/${encodeURIComponent(requiredString(input.notificationId, "notificationId"))}/actions/${actionId}`,
@@ -871,21 +922,21 @@ if (!app.requestSingleInstanceLock()) {
         {},
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    ipcMain.handle("backend:getApprovals", () =>
+    handleDesktopIpc("backend:getApprovals", () =>
       requestBackend(`${approvalApiPath}?status=pending`, "GET"));
-    ipcMain.handle("backend:decideApproval", (_event, value: unknown) => {
+    handleDesktopIpc("backend:decideApproval", (_event, value: unknown) => {
       const input = requiredBody(value);
       const approvalId = requiredString(input.approvalId, "approvalId");
       if (!isUuid(approvalId)) {
-        throw new Error("Invalid approvalId.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       const decision = input.decision;
       if (decision !== "approve" && decision !== "deny") {
-        throw new Error("Invalid approval decision.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       const scope = input.scope;
       if (scope !== "once" && scope !== "taskSession") {
-        throw new Error("Invalid approval scope.");
+        throw desktopActionFailure("terminal", "invalid_input");
       }
       return requestBackend(
         `${approvalApiPath}/${encodeURIComponent(approvalId)}/decision`,

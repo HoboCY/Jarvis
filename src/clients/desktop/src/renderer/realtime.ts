@@ -153,6 +153,8 @@ export type DesktopRealtimeStatus = "disconnected" | "connecting" | "connected" 
 
 export type DesktopRealtimeWakeState = "standby" | "awake" | "error";
 
+export type DesktopRealtimePersistenceRetryReason = "event-ingest" | "session-end";
+
 export type DesktopRealtimeConnectionInput = {
   realtimeSessionId: string;
   clientSecret: string;
@@ -199,6 +201,7 @@ export class DesktopRealtimeController {
   private readonly textByItem = new Map<string, string>();
   private readonly modalityByItem = new Map<string, "text" | "audioWithTranscript">();
   private readonly pendingBatches: PendingRealtimeBatch[] = [];
+  private eventIngestPersistenceFailed = false;
   private pendingSessionEnd: PendingSessionEnd | undefined;
   private persistenceTimer: ReturnType<typeof setTimeout> | undefined;
   private persistenceFlush: Promise<boolean> | undefined;
@@ -245,6 +248,13 @@ export class DesktopRealtimeController {
 
   public get wakeState(): DesktopRealtimeWakeState {
     return this.wakeStateValue;
+  }
+
+  public get persistenceRetryReason(): DesktopRealtimePersistenceRetryReason | undefined {
+    if (this.eventIngestPersistenceFailed) {
+      return "event-ingest";
+    }
+    return this.pendingSessionEnd ? "session-end" : undefined;
   }
 
   public setWakeWordDetector(
@@ -1007,6 +1017,7 @@ export class DesktopRealtimeController {
           });
         } catch (error) {
           this.pendingBatches.unshift(batch);
+          this.eventIngestPersistenceFailed = true;
           this.onStatus(
             this.statusValue,
             error instanceof Error ? error.message : "Message persistence failed."
@@ -1019,6 +1030,11 @@ export class DesktopRealtimeController {
       // request resolved enter the queue before declaring the flush complete.
       await Promise.resolve();
       if (this.pendingBatches.length === 0) {
+        const recoveredEventIngest = this.eventIngestPersistenceFailed;
+        this.eventIngestPersistenceFailed = false;
+        if (recoveredEventIngest) {
+          this.onStatus(this.statusValue);
+        }
         return true;
       }
     }
@@ -1137,6 +1153,7 @@ export class DesktopRealtimeController {
     try {
       await this.backend.markEnded(pendingEnd);
       this.pendingSessionEnd = undefined;
+      this.onStatus(this.statusValue);
       return true;
     } catch (error) {
       this.onStatus(this.statusValue, mapRealtimeConnectionError(error).message);

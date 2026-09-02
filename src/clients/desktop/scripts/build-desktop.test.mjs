@@ -2,9 +2,10 @@ import { strict as assert } from "node:assert";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { build } from "esbuild";
 import { assertBundleImports, assertWakeWordBundleContract } from "./assert-package.mjs";
 import { resolveRendererDependencies } from "./renderer-dependencies.mjs";
 
@@ -113,6 +114,100 @@ test("main bundle points to CommonJS preload entry files", async () => {
   const main = await readBuiltFile("main/main.js");
   assert.match(main, /preload\/index\.cjs/);
   assert.match(main, /preload\/overlay\.cjs/);
+});
+
+test("renderer scenario runner pins the canonical dist despite caller overrides", async () => {
+  const runner = await readFile(new URL("renderer-scenario-runner.mjs", import.meta.url), "utf8");
+  assert.match(runner, /JARVIS_DESKTOP_SCENARIO_DIST:\s*canonicalDistRoot/);
+  assert.match(runner, /const canonicalDistRoot = resolve\(desktopRoot, "dist"\)/);
+});
+
+test("renderer scenario configures isolated Chromium storage before its first await", async () => {
+  const runner = await readFile(new URL("renderer-scenario-runner.mjs", import.meta.url), "utf8");
+  const scenario = await readFile(new URL("renderer-scenario.mjs", import.meta.url), "utf8");
+  const firstAwait = scenario.indexOf("await ");
+  const userDataConfiguration = scenario.indexOf('app.setPath("userData", scenarioUserDataPath)');
+
+  assert.match(runner, /`--user-data-dir=\$\{userDataPath\}`/);
+  assert.match(runner, /`--disk-cache-dir=\$\{scenarioCachePath\}`/);
+  assert.match(scenario, /app\.setPath\("sessionData", scenarioUserDataPath\)/);
+  assert.ok(firstAwait > userDataConfiguration);
+});
+
+test("realtime recovery harness bundles production seams in memory", async () => {
+  const harnessPath = new URL("realtime-recovery-scenario.tsx", import.meta.url);
+  const harness = await readFile(harnessPath, "utf8");
+  const desktopRootPath = fileURLToPath(desktopRoot);
+  const repositoryRoot = resolve(desktopRootPath, "../../..");
+  const rendererDependencies = resolveRendererDependencies(desktopRootPath);
+  const rendererDependencyPlugin = {
+    name: "desktop-test-renderer-dependencies",
+    setup(esbuild) {
+      esbuild.onResolve({ filter: /^(?:react|react\/jsx-runtime|react-dom\/client)$/ }, args => {
+        const target = rendererDependencies.get(args.path);
+        return target ? { path: target } : undefined;
+      });
+    }
+  };
+  const workspaceSourcePlugin = {
+    name: "desktop-test-workspace-sources",
+    setup(esbuild) {
+      const sources = new Map([
+        ["@jarvis/contracts-ts", join(repositoryRoot, "packages/contracts-ts/src/index.ts")],
+        ["@jarvis/realtime-agent", join(repositoryRoot, "packages/realtime-agent/src/index.ts")]
+      ]);
+      esbuild.onResolve({ filter: /^@jarvis\/(?:contracts-ts|realtime-agent)$/ }, args => {
+        const source = sources.get(args.path);
+        return source ? { path: source } : undefined;
+      });
+    }
+  };
+
+  assert.match(harness, /from "\.\.\/src\/renderer\/realtime\.js"/);
+  assert.match(harness, /from "\.\.\/src\/renderer\/realtime-retry-controls\.js"/);
+  const result = await build({
+    absWorkingDir: repositoryRoot,
+    bundle: true,
+    conditions: ["browser", "import", "default"],
+    entryPoints: [fileURLToPath(harnessPath)],
+    format: "iife",
+    jsx: "automatic",
+    logLevel: "silent",
+    platform: "browser",
+    plugins: [workspaceSourcePlugin, rendererDependencyPlugin],
+    target: "es2022",
+    write: false
+  });
+
+  assert.equal(result.outputFiles.length, 1);
+  assert.match(result.outputFiles[0].text, /realtime-retry-persistence/);
+});
+
+test("renderer scenario verifies persistence recovery through injected DOM behavior", async () => {
+  const scenario = await readFile(new URL("renderer-scenario.mjs", import.meta.url), "utf8");
+
+  assert.match(scenario, /buildRealtimeRecoveryHarness/);
+  assert.match(scenario, /__jarvisRealtimePersistenceRecovery/);
+  assert.match(scenario, /data-realtime-recovery/);
+  assert.doesNotMatch(scenario, /inspectRealtimeRetryBundleContract/);
+  assert.doesNotMatch(scenario, /realtimeRetryBundle\.persistenceFailureProjectionIncluded/);
+});
+
+test("renderer notification scenario keeps structured delivery outcomes observable", async () => {
+  const scenario = await readFile(new URL("renderer-scenario.mjs", import.meta.url), "utf8");
+
+  assert.match(scenario, /function scenarioIpcFailure\(kind, code\)/);
+  assert.match(scenario, /function isScenarioIpcFailureEnvelope\(value\)/);
+  assert.match(scenario, /if \(isScenarioIpcFailureEnvelope\(value\)\) \{\s+return value;/);
+  assert.match(scenario, /retryableDeliveryFailure = scenarioIpcFailure\("retryable", "backend_unavailable"\)/);
+  assert.match(scenario, /terminalDeliveryFailure = scenarioIpcFailure\("terminal", "not_pending"\)/);
+  assert.match(scenario, /notificationDeliveryOutcomes = new Map\(\[/);
+  assert.match(scenario, /\[notificationId, "succeeded"\]/);
+  assert.match(scenario, /\[notificationIdTwo, "retryable"\]/);
+  assert.match(scenario, /\[notificationIdThree, "terminal"\]/);
+  assert.match(scenario, /notificationDeliveryAttempts\.push\(\{[\s\S]*notificationId: deliveredNotificationId,[\s\S]*idempotencyKey,[\s\S]*attempt,[\s\S]*outcome/);
+  assert.match(scenario, /if \(outcome === "retryable"\) \{\s+return retryableDeliveryFailure;/);
+  assert.match(scenario, /if \(outcome === "terminal"\) \{\s+return terminalDeliveryFailure;/);
 });
 
 test("packaged wake loop keeps native detection behind the Main/Preload IPC boundary", async () => {

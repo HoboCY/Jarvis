@@ -7,6 +7,7 @@ import {
   DesktopRealtimeController,
   mapRealtimeCancelResponse,
   mapRealtimeTaskStatusResponse,
+  type DesktopRealtimePersistenceRetryReason,
   type DesktopRealtimeStatus,
   type DesktopRealtimeWakeState
 } from "./realtime.js";
@@ -19,6 +20,7 @@ import {
   type DesktopNotification,
   type DesktopTask,
   desktopTaskFrom,
+  notificationDeliveredActionKey,
   notificationActionsFrom
 } from "./task-feed.js";
 import {
@@ -32,6 +34,33 @@ import {
   applyBackendConnectionState,
   initialBackendConnectionState
 } from "./backend-connection-state.js";
+import {
+  ApprovalActionCoordinator,
+  clearOppositeApprovalRetryable,
+  DesktopRealtimeActionCycle,
+  DesktopActionRunner,
+  DesktopLogicalActionAttemptLedger,
+  desktopActionMessage,
+  projectDesktopNotificationFeedback,
+  scrollBehaviorForReducedMotion,
+  submitTaskInputWithReconcile,
+  TaskInputAttemptLedger,
+  type TaskInputAnswers,
+  type DesktopActionState,
+  type DesktopNotificationActionStates,
+  type DesktopNotificationFeedbackAction
+} from "./control-panel.js";
+import {
+  desktopDeviceAudioLabel,
+  desktopDeviceCanUseLocalAudio,
+  desktopDeviceStatusLabel,
+  parseDesktopDeviceBootstrap,
+  type DesktopDevice
+} from "./device-status.js";
+import {
+  DesktopRealtimeConnectionControl,
+  DesktopRealtimeRetryControls
+} from "./realtime-retry-controls.js";
 
 type Message = {
   id: string;
@@ -62,7 +91,7 @@ type ClientSecret = {
   };
 };
 
-type Device = { deviceId: string; name: string; platform: string };
+type Device = DesktopDevice;
 
 type IconName =
   | "approvals"
@@ -147,8 +176,121 @@ function approvalKindLabel(kind: DesktopApproval["kind"]): string {
 }
 
 function scrollToPanel(id: string): void {
-  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  document.getElementById(id)?.scrollIntoView({
+    behavior: scrollBehaviorForReducedMotion(reducedMotion),
+    block: "start"
+  });
 }
+
+function actionStatusLabel(state: DesktopActionState | undefined): string {
+  switch (state?.status) {
+    case "pending": return "处理中…";
+    case "succeeded": return "已完成";
+    case "retryable": return "失败，可重试";
+    case "terminal": return "已停止";
+    default: return "";
+  }
+}
+
+function actionName(key: string): string {
+  if (key.startsWith("task-cancel:")) return "取消任务";
+  if (key.startsWith("task-input:")) return "提交任务输入";
+  if (key.startsWith("approval-approve:")) return "批准操作";
+  if (key.startsWith("approval-deny:")) return "拒绝操作";
+  if (key.startsWith("notification-delivered:")) return "通知送达回执";
+  if (key.startsWith("notification-acknowledge:")) return "确认通知";
+  if (key.startsWith("notification-read:")) return "标记已读";
+  if (key.startsWith("notification-dismiss:")) return "忽略通知";
+  if (key === "diagnostics-refresh") return "运行诊断";
+  if (key.startsWith("mobile-pairing:create:")) return "生成配对码";
+  if (key === "realtime-connect") return "连接语音";
+  if (key === "realtime-disconnect") return "断开语音";
+  if (key === "realtime-retry-persistence") return "重试保存";
+  if (key === "realtime-retry-wake") return "重试唤醒";
+  return "操作";
+}
+
+function actionButtonLabel(
+  state: DesktopActionState | undefined,
+  initial: string,
+  retry: string
+): string {
+  if (state?.status === "pending") {
+    return "处理中…";
+  }
+  if (state?.status === "retryable") {
+    return retry;
+  }
+  if (state?.status === "succeeded") {
+    return "已完成";
+  }
+  if (state?.status === "terminal") {
+    return "不可用";
+  }
+  return initial;
+}
+
+function actionUnavailable(state: DesktopActionState | undefined): boolean {
+  return state?.status === "pending"
+    || state?.status === "succeeded"
+    || state?.status === "terminal";
+}
+
+function ActionFeedback({ state, label }: { state?: DesktopActionState; label?: string }): ReactNode {
+  if (!state) {
+    return null;
+  }
+
+  return (
+    <p className={`action-feedback is-${state.status}`} role="status">
+      {label ? `${label}：` : ""}{state.message ?? actionStatusLabel(state)}
+    </p>
+  );
+}
+
+const notificationFeedbackLabels: Record<DesktopNotificationFeedbackAction, string> = {
+  delivered: "通知送达回执",
+  acknowledge: "通知确认",
+  read: "通知已读",
+  dismiss: "通知忽略"
+};
+
+function NotificationActionFeedback({ states }: { states: DesktopNotificationActionStates }): ReactNode {
+  const projection = projectDesktopNotificationFeedback(states);
+  if (!projection.delivered && projection.actions.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="notification-feedback" aria-label="通知操作反馈">
+      {projection.delivered ? (
+        <div className="notification-delivery-feedback" aria-label="通知送达回执">
+          <ActionFeedback
+            state={projection.delivered.state}
+            label={notificationFeedbackLabels.delivered}
+          />
+        </div>
+      ) : null}
+      {projection.actions.length > 0 ? (
+        <div className="notification-action-feedback" aria-label="通知用户操作反馈">
+          {projection.actions.map(entry => (
+            <ActionFeedback
+              key={entry.action}
+              state={entry.state}
+              label={notificationFeedbackLabels[entry.action]}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type RunDesktopAction = <T>(
+  key: string,
+  execute: (idempotencyKey: string) => Promise<T>
+) => Promise<T>;
 
 function taskFrom(value: unknown): DesktopTask {
   const task = desktopTaskFrom(value);
@@ -162,18 +304,36 @@ function taskFrom(value: unknown): DesktopTask {
 function TaskUserInputForm({
   task,
   onSubmitted,
-  onError
+  onReconcile,
+  onError,
+  runAction,
+  getActionState
 }: {
   task: DesktopTask;
   onSubmitted: () => Promise<void>;
+  onReconcile: () => Promise<boolean>;
   onError: (error: unknown) => void;
+  runAction: RunDesktopAction;
+  getActionState: (key: string) => DesktopActionState | undefined;
 }) {
   const pending = task.pendingUserInput;
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const attemptLedger = useRef<TaskInputAttemptLedger | undefined>(undefined);
+  const baseActionKey = pending ? `task-input:${task.id}:${pending.requestId}` : "";
+  if (pending && attemptLedger.current?.baseKey !== baseActionKey) {
+    attemptLedger.current = new TaskInputAttemptLedger(baseActionKey);
+  }
   if (!pending) {
     return null;
   }
+
+  const draftAnswers: TaskInputAnswers = {};
+  for (const question of pending.questions) {
+    draftAnswers[question.id] = { answers: [(answers[question.id] ?? "").trim()] };
+  }
+  const draftAction = attemptLedger.current!.actionFor(draftAnswers);
+  const actionState = getActionState(draftAction.actionKey);
 
   const submit = async (): Promise<void> => {
     if (pending.questions.some(question => !(answers[question.id] ?? "").trim())) {
@@ -183,18 +343,28 @@ function TaskUserInputForm({
 
     setSubmitting(true);
     try {
-      const fixedAnswers: Record<string, { answers: string[] }> = {};
+      const fixedAnswers: TaskInputAnswers = {};
       for (const question of pending.questions) {
         fixedAnswers[question.id] = { answers: [answers[question.id]!.trim()] };
       }
-      await window.jarvis.submitTaskUserInput({
-        taskId: task.id,
-        requestId: pending.requestId,
-        executionId: task.executionId,
-        requestIdIsString: pending.requestIdIsString,
-        answers: fixedAnswers,
-        idempotencyKey: crypto.randomUUID()
+      const submission = await submitTaskInputWithReconcile({
+        ledger: attemptLedger.current!,
+        payload: fixedAnswers,
+        reconcile: () => onReconcile(),
+        runAction,
+        submit: (prepared, idempotencyKey) => window.jarvis.submitTaskUserInput({
+          taskId: task.id,
+          requestId: pending.requestId,
+          executionId: task.executionId,
+          requestIdIsString: pending.requestIdIsString,
+          answers: prepared.payload,
+          idempotencyKey
+        })
       });
+      if (!submission) {
+        onError(new Error("任务输入状态已变化，请刷新任务后再提交。"));
+        return;
+      }
       await onSubmitted();
     } catch (error) {
       onError(error);
@@ -243,7 +413,14 @@ function TaskUserInputForm({
             )}
           </div>
         ))}
-        <button type="submit">{submitting ? "提交中…" : "提交答案"}</button>
+        <button
+          type="submit"
+          disabled={submitting || actionUnavailable(actionState)}
+          aria-busy={submitting || actionState?.status === "pending"}
+        >
+          {submitting ? "提交中…" : actionButtonLabel(actionState, "提交答案", "重试提交")}
+        </button>
+        <ActionFeedback state={actionState} />
       </fieldset>
     </form>
   );
@@ -287,7 +464,7 @@ function listItems(value: unknown): unknown[] {
   return Array.isArray(item.items) ? item.items : [];
 }
 
-function createTaskFeed(): DesktopTaskNotificationFeed {
+function createTaskFeed(runAction: RunDesktopAction): DesktopTaskNotificationFeed {
   return new DesktopTaskNotificationFeed({
     getTasks: async (conversationId, cursor, status) => {
       const page = asRecord(await window.jarvis.getTasks({ conversationId, cursor, status }));
@@ -318,7 +495,8 @@ function createTaskFeed(): DesktopTaskNotificationFeed {
       notificationId,
       actionId,
       idempotencyKey
-    })
+    }),
+    runAction
   });
 }
 
@@ -428,8 +606,7 @@ function playWakeTone(): void {
 }
 
 function deviceFrom(value: unknown): Device {
-  const item = asRecord(value);
-  return { deviceId: String(item.deviceId), name: String(item.name), platform: String(item.platform) };
+  return parseDesktopDeviceBootstrap(value);
 }
 
 export function App() {
@@ -437,6 +614,7 @@ export function App() {
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [device, setDevice] = useState<Device | undefined>();
   const [status, setStatus] = useState<DesktopRealtimeStatus>("disconnected");
+  const [persistenceRetryReason, setPersistenceRetryReason] = useState<DesktopRealtimePersistenceRetryReason>();
   const [error, setError] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
   const [muted, setMuted] = useState(true);
@@ -445,22 +623,55 @@ export function App() {
   const [tasks, setTasks] = useState<readonly DesktopTask[]>([]);
   const [notifications, setNotifications] = useState<readonly DesktopNotification[]>([]);
   const [approvals, setApprovals] = useState<readonly DesktopApproval[]>([]);
-  const [resolvingApprovalId, setResolvingApprovalId] = useState<string | undefined>();
+  const [resolvingApprovalIds, setResolvingApprovalIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [actionStates, setActionStates] = useState<Record<string, DesktopActionState>>({});
+  const [actionAnnouncement, setActionAnnouncement] = useState("");
   const [backendConnectionState, setBackendConnectionState] = useState("connecting");
   const backendConnection = useRef(initialBackendConnectionState);
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | undefined>();
   const [mobilePairing, setMobilePairing] = useState<MobilePairing | undefined>();
+  const [mobilePairingActionKey, setMobilePairingActionKey] = useState<string | undefined>();
   const [creatingMobilePairing, setCreatingMobilePairing] = useState(false);
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
   const connectGate = useRef<RealtimeConnectGate | undefined>(undefined);
+  const actionRunner = useRef<DesktopActionRunner | undefined>(undefined);
+  const realtimeActionCycle = useRef<DesktopRealtimeActionCycle | undefined>(undefined);
+  const mobilePairingAttempts = useRef(new DesktopLogicalActionAttemptLedger("mobile-pairing:create"));
+  const approvalCoordinator = useRef(new ApprovalActionCoordinator());
   const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
   const approvalFeed = useRef<DesktopApprovalFeed | undefined>(undefined);
   const activeConversationId = useRef<string | undefined>(undefined);
   activeConversationId.current = conversation?.id;
   connectGate.current ??= new RealtimeConnectGate();
+  actionRunner.current ??= new DesktopActionRunner({
+    onStateChange: state => {
+      setActionStates(current => ({ ...current, [state.key]: state }));
+      setActionAnnouncement(
+        state.message
+          ? `${actionName(state.key)}${actionStatusLabel(state)}：${state.message}`
+          : `${actionName(state.key)}${actionStatusLabel(state)}`);
+    },
+    onStateReset: key => {
+      setActionStates(current => {
+        if (!(key in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    }
+  });
+  realtimeActionCycle.current ??= new DesktopRealtimeActionCycle(actionRunner.current);
 
-  feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
+  const runAction: RunDesktopAction = (key, execute) => actionRunner.current!.run(key, execute);
+  feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, () => createTaskFeed(runAction));
   approvalFeed.current = ensureActiveDesktopApprovalFeed(approvalFeed.current, createApprovalFeed);
+
+  const getActionState = (key: string): DesktopActionState | undefined => actionStates[key];
+  const mobilePairingActionState = mobilePairingActionKey
+    ? getActionState(mobilePairingActionKey)
+    : undefined;
 
   async function refreshFeed(conversationId?: string): Promise<void> {
     const currentFeed = feed.current;
@@ -489,36 +700,56 @@ export function App() {
     }
   }
 
+  async function reconcileTaskInput(taskId: string, requestId: string): Promise<boolean> {
+    const latest = taskFrom(await window.jarvis.getTaskStatus(taskId));
+    return latest.status === "waitingForUserInput"
+      && latest.pendingUserInput?.requestId === requestId;
+  }
+
   async function loadDiagnostics(): Promise<void> {
+    const actionKey = "diagnostics-refresh";
+    if (actionRunner.current!.get(actionKey)?.status === "succeeded") {
+      actionRunner.current!.reset(actionKey);
+    }
     setError(undefined);
     try {
-      setDiagnostics(parseDiagnostics(await window.jarvis.getDiagnostics()));
+      const parsed = await runAction(actionKey, async () =>
+        parseDiagnostics(await window.jarvis.getDiagnostics()));
+      setDiagnostics(parsed);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Diagnostics request failed.");
+      setError(desktopActionMessage(reason));
     }
   }
 
   async function createMobilePairing(): Promise<void> {
+    let attempt = mobilePairingAttempts.current.current;
+    if (!attempt || actionRunner.current!.get(attempt.actionKey)?.status === "succeeded") {
+      attempt = mobilePairingAttempts.current.begin();
+      setMobilePairingActionKey(attempt.actionKey);
+    }
+    const actionKey = attempt.actionKey;
     setCreatingMobilePairing(true);
     setError(undefined);
     try {
-      setMobilePairing(mobilePairingFrom(await window.jarvis.createMobilePairing(
-        buildDesktopMobilePairingInput(crypto.randomUUID()))));
+      const pairing = await runAction(actionKey, async idempotencyKey =>
+        mobilePairingFrom(await window.jarvis.createMobilePairing(
+          buildDesktopMobilePairingInput(idempotencyKey))));
+      setMobilePairing(pairing);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Mobile pairing creation failed.");
+      setError(desktopActionMessage(reason));
     } finally {
       setCreatingMobilePairing(false);
     }
   }
 
   useEffect(() => {
-    feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, createTaskFeed);
+    feed.current = ensureActiveDesktopTaskNotificationFeed(feed.current, () => createTaskFeed(runAction));
     approvalFeed.current = ensureActiveDesktopApprovalFeed(approvalFeed.current, createApprovalFeed);
     let effectActive = true;
     void window.jarvis.getAppVersion().then(setVersion);
     void window.jarvis.getDesktopDevice()
       .then(value => setDevice(deviceFrom(value)))
-      .catch(reason => setError(reason instanceof Error ? reason.message : "Desktop bootstrap failed."));
+      .catch(reason => setError(desktopActionMessage(reason)));
 
     const removeEventListener = window.jarvis.onBackendEvent(value => {
       try {
@@ -542,12 +773,12 @@ export function App() {
           })
           .catch(reason => {
             if (effectActive) {
-              setError(reason instanceof Error ? reason.message : "Task feed refresh failed.");
+              setError(desktopActionMessage(reason));
             }
           });
       } catch (reason) {
         if (effectActive) {
-          setError(reason instanceof Error ? reason.message : "Invalid backend event.");
+          setError(desktopActionMessage(reason));
         }
       }
     });
@@ -561,13 +792,13 @@ export function App() {
       setBackendConnectionState(state);
       void refreshOnBackendConnectionState(state, refreshFeed, activeConversationId.current).catch(reason => {
         if (effectActive) {
-          setError(reason instanceof Error ? reason.message : "Task feed refresh failed.");
+          setError(desktopActionMessage(reason));
         }
       });
       if (state === "connected") {
         void refreshApprovals().catch(reason => {
           if (effectActive) {
-            setError(reason instanceof Error ? reason.message : "Approval refresh failed.");
+            setError(desktopActionMessage(reason));
           }
         });
       }
@@ -577,7 +808,7 @@ export function App() {
         applyConnectionState(value);
       } catch (reason) {
         if (effectActive) {
-          setError(reason instanceof Error ? reason.message : "Invalid backend connection state.");
+          setError(desktopActionMessage(reason));
         }
       }
     });
@@ -585,7 +816,7 @@ export function App() {
       .then(applyConnectionState)
       .catch(reason => {
         if (effectActive) {
-          setError(reason instanceof Error ? reason.message : "Backend connection state request failed.");
+          setError(desktopActionMessage(reason));
         }
       });
     return () => {
@@ -599,9 +830,9 @@ export function App() {
 
   useEffect(() => {
     void refreshFeed(conversation?.id).catch(reason =>
-      setError(reason instanceof Error ? reason.message : "Task feed refresh failed."));
+      setError(desktopActionMessage(reason)));
     void refreshApprovals().catch(reason =>
-      setError(reason instanceof Error ? reason.message : "Approval refresh failed."));
+      setError(desktopActionMessage(reason)));
   }, [conversation?.id]);
 
   useEffect(() => () => {
@@ -620,7 +851,7 @@ export function App() {
       setConversationIdInput(next.id);
       return next;
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Conversation creation failed.");
+      setError(desktopActionMessage(reason));
       return undefined;
     }
   }
@@ -631,7 +862,7 @@ export function App() {
       const value = await window.jarvis.getConversation(conversationIdInput.trim());
       setConversation(conversationFrom(value));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Conversation load failed.");
+      setError(desktopActionMessage(reason));
     }
   }
 
@@ -645,15 +876,18 @@ export function App() {
       const activeConversation = await ensureConversation(conversation, createConversation);
       if (!activeConversation) {
         setStatus("degraded");
-        return;
+        throw new Error("无法创建会话，请稍后重试。");
       }
       const activeDevice = device ?? deviceFrom(await window.jarvis.getDesktopDevice());
       setDevice(activeDevice);
+      if (!desktopDeviceCanUseLocalAudio(activeDevice)) {
+        throw new Error(desktopDeviceAudioLabel(activeDevice));
+      }
       if (controller.current) {
         if (!await controller.current.disconnect("reconnect")) {
           setStatus(controller.current.status);
           setError("旧 Realtime Session 的消息尚未保存，请先重试保存。");
-          return;
+          throw new Error("旧 Realtime Session 的消息尚未保存，请先重试保存。");
         }
         controller.current = undefined;
       }
@@ -666,6 +900,9 @@ export function App() {
       ownedMediaStream = await requestApplicationAudioStream();
       const wakeWordDetector = createSherpaWakeWordDetector(window.jarvis, secret.wakeWord.keyword);
       const voice = secret.voice;
+      let observedWakeState: DesktopRealtimeWakeState | undefined;
+      let observedPersistenceRetryReason: DesktopRealtimePersistenceRetryReason | undefined;
+      const statusController: { current?: DesktopRealtimeController } = {};
       const nextController = new DesktopRealtimeController(
         activeConversation.id,
         {
@@ -699,13 +936,24 @@ export function App() {
           })
         },
         (nextStatus, nextError) => {
+          const nextPersistenceRetryReason = statusController.current?.persistenceRetryReason;
+          if (nextPersistenceRetryReason !== observedPersistenceRetryReason) {
+            actionRunner.current!.reset("realtime-retry-persistence");
+            observedPersistenceRetryReason = nextPersistenceRetryReason;
+          }
+          setPersistenceRetryReason(nextPersistenceRetryReason);
           setStatus(nextStatus);
           if (nextError) {
             setError(nextError);
           }
         }
       );
+      statusController.current = nextController;
       nextController.setWakeWordDetector(wakeWordDetector, nextWakeState => {
+        if (nextWakeState === "error" && observedWakeState !== "error") {
+          actionRunner.current!.reset("realtime-retry-wake");
+        }
+        observedWakeState = nextWakeState;
         setWakeState(nextWakeState);
         setMuted(nextWakeState !== "awake");
         if (nextWakeState === "awake") {
@@ -726,12 +974,25 @@ export function App() {
         track.stop();
       }
       setStatus("degraded");
-      setError(reason instanceof Error ? reason.message : "Realtime connection failed.");
+      setError(desktopActionMessage(reason));
+      throw reason instanceof Error ? reason : new Error("Realtime connection failed.");
     }
   }
 
   function requestConnect(): Promise<void> {
-    return connectGate.current!.run(connect);
+    const action = actionRunner.current!.get("realtime-connect");
+    if (!connectGate.current!.isRunning && action?.status !== "retryable") {
+      realtimeActionCycle.current!.begin();
+    }
+    return runAction("realtime-connect", () => connectGate.current!.run(connect)).catch(reason => {
+      setError(desktopActionMessage(reason));
+    });
+  }
+
+  function requestDisconnect(): Promise<void> {
+    return runAction("realtime-disconnect", () => disconnect()).catch(reason => {
+      setError(desktopActionMessage(reason));
+    });
   }
 
   async function disconnect(): Promise<void> {
@@ -747,9 +1008,11 @@ export function App() {
         setMuted(true);
       } else {
         setError("消息尚未保存，Realtime Session 仍可重试。");
+        throw new Error("消息尚未保存，Realtime Session 仍可重试。");
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Realtime disconnect failed.");
+      setError(desktopActionMessage(reason));
+      throw reason instanceof Error ? reason : new Error("Realtime disconnect failed.");
     }
   }
 
@@ -766,11 +1029,20 @@ export function App() {
           controller.current = undefined;
         }
       } else {
-        setError("消息仍未保存，请稍后重试。");
+        const message = "消息仍未保存，请稍后重试。";
+        setError(message);
+        throw new Error(message);
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Message persistence retry failed.");
+      setError(desktopActionMessage(reason));
+      throw reason instanceof Error ? reason : new Error("Message persistence retry failed.");
     }
+  }
+
+  function requestRetryPersistence(): Promise<void> {
+    return runAction("realtime-retry-persistence", () => retryPersistence()).catch(reason => {
+      setError(desktopActionMessage(reason));
+    });
   }
 
   async function retryWakeWord(): Promise<void> {
@@ -783,10 +1055,17 @@ export function App() {
     try {
       await activeController.retryWakeWord();
     } catch (reason) {
-      setError(reason instanceof Error
-        ? reason.message
-        : "本地中文唤醒词检测不可用，请检查模型文件和麦克风权限后重试。");
+      setError(desktopActionMessage(reason));
+      throw reason instanceof Error
+        ? reason
+        : new Error("本地中文唤醒词检测不可用，请检查模型文件和麦克风权限后重试。");
     }
+  }
+
+  function requestRetryWakeWord(): Promise<void> {
+    return runAction("realtime-retry-wake", () => retryWakeWord()).catch(reason => {
+      setError(desktopActionMessage(reason));
+    });
   }
 
   async function sendTyped(): Promise<void> {
@@ -818,29 +1097,89 @@ export function App() {
     try {
       await activeController.sendTyped(text, persistTyped);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Typed message failed.");
+      setError(desktopActionMessage(reason));
     }
   }
 
   async function resolveApproval(approvalId: string, decision: "approve" | "deny"): Promise<void> {
     const current = approvalFeed.current;
-    if (!current || resolvingApprovalId) {
+    if (!current || !approvalCoordinator.current.begin(approvalId)) {
       return;
     }
-    setResolvingApprovalId(approvalId);
+    clearOppositeApprovalRetryable(actionRunner.current!, approvalId, decision);
+    setResolvingApprovalIds(previous => new Set(previous).add(approvalId));
     setError(undefined);
     try {
-      if (decision === "approve") {
-        await current.approveOnce(approvalId);
-      } else {
-        await current.deny(approvalId);
-      }
+      await runAction(`approval-${decision}:${approvalId}`, async () => {
+        if (decision === "approve") {
+          return current.approveOnce(approvalId);
+        }
+        return current.deny(approvalId);
+      });
       setApprovals(current.approvals);
       await refreshFeed(conversation?.id);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Approval decision failed.");
+      setError(desktopActionMessage(reason));
     } finally {
-      setResolvingApprovalId(undefined);
+      approvalCoordinator.current.end(approvalId);
+      setResolvingApprovalIds(previous => {
+        const next = new Set(previous);
+        next.delete(approvalId);
+        return next;
+      });
+    }
+  }
+
+  async function cancelTask(taskId: string): Promise<void> {
+    const actionKey = `task-cancel:${taskId}`;
+    setError(undefined);
+    try {
+      await runAction(actionKey, idempotencyKey => window.jarvis.cancelTask({
+        taskId,
+        idempotencyKey
+      }));
+      await refreshFeed(conversation?.id);
+    } catch (reason) {
+      setError(desktopActionMessage(reason));
+    }
+  }
+
+  async function acknowledgeNotification(notificationId: string): Promise<void> {
+    const current = feed.current;
+    if (!current) {
+      return;
+    }
+    try {
+      await runAction(`notification-acknowledge:${notificationId}`, () => current.acknowledge(notificationId));
+      setNotifications(current.notifications);
+    } catch (reason) {
+      setError(desktopActionMessage(reason));
+    }
+  }
+
+  async function readNotification(notificationId: string): Promise<void> {
+    const current = feed.current;
+    if (!current) {
+      return;
+    }
+    try {
+      await runAction(`notification-read:${notificationId}`, () => current.read(notificationId));
+      setNotifications(current.notifications);
+    } catch (reason) {
+      setError(desktopActionMessage(reason));
+    }
+  }
+
+  async function dismissNotification(notificationId: string): Promise<void> {
+    const current = feed.current;
+    if (!current) {
+      return;
+    }
+    try {
+      await runAction(`notification-dismiss:${notificationId}`, () => current.dismiss(notificationId));
+      setNotifications(current.notifications);
+    } catch (reason) {
+      setError(desktopActionMessage(reason));
     }
   }
 
@@ -855,9 +1194,8 @@ export function App() {
     : wakeState === "error"
       ? "唤醒不可用，请重试"
       : wakeState === "awake"
-      ? muted ? "麦克风已暂停" : "正在聆听"
-      : "等待“贾维斯”唤醒";
-
+        ? muted ? "麦克风已暂停" : "正在聆听"
+        : "等待“贾维斯”唤醒";
   const toggleMicrophone = (): void => {
     const activeController = controller.current;
     if (!activeController) {
@@ -873,28 +1211,29 @@ export function App() {
 
   return (
     <main className="jarvis-shell">
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{actionAnnouncement}</div>
       <aside className="side-rail" aria-label="主要导航">
         <div className="brand-mark" aria-label="Jarvis">J</div>
         <nav className="primary-nav">
-          <button className="nav-item is-active" type="button" onClick={() => scrollToPanel("assistant-panel")}>
+          <button className="nav-item is-active" type="button" aria-current="page" aria-label="助手" onClick={() => scrollToPanel("assistant-panel")}>
             <Icon name="assistant" />
             <span>助手</span>
           </button>
-          <button className="nav-item" type="button" onClick={() => scrollToPanel("conversation-panel")}>
+          <button className="nav-item" type="button" aria-label="会话" onClick={() => scrollToPanel("conversation-panel")}>
             <Icon name="conversation" />
             <span>会话</span>
           </button>
-          <button className="nav-item" type="button" onClick={() => scrollToPanel("task-panel")}>
+          <button className="nav-item" type="button" aria-label="任务" onClick={() => scrollToPanel("task-panel")}>
             <Icon name="tasks" />
             <span>任务</span>
             {tasks.length > 0 ? <small>{tasks.length}</small> : null}
           </button>
-          <button className="nav-item" type="button" onClick={() => scrollToPanel("approval-panel")}>
+          <button className="nav-item" type="button" aria-label="审批" onClick={() => scrollToPanel("approval-panel")}>
             <Icon name="approvals" />
             <span>审批</span>
             {approvals.length > 0 ? <small className="is-alert">{approvals.length}</small> : null}
           </button>
-          <button className="nav-item" type="button" onClick={() => scrollToPanel("system-panel")}>
+          <button className="nav-item" type="button" aria-label="设置" onClick={() => scrollToPanel("system-panel")}>
             <Icon name="settings" />
             <span>设置</span>
           </button>
@@ -921,25 +1260,23 @@ export function App() {
               <Icon name="bell" />
               {notifications.length > 0 ? <span>{notifications.length}</span> : null}
             </button>
-            {status === "degraded" && controller.current ? (
-              <button className="quiet-button" type="button" onClick={() => void retryPersistence()}>
-                重试保存
-              </button>
-            ) : null}
-            {status === "connected" && wakeState === "error" && controller.current ? (
-              <button className="quiet-button" type="button" onClick={() => void retryWakeWord()}>
-                重试唤醒
-              </button>
-            ) : null}
-            <button
-              className={`connection-button is-${status}`}
-              type="button"
-              disabled={status === "connecting"}
-              onClick={() => void (status === "connected" ? disconnect() : requestConnect())}
-            >
-              <span className="status-dot" />
-              {status === "connected" ? "断开语音" : realtimeStatusLabel(status)}
-            </button>
+            <DesktopRealtimeRetryControls
+              status={status}
+              wakeState={wakeState}
+              hasController={Boolean(controller.current)}
+              persistenceRetryReason={persistenceRetryReason}
+              persistenceAction={getActionState("realtime-retry-persistence")}
+              wakeAction={getActionState("realtime-retry-wake")}
+              onRetryPersistence={() => void requestRetryPersistence()}
+              onRetryWake={() => void requestRetryWakeWord()}
+            />
+            <DesktopRealtimeConnectionControl
+              status={status}
+              connectAction={getActionState("realtime-connect")}
+              disconnectAction={getActionState("realtime-disconnect")}
+              onConnect={() => void requestConnect()}
+              onDisconnect={() => void requestDisconnect()}
+            />
             <details className="session-menu">
               <summary aria-label="会话选项"><Icon name="chevron" /></summary>
               <div className="session-popover">
@@ -994,7 +1331,7 @@ export function App() {
               </span>
             </button>
             <p className="voice-label" aria-live="polite">{wakeLabel}</p>
-            {device ? <p className="device-label">音频在 {device.name} 本机处理</p> : null}
+            {device ? <p className="device-label">{desktopDeviceAudioLabel(device)}</p> : null}
           </section>
 
           {error ? (
@@ -1112,22 +1449,24 @@ export function App() {
                       <TaskUserInputForm
                         task={task}
                         onSubmitted={() => refreshFeed(conversation?.id)}
-                        onError={reason => setError(reason instanceof Error ? reason.message : "Task user-input submission failed.")}
+                        onReconcile={() => reconcileTaskInput(task.id, task.pendingUserInput!.requestId)}
+                        onError={reason => setError(desktopActionMessage(reason))}
+                        runAction={runAction}
+                        getActionState={getActionState}
                       />
                     ) : null}
                     {task.status !== "succeeded" && task.status !== "failed" && task.status !== "cancelled" ? (
                       <button
                         className="text-action"
                         type="button"
-                        onClick={() => void window.jarvis.cancelTask({
-                          taskId: task.id,
-                          idempotencyKey: crypto.randomUUID()
-                        }).then(() => refreshFeed(conversation?.id)).catch(reason =>
-                          setError(reason instanceof Error ? reason.message : "Task cancellation failed."))}
+                        disabled={actionUnavailable(getActionState(`task-cancel:${task.id}`))}
+                        aria-busy={getActionState(`task-cancel:${task.id}`)?.status === "pending"}
+                        onClick={() => void cancelTask(task.id)}
                       >
-                        取消任务
+                        {actionButtonLabel(getActionState(`task-cancel:${task.id}`), "取消任务", "重试取消")}
                       </button>
                     ) : null}
+                    <ActionFeedback state={getActionState(`task-cancel:${task.id}`)} />
                   </article>
                 ))}
               </div>
@@ -1141,36 +1480,46 @@ export function App() {
             </div>
             {approvals.length > 0 ? (
               <div className="approval-list">
-                {approvals.map(approval => (
-                  <article className="approval-item" key={approval.id}>
-                    <div className="approval-heading">
-                      <span><Icon name="approvals" size={19} /></span>
-                      <div>
-                        <strong>{approvalKindLabel(approval.kind)}</strong>
-                        <small>需要你的明确决定</small>
+                {approvals.map(approval => {
+                  const approveState = getActionState(`approval-approve:${approval.id}`);
+                  const denyState = getActionState(`approval-deny:${approval.id}`);
+                  const approvalBusy = resolvingApprovalIds.has(approval.id);
+                  const approvalActionUnavailable = actionUnavailable(approveState)
+                    || actionUnavailable(denyState);
+                  return (
+                    <article className="approval-item" key={approval.id}>
+                      <div className="approval-heading">
+                        <span><Icon name="approvals" size={19} /></span>
+                        <div>
+                          <strong>{approvalKindLabel(approval.kind)}</strong>
+                          <small>需要你的明确决定</small>
+                        </div>
                       </div>
-                    </div>
-                    <p>{approval.reason}</p>
-                    <small className="approval-context">Task {approval.taskId} · Device {approval.deviceId}</small>
-                    <div className="approval-actions">
-                      <button
-                        className="approve-button"
-                        type="button"
-                        disabled={resolvingApprovalId !== undefined}
-                        onClick={() => void resolveApproval(approval.id, "approve")}
-                      >
-                        仅批准本次
-                      </button>
-                      <button
-                        type="button"
-                        disabled={resolvingApprovalId !== undefined}
-                        onClick={() => void resolveApproval(approval.id, "deny")}
-                      >
-                        拒绝
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                      <p>{approval.reason}</p>
+                      <small className="approval-context">Task {approval.taskId} · Device {approval.deviceId}</small>
+                      <div className="approval-actions">
+                        <button
+                          className="approve-button"
+                          type="button"
+                          disabled={approvalBusy || approvalActionUnavailable}
+                          aria-busy={approveState?.status === "pending"}
+                          onClick={() => void resolveApproval(approval.id, "approve")}
+                        >
+                          {actionButtonLabel(approveState, "仅批准本次", "重试批准")}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={approvalBusy || approvalActionUnavailable}
+                          aria-busy={denyState?.status === "pending"}
+                          onClick={() => void resolveApproval(approval.id, "deny")}
+                        >
+                          {actionButtonLabel(denyState, "拒绝", "重试拒绝")}
+                        </button>
+                      </div>
+                      <ActionFeedback state={approveState ?? denyState} />
+                    </article>
+                  );
+                })}
               </div>
             ) : <p className="empty-state">当前没有待审批操作</p>}
           </section>
@@ -1190,30 +1539,36 @@ export function App() {
                       {notification.actions?.includes("acknowledge") ? (
                         <button
                           type="button"
-                          onClick={() => void feed.current?.acknowledge(notification.id).then(() => {
-                            setNotifications(feed.current?.notifications ?? []);
-                          }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification action failed."))}
+                          disabled={actionUnavailable(getActionState(`notification-acknowledge:${notification.id}`))}
+                          aria-busy={getActionState(`notification-acknowledge:${notification.id}`)?.status === "pending"}
+                          onClick={() => void acknowledgeNotification(notification.id)}
                         >
-                          确认处理
+                          {actionButtonLabel(getActionState(`notification-acknowledge:${notification.id}`), "确认处理", "重试确认")}
                         </button>
                       ) : null}
                       <button
                         type="button"
-                        onClick={() => void feed.current?.read(notification.id).then(() => {
-                          setNotifications(feed.current?.notifications ?? []);
-                        }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification read failed."))}
+                        disabled={actionUnavailable(getActionState(`notification-read:${notification.id}`))}
+                        aria-busy={getActionState(`notification-read:${notification.id}`)?.status === "pending"}
+                        onClick={() => void readNotification(notification.id)}
                       >
-                        已读
+                        {actionButtonLabel(getActionState(`notification-read:${notification.id}`), "已读", "重试已读")}
                       </button>
                       <button
                         type="button"
-                        onClick={() => void feed.current?.dismiss(notification.id).then(() => {
-                          setNotifications(feed.current?.notifications ?? []);
-                        }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification dismiss failed."))}
+                        disabled={actionUnavailable(getActionState(`notification-dismiss:${notification.id}`))}
+                        aria-busy={getActionState(`notification-dismiss:${notification.id}`)?.status === "pending"}
+                        onClick={() => void dismissNotification(notification.id)}
                       >
-                        忽略
+                        {actionButtonLabel(getActionState(`notification-dismiss:${notification.id}`), "忽略", "重试忽略")}
                       </button>
                     </div>
+                    <NotificationActionFeedback states={{
+                      delivered: getActionState(notificationDeliveredActionKey(notification.id)),
+                      acknowledge: getActionState(`notification-acknowledge:${notification.id}`),
+                      read: getActionState(`notification-read:${notification.id}`),
+                      dismiss: getActionState(`notification-dismiss:${notification.id}`)
+                    }} />
                   </article>
                 ))}
               </div>
@@ -1223,14 +1578,23 @@ export function App() {
           <section className="action-section system-section" id="system-panel" aria-label="系统状态">
             <div className="action-section-title">
               <h3>系统</h3>
-              <button className="diagnostics-button" type="button" onClick={() => void loadDiagnostics()}>
-                <Icon name="diagnostics" size={16} /> 运行诊断
+              <button
+                className="diagnostics-button"
+                type="button"
+                onClick={() => void loadDiagnostics()}
+                disabled={getActionState("diagnostics-refresh")?.status === "pending"
+                  || getActionState("diagnostics-refresh")?.status === "terminal"}
+                aria-busy={getActionState("diagnostics-refresh")?.status === "pending"}
+              >
+                <Icon name="diagnostics" size={16} />
+                {actionButtonLabel(getActionState("diagnostics-refresh"), "运行诊断", "重试诊断")}
               </button>
             </div>
             <div className="system-list">
               <div><span><i className={`is-${backendConnectionState}`} />Backend</span><small>{backendConnectionState}</small></div>
               <div><span><i className={`is-${status}`} />Realtime</span><small>{realtimeStatusLabel(status)}</small></div>
               <div><span><i className={wakeState === "awake" ? "is-connected" : ""} />麦克风</span><small>{wakeLabel}</small></div>
+              <div><span><i className={`is-${device?.status ?? "disconnected"}`} />Desktop 设备</span><small>{device ? desktopDeviceStatusLabel(device) : "未加载"}</small></div>
             </div>
             {diagnostics ? (
               <div className="diagnostics-panel" aria-label="运行诊断">
@@ -1251,9 +1615,19 @@ export function App() {
               <Icon name="link" size={17} />
             </div>
             <p>生成一次性配对码，连接你的手机。</p>
-            <button type="button" onClick={() => void createMobilePairing()} disabled={creatingMobilePairing}>
-              {creatingMobilePairing ? "生成中…" : "生成配对码"}
+            <button
+              type="button"
+              onClick={() => void createMobilePairing()}
+              disabled={creatingMobilePairing
+                || mobilePairingActionState?.status === "pending"
+                || mobilePairingActionState?.status === "terminal"}
+              aria-busy={creatingMobilePairing}
+            >
+              {creatingMobilePairing
+                ? "生成中…"
+                : actionButtonLabel(mobilePairingActionState, "生成配对码", "重试配对")}
             </button>
+            <ActionFeedback state={mobilePairingActionState} />
             {mobilePairing ? (
               <div className="pairing-code">
                 <code>{mobilePairing.code}</code>
@@ -1276,29 +1650,35 @@ export function App() {
             {popupNotification.actions?.includes("acknowledge") ? (
               <button
                 type="button"
-                onClick={() => void feed.current?.acknowledge(popupNotification.id).then(() => {
-                  setNotifications(feed.current?.notifications ?? []);
-                }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification action failed."))}
+                disabled={actionUnavailable(getActionState(`notification-acknowledge:${popupNotification.id}`))}
+                aria-busy={getActionState(`notification-acknowledge:${popupNotification.id}`)?.status === "pending"}
+                onClick={() => void acknowledgeNotification(popupNotification.id)}
               >
-                确认已处理
+                {actionButtonLabel(getActionState(`notification-acknowledge:${popupNotification.id}`), "确认已处理", "重试确认")}
               </button>
             ) : null}
             <button
               type="button"
-              onClick={() => void feed.current?.read(popupNotification.id).then(() => {
-                setNotifications(feed.current?.notifications ?? []);
-              }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification read failed."))}
+              disabled={actionUnavailable(getActionState(`notification-read:${popupNotification.id}`))}
+              aria-busy={getActionState(`notification-read:${popupNotification.id}`)?.status === "pending"}
+              onClick={() => void readNotification(popupNotification.id)}
             >
-              已读并关闭
+              {actionButtonLabel(getActionState(`notification-read:${popupNotification.id}`), "已读并关闭", "重试已读")}
             </button>
             <button
               type="button"
-              onClick={() => void feed.current?.dismiss(popupNotification.id).then(() => {
-                setNotifications(feed.current?.notifications ?? []);
-              }).catch(reason => setError(reason instanceof Error ? reason.message : "Notification dismiss failed."))}
+              disabled={actionUnavailable(getActionState(`notification-dismiss:${popupNotification.id}`))}
+              aria-busy={getActionState(`notification-dismiss:${popupNotification.id}`)?.status === "pending"}
+              onClick={() => void dismissNotification(popupNotification.id)}
             >
-              忽略
+              {actionButtonLabel(getActionState(`notification-dismiss:${popupNotification.id}`), "忽略", "重试忽略")}
             </button>
+            <NotificationActionFeedback states={{
+              delivered: getActionState(notificationDeliveredActionKey(popupNotification.id)),
+              acknowledge: getActionState(`notification-acknowledge:${popupNotification.id}`),
+              read: getActionState(`notification-read:${popupNotification.id}`),
+              dismiss: getActionState(`notification-dismiss:${popupNotification.id}`)
+            }} />
           </div>
         </aside>
       ) : null}

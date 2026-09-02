@@ -935,6 +935,7 @@ test("transport disconnect fails closed synchronously before asynchronous cleanu
     assert.equal(stateAtDisconnect, "standby");
     assert.equal(trackAtDisconnect, false);
     assert.equal(controller.status, "degraded");
+    assert.equal(controller.persistenceRetryReason, undefined);
   } finally {
     await controller.disconnect();
   }
@@ -977,6 +978,7 @@ test("transport error fails closed synchronously before reporting degraded", asy
     assert.equal(stateAtError, "standby");
     assert.equal(trackAtError, false);
     assert.equal(controller.status, "degraded");
+    assert.equal(controller.persistenceRetryReason, undefined);
   } finally {
     await controller.disconnect();
   }
@@ -1310,9 +1312,11 @@ test("disconnect persistence failure keeps the controller reachable for an expli
       instructions: "server context"
     });
     fakeSession.transport.emit("output_text_delta", { itemId: "retry-item", delta: "待重试", responseId: "response-1" });
+    assert.equal(controller.persistenceRetryReason, undefined);
 
     assert.equal(await controller.disconnect("user-requested"), false);
     assert.equal(controller.status, "degraded");
+    assert.equal(controller.persistenceRetryReason, "event-ingest");
     assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000062");
     assert.deepEqual(fakeSession.calls, []);
 
@@ -1322,6 +1326,7 @@ test("disconnect persistence failure keeps the controller reachable for an expli
     assert.equal(ingestedEventIds.length, 1);
     assert.equal(attemptedBatchKeys.length, 2);
     assert.equal(attemptedBatchKeys[0], attemptedBatchKeys[1]);
+    assert.equal(controller.persistenceRetryReason, undefined);
     assert.equal(await controller.disconnect("user-requested"), true);
   } finally {
     failPersistence = false;
@@ -1414,14 +1419,79 @@ test("spontaneous disconnect retains a failed terminal update for explicit retry
 
     assert.equal(controller.status, "degraded");
     assert.equal(attemptedEndKeys.length, 1);
+    assert.equal(controller.persistenceRetryReason, "session-end");
 
     failTerminalUpdate = false;
     assert.equal(await controller.retryPersistence(), true);
     assert.equal(attemptedEndKeys.length, 2);
     assert.equal(attemptedEndKeys[0], attemptedEndKeys[1]);
     assert.equal(controller.status, "disconnected");
+    assert.equal(controller.persistenceRetryReason, undefined);
   } finally {
     failTerminalUpdate = false;
+    await controller.disconnect();
+  }
+});
+
+test("keeps event-ingest and session-end retry reasons independent", async () => {
+  const fakeSession = new FakeSession();
+  let failIngest = true;
+  let failSessionEnd = true;
+  let failedSessionEndAttempts = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-independent-persistence-reasons",
+    {
+      markConnected: async () => undefined,
+      markEnded: async input => {
+        if (input.status === "failed") {
+          failedSessionEndAttempts++;
+          if (failSessionEnd) {
+            throw new Error("session end unavailable");
+          }
+        }
+      },
+      ingest: async () => {
+        if (failIngest) {
+          throw new Error("event ingest unavailable");
+        }
+      }
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000098",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    fakeSession.transport.emit("output_text_delta", {
+      itemId: "independent-item",
+      delta: "待落库",
+      responseId: "response-1"
+    });
+    assert.equal(await controller.flushPendingPersistence(), false);
+    assert.equal(controller.persistenceRetryReason, "event-ingest");
+
+    fakeSession.transport.emit("connection_change", "disconnected");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(failedSessionEndAttempts, 1);
+    assert.equal(controller.persistenceRetryReason, "event-ingest");
+
+    failIngest = false;
+    assert.equal(await controller.retryPersistence(), false);
+    assert.equal(controller.persistenceRetryReason, "session-end");
+
+    failSessionEnd = false;
+    assert.equal(await controller.retryPersistence(), true);
+    assert.equal(controller.persistenceRetryReason, undefined);
+  } finally {
+    failIngest = false;
+    failSessionEnd = false;
     await controller.disconnect();
   }
 });
@@ -1519,11 +1589,13 @@ test("failed rotated lifecycle closes the old transport and retries with the sam
     assert.deepEqual(first.calls, ["close"]);
     assert.deepEqual(second.calls, []);
     assert.equal(lifecycle.filter(item => item.includes(":rotated")).length, 1);
+    assert.equal(controller.persistenceRetryReason, "session-end");
 
     failRotatedEnd = false;
     assert.equal(await controller.retryPersistence(), true);
     assert.equal(lifecycle.filter(item => item.includes(":rotated")).length, 2);
     assert.equal(rotatedEndKeys[0], rotatedEndKeys[1]);
+    assert.equal(controller.persistenceRetryReason, undefined);
   } finally {
     failRotatedEnd = false;
     await controller.disconnect();
@@ -1704,6 +1776,7 @@ test("persistence failure blocks rotation until the same event batch retries", a
     first.transport.emit("output_text_delta", { itemId: "item-failure", delta: "待落库", responseId: "response-1" });
     first.transport.emit("audio_done");
     assert.equal(await controller.flushPendingPersistence(), false);
+    assert.equal(controller.persistenceRetryReason, "event-ingest");
 
     controller.setRotationProvider(async () => {
       rotationRequests++;
@@ -1723,6 +1796,7 @@ test("persistence failure blocks rotation until the same event batch retries", a
 
     failPersistence = false;
     await controller.rotateIfIdle();
+    assert.equal(controller.persistenceRetryReason, undefined);
     assert.equal(rotationRequests, 1);
     assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-000000000052");
     assert.equal(lifecycle.some(item => item.includes(":rotated")), true);

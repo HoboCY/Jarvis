@@ -7,5 +7,5 @@
     "types": ["node", "electron"],
     "lib": ["ES2022"]
   },
-  "include": ["src/main/**/*.ts", "src/wake-word-error.ts"]
+  "include": ["src/main/**/*.ts", "src/renderer/desktop-ipc.ts", "src/wake-word-error.ts"]
 }

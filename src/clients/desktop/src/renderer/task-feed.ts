@@ -220,6 +220,11 @@ export const maxTrackedFeedEntities = 256;
 const authoritativeRefreshMaxAttempts = 2;
 const authoritativeRefreshRetryDelayMs = 25;
 
+export type DesktopTaskFeedRunAction = <T>(
+  key: string,
+  execute: (idempotencyKey: string) => Promise<T>
+) => Promise<T>;
+
 export type DesktopTaskFeedBackend = {
   getTasks: (
     conversationId?: string,
@@ -231,6 +236,7 @@ export type DesktopTaskFeedBackend = {
   markRead: (notificationId: string, idempotencyKey: string) => Promise<unknown>;
   dismiss: (notificationId: string, idempotencyKey: string) => Promise<unknown>;
   applyAction?: (notificationId: string, actionId: NotificationActionId, idempotencyKey: string) => Promise<unknown>;
+  runAction?: DesktopTaskFeedRunAction;
 };
 
 export async function collectTaskPages(
@@ -314,6 +320,10 @@ function stringValue(value: unknown): string | undefined {
 }
 
 export function notificationDeliveredIdempotencyKey(notificationId: string): string {
+  return notificationActionIdempotencyKey(notificationId, "delivered");
+}
+
+export function notificationDeliveredActionKey(notificationId: string): string {
   return notificationActionIdempotencyKey(notificationId, "delivered");
 }
 
@@ -840,8 +850,11 @@ export class DesktopTaskNotificationFeed {
       return existingDelivery;
     }
 
-    const delivery = this.backend
-      .markDelivered(notificationId, notificationDeliveredIdempotencyKey(notificationId))
+    const actionKey = notificationDeliveredActionKey(notificationId);
+    const delivery = (this.backend.runAction
+      ? this.backend.runAction(actionKey, idempotencyKey =>
+        this.backend.markDelivered(notificationId, idempotencyKey))
+      : this.backend.markDelivered(notificationId, notificationDeliveredIdempotencyKey(notificationId)))
       .then(() => {
         const current = this.notificationById.get(notificationId);
         if (current?.status === "pending") {
