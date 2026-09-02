@@ -28,14 +28,44 @@ JARVIS_LOCAL_BEARER="<same-bearer-as-Authentication:BearerToken>" \
 ```
 
 Jarvis validates the value, uses Electron `safeStorage` to encrypt it with
-macOS Keychain-backed protection, and writes only the ciphertext to the current
-user's Jarvis data directory with owner-only permissions. Quit an already
+macOS Keychain-backed protection, and writes only a versioned ciphertext
+envelope to the current user's Jarvis data directory with owner-only
+permissions. Quit an already
 running Jarvis instance before this one-time launch. Later launches can be made
 normally from Finder without `JARVIS_LOCAL_BEARER`. Supplying the environment
 variable again always overrides and replaces the stored value, which is also
 the rotation procedure after changing `Authentication:BearerToken` in User
 Secrets. An invalid environment override fails closed instead of falling back
-to an older stored token.
+to an older stored token. The bearer value is held by Electron Main only; it is
+never placed in Renderer state, IPC payloads, command-line arguments, launchd
+configuration, smoke markers, diagnostics, or logs.
+
+### Desktop bearer runbook
+
+- **Bootstrap:** set the API's `Authentication:BearerToken` in User Secrets,
+  then launch the packaged app once with the same value in
+  `JARVIS_LOCAL_BEARER`. Use a generated placeholder such as
+  `<random-token-at-least-32-characters>` in scripts and documentation; never
+  commit or paste a real bearer.
+- **Rotation:** update the API bearer, stop the Desktop app, and start it once
+  with the new `JARVIS_LOCAL_BEARER`. A successful launch atomically replaces
+  the owner-only encrypted credential. Subsequent Finder launches omit the
+  environment variable.
+- **Recovery:** if startup reports corrupt ciphertext, unavailable Keychain
+  encryption, an unsafe permission, or an unexpected credential file, stop
+  Jarvis and remove only the exact credential file under its user-data
+  `credentials` directory. Re-run the bootstrap launch with the matching API
+  bearer. Do not copy the file, decrypt it, or repair it by writing plaintext.
+- **Rollback:** restore the previous API bearer first, stop Jarvis, and repeat
+  the bootstrap launch with that previous value. If secure persistence is
+  unavailable, the explicitly supplied value is usable only for that process;
+  keep the environment override for each run until Keychain persistence is
+  healthy.
+
+Invalid overrides and unsafe credential paths fail closed; the Desktop process
+does not silently fall back to an older stored bearer. Use a unique isolated
+`--user-data-dir` for smoke or recovery experiments so they cannot contend with
+the normal Jarvis instance lock.
 
 Production `appsettings.Production.json` and the launchd service configuration
 continue to work unchanged.

@@ -171,6 +171,23 @@ test("macOS service publish is self-contained and lockfile-repeatable", async ()
   assert.doesNotMatch(desktopScript, /--user-data-dir="\$install_root(?:"|[^/])/);
 });
 
+test("Desktop bearer smoke checks encryption, permissions, restart reuse, and redaction", async () => {
+  const desktopScript = await readFile(join(process.cwd(), "eng/scripts/package-desktop-macos.sh"), "utf8");
+  assert.match(desktopScript, /smoke_bearer="desktop-smoke-not-a-real-secret-0001"/);
+  assert.match(desktopScript, /assert_secure_smoke_credential/);
+  assert.match(desktopScript, /credential_directory=.*credentials/);
+  assert.match(desktopScript, /stat -f '%Lp' "\$credential_directory"/);
+  assert.match(desktopScript, /stat -f '%Lp' "\$credential_path"/);
+  assert.match(desktopScript, /assert_smoke_does_not_echo_bearer/);
+  assert.match(desktopScript, /renderer-ready-from-keychain\.json/);
+
+  const operatorGuide = await readFile(join(process.cwd(), "eng/services/README.md"), "utf8");
+  for (const section of ["Bootstrap", "Rotation", "Recovery", "Rollback"]) {
+    assert.match(operatorGuide, new RegExp(`\\*\\*${section}:\\*\\*`));
+  }
+  assert.doesNotMatch(operatorGuide, /desktop-smoke-not-a-real-secret|Bearer\s+sk-[A-Za-z0-9]/i);
+});
+
 test("only the exact launchd service-not-found error is idempotently ignorable", () => {
   assert.equal(
     isServiceNotFoundError({ stderr: 'Could not find service "gui/501/com.hobocy.jarvis.api.phase6" in domain for system' }),

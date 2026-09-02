@@ -7,6 +7,7 @@ release_root="$repo_root/artifacts/releases"
 install_root=""
 archive_root=""
 app_pid=""
+smoke_bearer="desktop-smoke-not-a-real-secret-0001"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "package-desktop-macos.sh requires macOS; no unsigned macOS artifact was produced." >&2
@@ -43,6 +44,32 @@ cleanup() {
   exit "$result_code"
 }
 trap cleanup EXIT INT TERM
+
+assert_secure_smoke_credential() {
+  local credential_directory="$1"
+  local credential_path="$credential_directory/local-api-bearer.bin"
+  if [[ ! -d "$credential_directory" || "$(stat -f '%Lp' "$credential_directory")" != "700" ]]; then
+    echo "Desktop did not create an owner-only credential directory." >&2
+    exit 1
+  fi
+  if [[ ! -f "$credential_path" || "$(stat -f '%Lp' "$credential_path")" != "600" ]]; then
+    echo "Desktop did not persist an owner-only encrypted backend bearer." >&2
+    exit 1
+  fi
+  if LC_ALL=C grep -aFq "$smoke_bearer" "$credential_path"; then
+    echo "Desktop persisted the backend bearer as plaintext." >&2
+    exit 1
+  fi
+}
+
+assert_smoke_does_not_echo_bearer() {
+  local path="$1"
+  if [[ -f "$path" ]] && LC_ALL=C grep -aFq "$smoke_bearer" "$path"; then
+    echo "Desktop smoke output unexpectedly contained the backend bearer." >&2
+    exit 1
+  fi
+}
+
 pnpm --filter @jarvis/desktop make:mac
 app_source="$(find "$desktop_root/out" -maxdepth 3 -type d -name '*.app' -print | sort | head -n 1)"
 if [[ -z "$app_source" || ! -x "$app_source/Contents/MacOS/Jarvis" ]]; then
@@ -69,11 +96,15 @@ installed_app="$install_root/Jarvis.app"
 user_data_root="$install_root/user-data"
 marker_path="$install_root/renderer-ready.json"
 mkdir -m 700 "$user_data_root"
+if [[ "$(stat -f '%Lp' "$user_data_root")" != "700" ]]; then
+  echo "Desktop smoke userData is not owner-only." >&2
+  exit 1
+fi
 cp -R "$app_source" "$installed_app"
 
 JARVIS_DESKTOP_SMOKE_MARKER="$marker_path" \
 JARVIS_DESKTOP_SMOKE_ROOT="$install_root" \
-JARVIS_LOCAL_BEARER="desktop-smoke-not-a-real-secret-0001" \
+JARVIS_LOCAL_BEARER="$smoke_bearer" \
   "$installed_app/Contents/MacOS/Jarvis" --disable-gpu \
   --user-data-dir="$user_data_root" \
   >"$install_root/electron.stdout.log" 2>"$install_root/electron.stderr.log" &
@@ -117,16 +148,17 @@ if [[ "$marker_event" != "renderer.ready" \
   echo "Electron smoke marker did not prove the installed process mounted the renderer." >&2
   exit 1
 fi
+if [[ "$(stat -f '%Lp' "$marker_path")" != "600" ]]; then
+  echo "Desktop smoke marker is not owner-only." >&2
+  exit 1
+fi
+assert_smoke_does_not_echo_bearer "$marker_path"
+assert_smoke_does_not_echo_bearer "$install_root/electron.stdout.log"
+assert_smoke_does_not_echo_bearer "$install_root/electron.stderr.log"
 
 credential_path="$user_data_root/credentials/local-api-bearer.bin"
-if [[ ! -s "$credential_path" || "$(stat -f '%Lp' "$credential_path")" != "600" ]]; then
-  echo "Desktop did not persist an owner-only encrypted backend bearer." >&2
-  exit 1
-fi
-if LC_ALL=C grep -aFq "desktop-smoke-not-a-real-secret-0001" "$credential_path"; then
-  echo "Desktop persisted the backend bearer as plaintext." >&2
-  exit 1
-fi
+credential_directory="$user_data_root/credentials"
+assert_secure_smoke_credential "$credential_directory"
 
 stop_app
 persisted_marker_path="$install_root/renderer-ready-from-keychain.json"
@@ -167,6 +199,14 @@ if [[ "$persisted_marker_event" != "renderer.ready" \
   echo "Desktop restart did not load the persisted backend bearer." >&2
   exit 1
 fi
+if [[ "$(stat -f '%Lp' "$persisted_marker_path")" != "600" ]]; then
+  echo "Desktop restart smoke marker is not owner-only." >&2
+  exit 1
+fi
+assert_smoke_does_not_echo_bearer "$persisted_marker_path"
+assert_smoke_does_not_echo_bearer "$install_root/electron-keychain.stdout.log"
+assert_smoke_does_not_echo_bearer "$install_root/electron-keychain.stderr.log"
+assert_secure_smoke_credential "$credential_directory"
 echo "Desktop install/start smoke passed: Jarvis.app persisted and reloaded its Keychain-backed backend bearer."
 
 artifact="$forge_artifact"
