@@ -5,6 +5,7 @@ import {
   type DesktopRealtimeBackend,
   type DesktopRealtimeStatus
 } from "../src/renderer/realtime.js";
+import { createBrowserWakeAcknowledgementPlayer } from "../src/renderer/wake-acknowledgement.js";
 import type { WakeWordDetector, WakeWordState } from "../src/renderer/wake-word.js";
 import {
   DesktopActionRunner,
@@ -127,6 +128,7 @@ function createFakeMediaStream(): {
 
 function createFakeWakeWordDetector(): {
   detector: WakeWordDetector;
+  detect: () => void;
   fail: () => void;
   startCalls: () => number;
 } {
@@ -168,6 +170,7 @@ function createFakeWakeWordDetector(): {
   };
   return {
     detector,
+    detect: () => detectedListener?.(),
     fail: () => {
       state = "error";
       stateListener?.(state);
@@ -194,6 +197,13 @@ type WakeRecoverySnapshot = Readonly<{
   retryAction: DesktopActionState | undefined;
 }>;
 
+type WakeAcknowledgementSnapshot = Readonly<{
+  wakeState: "standby" | "awake" | "error";
+  trackEnabled: boolean;
+  speechCalls: number;
+  speechText: string | undefined;
+}>;
+
 type TransportRecoverySnapshot = Readonly<{
   status: DesktopRealtimeStatus;
   persistenceRetryReason: "event-ingest" | "session-end" | undefined;
@@ -209,6 +219,10 @@ type PersistenceRecoveryHarness = Readonly<{
   snapshot: () => PersistenceRecoverySnapshot;
   startWakeFailure: () => Promise<WakeRecoverySnapshot>;
   wakeSnapshot: () => WakeRecoverySnapshot;
+  startWakeAcknowledgement: () => Promise<{
+    pending: WakeAcknowledgementSnapshot;
+    completed: WakeAcknowledgementSnapshot;
+  }>;
   startTransportFailure: () => Promise<TransportRecoverySnapshot>;
   transportSnapshot: () => TransportRecoverySnapshot;
   waitForRetry: () => Promise<unknown>;
@@ -263,6 +277,17 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
   const session = new FakeSession();
   const { stream, track } = createFakeMediaStream();
   const wakeWord = createFakeWakeWordDetector();
+  let speechCalls = 0;
+  let speechText: string | undefined;
+  let spokenUtterance: SpeechSynthesisUtterance | undefined;
+  const speech = {
+    speak: (utterance: SpeechSynthesisUtterance) => {
+      speechCalls++;
+      speechText = utterance.text;
+      spokenUtterance = utterance;
+    },
+    cancel: () => undefined
+  } as unknown as SpeechSynthesis;
   let controller: DesktopRealtimeController | undefined;
   let status: DesktopRealtimeStatus = "disconnected";
   let wakeState: "standby" | "awake" | "error" = "standby";
@@ -342,6 +367,13 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
     retryAction: runner.get("realtime-retry-wake")
   });
 
+  const wakeAcknowledgementSnapshot = (): WakeAcknowledgementSnapshot => ({
+    wakeState,
+    trackEnabled: track.enabled,
+    speechCalls,
+    speechText
+  });
+
   const start = (): Promise<PersistenceRecoverySnapshot> => {
     if (startPromise) {
       return startPromise;
@@ -378,6 +410,18 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
           return session.transport as never;
         }
       );
+      controller.setWakeAcknowledgementPlayer(createBrowserWakeAcknowledgementPlayer(
+        speech,
+        text => ({
+          text,
+          lang: "",
+          rate: 0,
+          volume: 0,
+          onend: null,
+          onerror: null
+        } as unknown as SpeechSynthesisUtterance),
+        100
+      ));
       controller.setWakeWordDetector(wakeWord.detector, nextWakeState => {
         wakeState = nextWakeState;
         render();
@@ -413,6 +457,22 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
     return wakeSnapshot();
   };
 
+  const startWakeAcknowledgement = async (): Promise<{
+    pending: WakeAcknowledgementSnapshot;
+    completed: WakeAcknowledgementSnapshot;
+  }> => {
+    await start();
+    wakeWord.detect();
+    wakeWord.detect();
+    const pending = wakeAcknowledgementSnapshot();
+    spokenUtterance?.onend?.(undefined as never);
+    await wait(0);
+    return {
+      pending,
+      completed: wakeAcknowledgementSnapshot()
+    };
+  };
+
   const transportSnapshot = (): TransportRecoverySnapshot => ({
     status,
     persistenceRetryReason: controller?.persistenceRetryReason,
@@ -446,6 +506,7 @@ function createPersistenceRecoveryHarness(): PersistenceRecoveryHarness {
     snapshot,
     startWakeFailure,
     wakeSnapshot,
+    startWakeAcknowledgement,
     startTransportFailure,
     transportSnapshot,
     waitForRetry: () => retryPromise ?? Promise.resolve(),

@@ -15,6 +15,7 @@ import {
   type DesktopRealtimeStatus,
   type DesktopRealtimeWakeState
 } from "./realtime.js";
+import { createBrowserWakeAcknowledgementPlayer } from "./wake-acknowledgement.js";
 import { builtInWakeWord, createSherpaWakeWordDetector } from "./wake-word.js";
 import {
   DesktopTaskNotificationFeed,
@@ -588,27 +589,6 @@ async function requestApplicationAudioStream(): Promise<MediaStream> {
   }
 }
 
-function playWakeTone(): void {
-  try {
-    if (typeof AudioContext === "undefined") {
-      return;
-    }
-    const context = new AudioContext();
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.frequency.value = 880;
-    gain.gain.setValueAtTime(0.03, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.08);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.08);
-    oscillator.addEventListener("ended", () => void context.close());
-  } catch {
-    // A prompt tone is best effort; it must not affect the realtime turn.
-  }
-}
-
 function deviceFrom(value: unknown): Device {
   return parseDesktopDeviceBootstrap(value);
 }
@@ -960,6 +940,7 @@ export function App() {
         }
       );
       statusController.current = nextController;
+      nextController.setWakeAcknowledgementPlayer(createBrowserWakeAcknowledgementPlayer());
       nextController.setWakeWordDetector(wakeWordDetector, nextWakeState => {
         if (nextWakeState === "error" && observedWakeState !== "error") {
           actionRunner.current!.reset("realtime-retry-wake");
@@ -967,9 +948,6 @@ export function App() {
         observedWakeState = nextWakeState;
         setWakeState(nextWakeState);
         setMuted(nextWakeState !== "awake");
-        if (nextWakeState === "awake") {
-          playWakeTone();
-        }
       });
       nextController.setRotationProvider(async () => clientSecretFrom(await window.jarvis.createRealtimeClientSecret({
         conversationId: activeConversation.id,

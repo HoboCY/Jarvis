@@ -1123,6 +1123,8 @@ async function runScenario() {
       && check.controlIds.length === 0
       && check.noHorizontalOverflow)
   };
+  const realtimeWakeAcknowledgement = await evaluate(window,
+    "globalThis.__jarvisRealtimePersistenceRecovery.startWakeAcknowledgement()");
   const realtimeWakeFailure = await evaluate(window,
     "globalThis.__jarvisRealtimePersistenceRecovery.startWakeFailure()");
   const realtimeWakeFailureControls = await inspectRealtimeRecoveryControl(
@@ -1234,6 +1236,7 @@ async function runScenario() {
     })()`),
     realtimeRecovery: {
       persistence: realtimeRecoveryPersistence,
+      wakeAcknowledgement: realtimeWakeAcknowledgement,
       wake: realtimeRecoveryWake,
       transport: realtimeRecoveryTransport
     }
@@ -1554,6 +1557,12 @@ async function runScenario() {
     || realtimeRecoveryPersistence.recovered.retryAction?.status !== "succeeded"
     || !realtimeRecoveryPersistence.failureControlsReachable
     || !realtimeRecoveryPersistence.recoveredControlsClear
+    || realtimeWakeAcknowledgement.pending.wakeState !== "standby"
+    || realtimeWakeAcknowledgement.pending.trackEnabled
+    || realtimeWakeAcknowledgement.pending.speechCalls !== 1
+    || realtimeWakeAcknowledgement.pending.speechText !== "我在"
+    || realtimeWakeAcknowledgement.completed.wakeState !== "awake"
+    || !realtimeWakeAcknowledgement.completed.trackEnabled
     || realtimeRecoveryWake.failure.status !== "connected"
     || realtimeRecoveryWake.failure.wakeState !== "error"
     || realtimeRecoveryWake.failure.trackEnabled

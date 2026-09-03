@@ -376,6 +376,268 @@ test("Desktop controller keeps application-owned realtime audio muted until wake
   assert.equal(track.enabled, false);
 });
 
+test("Desktop controller acknowledges one wake before opening the realtime microphone", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  let resolveAcknowledgement: (() => void) | undefined;
+  const acknowledgement = new Promise<void>(resolve => {
+    resolveAcknowledgement = resolve;
+  });
+  let acknowledgementCalls = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-acknowledgement",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeAcknowledgementPlayer({
+    play: () => {
+      acknowledgementCalls++;
+      return acknowledgement;
+    }
+  });
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000094",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+
+    wakeWord.detect();
+    wakeWord.detect();
+    assert.equal(acknowledgementCalls, 1);
+    assert.equal(controller.wakeState, "standby");
+    assert.equal(track.enabled, false);
+
+    resolveAcknowledgement?.();
+    await acknowledgement;
+    await Promise.resolve();
+
+    assert.equal(controller.wakeState, "awake");
+    assert.equal(track.enabled, true);
+
+    fakeSession.transport.emit("turn_done", { response: { output: [] } });
+    assert.equal(controller.wakeState, "standby");
+    assert.equal(track.enabled, false);
+
+    wakeWord.detect();
+    assert.equal(acknowledgementCalls, 2);
+    assert.equal(controller.wakeState, "standby");
+    assert.equal(track.enabled, false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(controller.wakeState, "awake");
+    assert.equal(track.enabled, true);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("Desktop controller continues listening when wake acknowledgement fails", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  let acknowledgementCalls = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-acknowledgement-failure",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeAcknowledgementPlayer({
+    play: () => {
+      acknowledgementCalls++;
+      return Promise.reject(new Error("speech synthesis unavailable"));
+    }
+  });
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000095",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+
+    wakeWord.detect();
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    assert.equal(acknowledgementCalls, 1);
+    assert.equal(controller.wakeState, "awake");
+    assert.equal(track.enabled, true);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("Desktop controller keeps a late wake acknowledgement muted after interruption", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  let resolveAcknowledgement: (() => void) | undefined;
+  const acknowledgement = new Promise<void>(resolve => {
+    resolveAcknowledgement = resolve;
+  });
+  let cancellationCalls = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-acknowledgement-interrupt",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeAcknowledgementPlayer({
+    play: () => acknowledgement,
+    cancel: () => { cancellationCalls++; }
+  });
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000096",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+
+    wakeWord.detect();
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+
+    controller.interrupt();
+    assert.equal(cancellationCalls, 1);
+    resolveAcknowledgement?.();
+    await acknowledgement;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("Desktop controller keeps a late wake acknowledgement muted after disconnect", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  let resolveAcknowledgement: (() => void) | undefined;
+  const acknowledgement = new Promise<void>(resolve => {
+    resolveAcknowledgement = resolve;
+  });
+  let cancellationCalls = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-acknowledgement-disconnect",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeAcknowledgementPlayer({
+    play: () => acknowledgement,
+    cancel: () => { cancellationCalls++; }
+  });
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  await controller.connect({
+    realtimeSessionId: "00000000-0000-0000-0000-000000000098",
+    clientSecret: "ek_scripted",
+    model: "model",
+    voice: "voice",
+    instructions: "server context",
+    mediaStream: stream
+  });
+
+  wakeWord.detect();
+  const disconnecting = controller.disconnect();
+  assert.equal(cancellationCalls, 1);
+  resolveAcknowledgement?.();
+  await acknowledgement;
+  await disconnecting;
+
+  assert.equal(track.enabled, false);
+  assert.equal(controller.wakeState, "standby");
+  assert.equal(controller.status, "disconnected");
+});
+
+test("Desktop controller keeps a late wake acknowledgement muted after turn completion", async () => {
+  const fakeSession = new FakeSession();
+  const { stream, track } = fakeMediaStream();
+  const wakeWord = fakeWakeWordDetector();
+  let resolveAcknowledgement: (() => void) | undefined;
+  const acknowledgement = new Promise<void>(resolve => {
+    resolveAcknowledgement = resolve;
+  });
+  const controller = new DesktopRealtimeController(
+    "conversation-wake-acknowledgement-turn-done",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeAcknowledgementPlayer({ play: () => acknowledgement });
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000097",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context",
+      mediaStream: stream
+    });
+
+    wakeWord.detect();
+    fakeSession.transport.emit("turn_done", { response: { output: [] } });
+    resolveAcknowledgement?.();
+    await acknowledgement;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    assert.equal(track.enabled, false);
+    assert.equal(controller.wakeState, "standby");
+  } finally {
+    await controller.disconnect();
+  }
+});
+
 test("Desktop controller accepts one detection per awake turn and rearms after completion", async () => {
   const fakeSession = new FakeSession();
   const { stream, track } = fakeMediaStream();

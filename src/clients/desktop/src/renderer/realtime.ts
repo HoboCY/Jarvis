@@ -153,6 +153,11 @@ export type DesktopRealtimeStatus = "disconnected" | "connecting" | "connected" 
 
 export type DesktopRealtimeWakeState = "standby" | "awake" | "error";
 
+export type DesktopRealtimeWakeAcknowledgementPlayer = {
+  play: () => Promise<void>;
+  cancel?: () => void;
+};
+
 export type DesktopRealtimePersistenceRetryReason = "event-ingest" | "session-end";
 
 export type DesktopRealtimeConnectionInput = {
@@ -217,6 +222,9 @@ export class DesktopRealtimeController {
   private wakeWordStarted = false;
   private wakeStateValue: DesktopRealtimeWakeState = "standby";
   private activeWakeResponseId: string | undefined;
+  private wakeAcknowledgementPlayer: DesktopRealtimeWakeAcknowledgementPlayer | undefined;
+  private wakeAcknowledgementGeneration = 0;
+  private pendingWakeAcknowledgementGeneration: number | undefined;
   private realtimeMediaStream: MediaStream | undefined;
   private onWakeStateChange: ((state: DesktopRealtimeWakeState) => void) | undefined;
   private rotationProvider: (() => Promise<{
@@ -248,6 +256,12 @@ export class DesktopRealtimeController {
 
   public get wakeState(): DesktopRealtimeWakeState {
     return this.wakeStateValue;
+  }
+
+  public setWakeAcknowledgementPlayer(
+    player?: DesktopRealtimeWakeAcknowledgementPlayer
+  ): void {
+    this.wakeAcknowledgementPlayer = player;
   }
 
   public get persistenceRetryReason(): DesktopRealtimePersistenceRetryReason | undefined {
@@ -536,14 +550,40 @@ export class DesktopRealtimeController {
     if (this.statusValue !== "connected" || !this.session) {
       return;
     }
-    if (this.wakeStateValue !== "standby") {
+    if (this.wakeStateValue !== "standby" || this.pendingWakeAcknowledgementGeneration !== undefined) {
       return;
     }
 
-    this.activeWakeResponseId = undefined;
-    this.setWakeState("awake");
-    this.setMediaStreamEnabled(this.realtimeMediaStream, true);
-    this.session.mute(false);
+    const session = this.session;
+    const sessionId = this.sessionId;
+    if (!sessionId) {
+      return;
+    }
+
+    const generation = this.connectionGeneration;
+    const acknowledgementGeneration = ++this.wakeAcknowledgementGeneration;
+    this.pendingWakeAcknowledgementGeneration = acknowledgementGeneration;
+    this.setMediaStreamEnabled(this.realtimeMediaStream, false);
+    session.mute(true);
+
+    const player = this.wakeAcknowledgementPlayer;
+    if (!player) {
+      this.finishWakeAcknowledgement(session, generation, sessionId, acknowledgementGeneration);
+      return;
+    }
+
+    let playback: Promise<void>;
+    try {
+      playback = player.play();
+    } catch {
+      this.finishWakeAcknowledgement(session, generation, sessionId, acknowledgementGeneration);
+      return;
+    }
+    void Promise.resolve(playback)
+      .catch(() => undefined)
+      .then(() => {
+        this.finishWakeAcknowledgement(session, generation, sessionId, acknowledgementGeneration);
+      });
   }
 
   public async retryWakeWord(): Promise<void> {
@@ -757,6 +797,9 @@ export class DesktopRealtimeController {
       if (!isCurrent()) {
         return;
       }
+      if (this.pendingWakeAcknowledgementGeneration !== undefined) {
+        this.cancelWakeAcknowledgement();
+      }
       const outputItems = event.response?.output;
       const itemId = Array.isArray(outputItems)
         ? [...outputItems].reverse().find(item => typeof item?.id === "string")?.id
@@ -833,6 +876,7 @@ export class DesktopRealtimeController {
   }
 
   private async releaseAudioResources(): Promise<void> {
+    this.cancelWakeAcknowledgement();
     const detector = this.wakeWordDetector;
     if (detector && this.wakeWordStarted) {
       try {
@@ -870,6 +914,7 @@ export class DesktopRealtimeController {
     session: RealtimeSession | undefined,
     nextWakeState: DesktopRealtimeWakeState = "standby"
   ): void {
+    this.cancelWakeAcknowledgement();
     this.activeWakeResponseId = undefined;
     this.setWakeState(nextWakeState);
     if (!this.realtimeMediaStream) {
@@ -878,6 +923,39 @@ export class DesktopRealtimeController {
 
     this.setMediaStreamEnabled(this.realtimeMediaStream, false);
     session?.mute(true);
+  }
+
+  private finishWakeAcknowledgement(
+    session: RealtimeSession,
+    generation: number,
+    sessionId: string,
+    acknowledgementGeneration: number
+  ): void {
+    if (this.pendingWakeAcknowledgementGeneration !== acknowledgementGeneration
+      || !this.isCurrent(session, generation, sessionId)
+      || this.statusValue !== "connected") {
+      return;
+    }
+
+    this.pendingWakeAcknowledgementGeneration = undefined;
+    this.activeWakeResponseId = undefined;
+    this.setWakeState("awake");
+    this.setMediaStreamEnabled(this.realtimeMediaStream, true);
+    session.mute(false);
+  }
+
+  private cancelWakeAcknowledgement(): void {
+    if (this.pendingWakeAcknowledgementGeneration === undefined) {
+      return;
+    }
+
+    this.pendingWakeAcknowledgementGeneration = undefined;
+    this.wakeAcknowledgementGeneration++;
+    try {
+      this.wakeAcknowledgementPlayer?.cancel?.();
+    } catch {
+      // A failed local cancellation must not reopen the microphone.
+    }
   }
 
   private setWakeState(state: DesktopRealtimeWakeState): void {
