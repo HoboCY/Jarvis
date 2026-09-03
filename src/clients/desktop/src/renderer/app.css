@@ -765,6 +765,18 @@ ol {
   background: rgba(29, 32, 26, 0.94);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
   gap: 4px;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.composer:focus-within {
+  border-color: rgba(199, 238, 99, 0.42);
+  background: rgba(31, 34, 27, 0.98);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.24),
+    0 0 0 3px rgba(199, 238, 99, 0.06);
 }
 
 .composer input {
@@ -773,6 +785,7 @@ ol {
   border: 0;
   outline: 0;
   background: transparent;
+  caret-color: var(--lime);
   color: var(--text);
   font-size: 14px;
 }
@@ -1083,7 +1096,6 @@ ol {
   font-size: 11px;
 }
 
-.composer input:focus-visible,
 .session-input-row input:focus-visible,
 .task-input-form input:focus-visible,
 .task-input-form select:focus-visible {
