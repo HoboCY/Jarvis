@@ -4,10 +4,89 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: jarvis-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  phase-0:
+  backend-quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Restore backend with lock files
+        run: dotnet restore Jarvis.sln --locked-mode
+
+      - name: Restore local .NET tools
+        run: dotnet tool restore
+
+      - name: Verify EF migration model has no drift
+        run: dotnet ef migrations has-pending-model-changes --project src/backend/Jarvis.Infrastructure/Jarvis.Infrastructure.csproj --startup-project src/backend/Jarvis.Api/Jarvis.Api.csproj --context Jarvis.Infrastructure.Data.JarvisDbContext
+
+      - name: Build backend
+        run: dotnet build Jarvis.sln --configuration Release --no-restore
+
+      - name: Test backend
+        run: dotnet test Jarvis.sln --configuration Release --no-build --no-restore
+
+      - name: Verify .NET formatting
+        run: dotnet format Jarvis.sln --no-restore --verify-no-changes
+
+      - name: Audit NuGet packages
+        run: dotnet list Jarvis.sln package --vulnerable --include-transitive
+
+  workspace-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm 10.24.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit npm packages
+        run: pnpm check:package-audit
+
+      - name: Typecheck workspace
+        run: pnpm typecheck
+
+      - name: Lint workspace
+        run: pnpm lint
+
+      - name: Run headless workspace tests
+        run: pnpm test:headless
+
+      - name: Build workspace
+        run: pnpm build
+
+  contracts-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -30,53 +109,11 @@ jobs:
           node-version: 24.19.0
           cache: pnpm
 
-      - name: Restore backend with lock files
+      - name: Restore backend for OpenAPI generation
         run: dotnet restore Jarvis.sln --locked-mode
-
-      - name: Restore local .NET tools
-        run: dotnet tool restore
-
-      - name: Verify EF migration model has no drift
-        run: dotnet ef migrations has-pending-model-changes --project src/backend/Jarvis.Infrastructure/Jarvis.Infrastructure.csproj --startup-project src/backend/Jarvis.Api/Jarvis.Api.csproj --context Jarvis.Infrastructure.Data.JarvisDbContext
-
-      - name: Build backend
-        run: dotnet build Jarvis.sln --configuration Release --no-restore
-
-      - name: Test backend
-        run: dotnet test Jarvis.sln --configuration Release --no-build --no-restore
 
       - name: Install TypeScript workspace with frozen lockfile
         run: pnpm install --frozen-lockfile
-
-      - name: Audit package vulnerabilities
-        run: pnpm check:package-audit
-
-      - name: Typecheck workspace
-        run: pnpm typecheck
-
-      - name: Lint workspace
-        run: pnpm lint
-
-      - name: Test workspace
-        run: pnpm test
-
-      - name: Build workspace
-        run: pnpm build
-
-      - name: Typecheck React Native mobile client
-        run: pnpm --filter @jarvis/mobile typecheck
-
-      - name: Test React Native mobile client
-        run: pnpm --filter @jarvis/mobile test
-
-      - name: Build Android release Metro bundle
-        run: pnpm --filter @jarvis/mobile bundle:android
-
-      - name: Build iOS release Metro bundle
-        run: pnpm --filter @jarvis/mobile bundle:ios
-
-      - name: Verify mobile native configuration and bundle safety
-        run: pnpm check:mobile-native-config -- --require-bundles
 
       - name: Verify OpenAPI generated contract
         run: pnpm check:openapi
@@ -102,23 +139,27 @@ jobs:
       - name: Test service manifests and launchd safety seams
         run: pnpm test:service-manifest
 
-      - name: Run Electron security configuration test
-        run: pnpm --filter @jarvis/desktop test
+      - name: Test CI and sandbox contracts
+        run: pnpm test:ci-contract
 
-  phase-6-main:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: phase-0
+  desktop-renderer-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.100
+      - name: Initialize renderer scenario evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence_directory="$RUNNER_TEMP/jarvis-phase9a-renderer"
+          evidence_file="$evidence_directory/scenario.json"
+          mkdir -p "$evidence_directory"
+          umask 077
+          printf '%s\n' '{"status":"not-run","observationAvailable":false,"failureReason":"renderer-scenario-not-started"}' > "$evidence_file"
 
       - name: Setup pnpm 10.24.0
         uses: pnpm/action-setup@v4
@@ -130,6 +171,122 @@ jobs:
         with:
           node-version: 24.19.0
           cache: pnpm
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Electron runtime
+        run: pnpm --filter @jarvis/desktop exec install-electron
+
+      - name: Build Desktop renderer scenario input
+        run: pnpm --filter @jarvis/desktop build
+
+      - name: Prepare Electron Chromium sandbox
+        run: eng/scripts/prepare-electron-linux-sandbox.sh
+
+      - name: Prepare D-Bus for Electron renderer
+        run: |
+          set -euo pipefail
+          system_bus_socket="/run/dbus/system_bus_socket"
+          if [[ ! -S "$system_bus_socket" ]]; then
+            command -v dbus-daemon >/dev/null
+            sudo -n install -d -m 0755 /run/dbus
+            sudo -n dbus-daemon --system --fork
+          fi
+          for attempt in 1 2 3 4 5; do
+            [[ -S "$system_bus_socket" ]] && break
+            sleep 1
+          done
+          test -S "$system_bus_socket"
+          command -v dbus-run-session >/dev/null
+          dbus-run-session -- true
+
+      - name: Run built renderer scenario in Xvfb
+        run: |
+          mkdir -p "$RUNNER_TEMP/jarvis-phase9a-renderer"
+          dbus-run-session -- xvfb-run -a \
+            --server-args="-screen 0 1280x1024x24" \
+            env JARVIS_DESKTOP_SCENARIO_OUTPUT="$RUNNER_TEMP/jarvis-phase9a-renderer/scenario.json" \
+            pnpm --filter @jarvis/desktop test:renderer-scenario:built
+
+      - name: Upload bounded renderer scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-phase9a-desktop-renderer-evidence
+          path: ${{ runner.temp }}/jarvis-phase9a-renderer/scenario.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  mobile-static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm 10.24.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck React Native mobile client
+        run: pnpm --filter @jarvis/mobile typecheck
+
+      - name: Test React Native mobile client
+        run: pnpm --filter @jarvis/mobile test
+
+      - name: Build Android release Metro bundle
+        run: pnpm --filter @jarvis/mobile bundle:android
+
+      - name: Build iOS release Metro bundle
+        run: pnpm --filter @jarvis/mobile bundle:ios
+
+      - name: Verify mobile native configuration and bundle safety
+        run: pnpm check:mobile-native-config -- --require-bundles
+
+      - name: Upload mobile static bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-phase9a-mobile-static
+          path: |
+            src/clients/mobile/android/app/src/main/assets/index.android.bundle
+            src/clients/mobile/ios/main.jsbundle
+          if-no-files-found: warn
+          retention-days: 14
+
+  e2e:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    needs: backend-quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
 
       - name: Restore backend with lock files
         run: dotnet restore Jarvis.sln --locked-mode
@@ -137,80 +294,23 @@ jobs:
       - name: Build backend and E2E project
         run: dotnet build Jarvis.sln --configuration Release --no-restore
 
-      - name: Run Phase 6 E2E and performance smoke
+      - name: Run E2E and performance smoke
         run: tests/e2e/run-e2e.sh
 
-      - name: Install TypeScript workspace with frozen lockfile
-        run: pnpm install --frozen-lockfile
-
-      - name: Build Desktop release-test input
-        run: pnpm --filter @jarvis/desktop build
-
-      - name: Test release manifest and service seams
-        run: pnpm test:service-manifest
-
-      - name: Upload Phase 6 reports and manifests
+      - name: Upload E2E reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-phase6-main-reports
-          path: |
-            artifacts/test-reports/phase6-e2e
-            artifacts/releases
+          name: jarvis-phase9a-e2e-reports
+          path: artifacts/test-reports/phase6-e2e
+          if-no-files-found: warn
+          retention-days: 14
 
-  phase-6-macos-release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: phase-6-main
-    runs-on: macos-15
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.100
-
-      - name: Setup pnpm 10.24.0
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.24.0
-
-      - name: Setup Node 24.19.0
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24.19.0
-          cache: pnpm
-
-      - name: Restore backend with lock files
-        run: dotnet restore Jarvis.sln --locked-mode
-
-      - name: Install TypeScript workspace with frozen lockfile
-        run: pnpm install --frozen-lockfile
-
-      - name: Build and package unsigned arm64 Desktop artifact
-        run: eng/scripts/package-desktop-macos.sh
-
-      - name: Publish Backend and Device Node arm64 artifacts
-        run: eng/scripts/publish-macos-arm64.sh
-
-      - name: Run isolated launchd API and Device Node smoke
-        run: eng/scripts/launchd-smoke-macos.sh
-
-      - name: Upload macOS release-test artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: jarvis-phase6-macos-arm64-release-test
-          path: |
-            src/clients/desktop/out/make
-            artifacts/services
-            artifacts/releases
-
-  phase-7-android-native:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: phase-0
+  android-native:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    needs: mobile-static
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -261,15 +361,19 @@ jobs:
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload Android debug application
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-phase7-android-debug
+          name: jarvis-phase9a-android-debug
           path: src/clients/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 14
 
-  phase-7-ios-native:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: phase-0
+  ios-native:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    needs: mobile-static
     runs-on: macos-15
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -308,7 +412,67 @@ jobs:
             build
 
       - name: Upload iOS Simulator application
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-phase7-ios-simulator-debug
+          name: jarvis-phase9a-ios-simulator-debug
           path: ${{ runner.temp }}/JarvisMobileDerivedData/Build/Products/Debug-iphonesimulator/JarvisMobile.app
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-release-smoke:
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    needs: [backend-quality, workspace-quality, contracts-security, desktop-renderer-linux, mobile-static, e2e]
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Setup pnpm 10.24.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+
+      - name: Setup Node 24.19.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: pnpm
+
+      - name: Restore backend with lock files
+        run: dotnet restore Jarvis.sln --locked-mode
+
+      - name: Install TypeScript workspace with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Electron runtime
+        run: pnpm --filter @jarvis/desktop exec install-electron
+
+      - name: Build and package unsigned arm64 Desktop artifact
+        run: eng/scripts/package-desktop-macos.sh
+
+      - name: Publish Backend and Device Node arm64 artifacts
+        run: eng/scripts/publish-macos-arm64.sh
+
+      - name: Run isolated launchd API and Device Node smoke
+        run: eng/scripts/launchd-smoke-macos.sh
+
+      - name: Upload macOS release-test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-phase9a-macos-arm64-release-test
+          path: |
+            src/clients/desktop/out/make
+            artifacts/services
+            artifacts/releases
+          if-no-files-found: warn
+          retention-days: 14

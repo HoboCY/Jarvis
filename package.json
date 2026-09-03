@@ -17,6 +17,8 @@
     "typecheck": "pnpm --filter @jarvis/contracts-ts build && pnpm --filter @jarvis/realtime-agent build && pnpm --recursive --if-present run typecheck",
     "lint": "eslint .",
     "test": "pnpm --recursive --if-present run test",
+    "test:headless": "pnpm --filter @jarvis/contracts-ts test && pnpm --filter @jarvis/realtime-agent test && pnpm --filter @jarvis/api-client-ts test && pnpm --filter @jarvis/desktop test:headless",
+    "test:ci-contract": "node --test eng/scripts/prepare-electron-linux-sandbox.test.mjs eng/scripts/ci-workflow-contract.test.mjs",
     "build": "pnpm --recursive --if-present run build",
     "generate:openapi": "node eng/scripts/generate-openapi.mjs",
     "check:openapi": "node eng/scripts/check-openapi-diff.mjs",
