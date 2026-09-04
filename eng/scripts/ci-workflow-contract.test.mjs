@@ -1,10 +1,14 @@
 import { strict as assert } from "node:assert";
-import { readdir, readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { test } from "node:test";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { tmpdir } from "node:os";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const execFileAsync = promisify(execFile);
 
 async function read(relativePath) {
   return readFile(join(repositoryRoot, relativePath), "utf8");
@@ -269,6 +273,270 @@ test("CI keeps quality gates independent and full matrix dispatchable", async ()
     assert.doesNotMatch(job, /needs:/);
   }
 });
+
+function workflowStepSection(job, stepName) {
+  const start = job.indexOf(`      - name: ${stepName}`);
+  assert.notEqual(start, -1, `CI workflow is missing step ${stepName}.`);
+  const rest = job.slice(start + 1);
+  const next = rest.search(/^ {6}- name:/m);
+  return job.slice(start, next === -1 ? job.length : start + 1 + next);
+}
+
+function workflowRunScript(step) {
+  const lines = step.split("\n");
+  const runMarker = lines.indexOf("        run: |");
+  assert.notEqual(runMarker, -1, "workflow step is missing a run script.");
+  const scriptLines = [];
+  for (const line of lines.slice(runMarker + 1)) {
+    if (line.startsWith("          ")) {
+      scriptLines.push(line.slice(10));
+      continue;
+    }
+    if (line === "") {
+      scriptLines.push("");
+      continue;
+    }
+    break;
+  }
+  return scriptLines.join("\n");
+}
+
+test("CI pre-merge Full Matrix is label-gated, emits bounded evidence, and preserves summary semantics", async () => {
+  const workflow = await read(".github/workflows/ci.yml");
+  const fullMatrixJobs = ["e2e", "android-native", "ios-native", "macos-release-smoke"];
+  const requiredJobs = [
+    "backend-quality",
+    "workspace-quality",
+    "contracts-security",
+    "desktop-renderer-linux",
+    "mobile-static",
+    ...fullMatrixJobs
+  ];
+
+  assert.match(
+    workflow,
+    /^\x20{2}pull_request:\n\x20{4}types: \[opened, synchronize, reopened, labeled\]$/m,
+    "pre-merge CI must rerun after labeling and subsequent branch updates.");
+  assert.match(workflow, /^\x20{2}push:\n\x20{4}branches: \[main\]$/m);
+  assert.match(workflow, /^\x20{2}workflow_dispatch:$/m);
+
+  for (const id of fullMatrixJobs) {
+    const job = jobSection(workflow, id);
+    assert.match(job, /if: \$\{\{\s*success\(\)\s*&&/,
+      `${id} must retain successful needs as a prerequisite.`);
+    assert.match(job, /github\.event_name == 'push'/);
+    assert.match(job, /github\.ref == 'refs\/heads\/main'/);
+    assert.match(job, /github\.event_name == 'workflow_dispatch'/);
+    assert.match(job, /github\.event_name == 'pull_request'/);
+    assert.match(
+      job,
+      /contains\(github\.event\.pull_request\.labels\.\*\.name, 'full-matrix'\)/,
+      `${id} must be runnable from a labeled PR.`);
+    assert.doesNotMatch(job, /codex\/phase9a-ci-recovery/);
+    assert.doesNotMatch(job, /continue-on-error\s*:/);
+  }
+
+  assert.match(jobSection(workflow, "e2e"), /needs: backend-quality/);
+  assert.match(jobSection(workflow, "android-native"), /needs: mobile-static/);
+  assert.match(jobSection(workflow, "ios-native"), /needs: mobile-static/);
+  assert.match(
+    jobSection(workflow, "macos-release-smoke"),
+    /needs: \[backend-quality, workspace-quality, contracts-security, desktop-renderer-linux, mobile-static, e2e\]/);
+
+  const summary = jobSection(workflow, "phase9a-verification-summary");
+  assert.match(
+    summary,
+    /needs: \[backend-quality, workspace-quality, contracts-security, desktop-renderer-linux, mobile-static, e2e, android-native, ios-native, macos-release-smoke\]/);
+  assert.match(summary, /if: \$\{\{\s*always\(\)\s*\}\}/);
+  assert.match(summary, /FULL_MATRIX_REQUESTED/);
+  assert.match(
+    summary,
+    /HEAD_SHA: \$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/,
+    "remote evidence must bind PRs to the candidate branch SHA.");
+  assert.match(summary, /not-requested/);
+  assert.match(summary, /fullMatrixRequested/);
+  assert.match(summary, /jobResults/);
+  for (const field of [
+    "workflowName",
+    "runId",
+    "runAttempt",
+    "eventName",
+    "ref",
+    "headSha",
+    "repository",
+    "overallStatus",
+    "generatedAtUtc",
+    "remote-verification.json",
+    "jarvis-phase9a-remote-verification"
+  ]) {
+    assert.match(summary, new RegExp(field.replace(/[.-]/g, "\\$&")));
+  }
+  for (const id of requiredJobs) {
+    assert.match(summary, new RegExp(id.replace("-", "\\-")),
+      `remote evidence must record ${id}.`);
+  }
+  assert.match(summary, /if \[\[ "\$FULL_MATRIX_REQUESTED" != "true" \]\]/);
+  for (const result of ["e2e_result", "android_result", "ios_result", "macos_result"]) {
+    assert.match(summary, new RegExp(`${result}="not-requested"`),
+      `unrequested Full Matrix results must be normalized for ${result}.`);
+  }
+  assert.match(summary, /!=\s*success/);
+  assert.match(summary, /phase9a-summary-status/);
+  const uploadIndex = summary.indexOf("Upload remote verification evidence");
+  const gateIndex = summary.indexOf("Enforce verification summary status");
+  assert.ok(uploadIndex >= 0 && uploadIndex < gateIndex,
+    "summary evidence must upload before the non-zero status gate.");
+  assert.doesNotMatch(summary, /continue-on-error\s*:/);
+  assert.doesNotMatch(summary, /toJSON\s*\(|printenv|env\s*[>]{1,2}/i);
+
+  const artifactSteps = [
+    ["desktop-renderer-linux", "Upload bounded renderer scenario evidence"],
+    ["mobile-static", "Upload mobile static bundles"],
+    ["e2e", "Upload E2E reports"],
+    ["android-native", "Upload Android debug application"],
+    ["ios-native", "Upload iOS Simulator application"],
+    ["macos-release-smoke", "Upload macOS release-test artifacts"],
+    ["phase9a-verification-summary", "Upload remote verification evidence"]
+  ];
+  for (const [jobId, stepName] of artifactSteps) {
+    const step = workflowStepSection(jobSection(workflow, jobId), stepName);
+    assert.match(step, /if: always\(\)/, `${jobId} artifact must upload after failures.`);
+    assert.match(step, /uses: actions\/upload-artifact@v4/);
+    assert.match(step, /if-no-files-found: error/,
+      `${jobId} artifact must be required when the matrix is requested.`);
+  }
+  await assertRemoteVerificationSummaryShell(workflow);
+});
+
+async function assertRemoteVerificationSummaryShell(workflow) {
+  const fullMatrixJobs = ["e2e", "android-native", "ios-native", "macos-release-smoke"];
+  const coreJobs = [
+    "backend-quality",
+    "workspace-quality",
+    "contracts-security",
+    "desktop-renderer-linux",
+    "mobile-static"
+  ];
+  const summary = jobSection(workflow, "phase9a-verification-summary");
+  const fullMatrixPredicates = fullMatrixJobs.map(id => {
+    const match = jobSection(workflow, id).match(
+      /^\x20{4}if: \$\{\{\s*success\(\)\s*&&\s*(.+?)\s*\}\}$/m);
+    assert.ok(match, `${id} is missing its Full Matrix predicate.`);
+    return match[1];
+  });
+  assert.equal(new Set(fullMatrixPredicates).size, 1,
+    "Full Matrix jobs must share one trigger predicate.");
+  const summaryPredicate = summary.match(
+    /^\x20{6}FULL_MATRIX_REQUESTED: \$\{\{\s*(.+?)\s*\}\}$/m);
+  assert.ok(summaryPredicate, "summary is missing its Full Matrix predicate.");
+  assert.equal(summaryPredicate[1], fullMatrixPredicates[0],
+    "summary and Full Matrix jobs must use the same trigger predicate.");
+
+  const generateScript = workflowRunScript(
+    workflowStepSection(summary, "Generate bounded remote verification evidence"));
+  const enforceScript = workflowRunScript(
+    workflowStepSection(summary, "Enforce verification summary status"));
+  const jobEnvironmentNames = {
+    "backend-quality": "BACKEND_RESULT",
+    "workspace-quality": "WORKSPACE_RESULT",
+    "contracts-security": "CONTRACTS_RESULT",
+    "desktop-renderer-linux": "DESKTOP_RENDERER_RESULT",
+    "mobile-static": "MOBILE_STATIC_RESULT",
+    e2e: "E2E_RESULT",
+    "android-native": "ANDROID_RESULT",
+    "ios-native": "IOS_RESULT",
+    "macos-release-smoke": "MACOS_RESULT"
+  };
+  const successResults = Object.fromEntries(
+    [...coreJobs, ...fullMatrixJobs].map(id => [id, "success"]));
+  const scenarios = [
+    {
+      name: "ordinary-pr",
+      requested: "false",
+      matrixResults: Object.fromEntries(fullMatrixJobs.map(id => [id, "skipped"])),
+      expectedOverallStatus: "success",
+      enforceSucceeds: true
+    },
+    {
+      name: "requested-success",
+      requested: "true",
+      matrixResults: Object.fromEntries(fullMatrixJobs.map(id => [id, "success"])),
+      expectedOverallStatus: "success",
+      enforceSucceeds: true
+    },
+    {
+      name: "requested-skipped",
+      requested: "true",
+      matrixResults: { ...Object.fromEntries(fullMatrixJobs.map(id => [id, "success"])), e2e: "skipped" },
+      expectedOverallStatus: "failure",
+      enforceSucceeds: false
+    }
+  ];
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "jarvis-ci-summary-"));
+  try {
+    for (const scenario of scenarios) {
+      const scenarioDirectory = join(temporaryRoot, scenario.name);
+      const runnerTemp = join(scenarioDirectory, "runner-temp");
+      await mkdir(runnerTemp, { recursive: true });
+      const results = { ...successResults, ...scenario.matrixResults };
+      const environment = {
+        ...process.env,
+        GITHUB_WORKFLOW: "CI",
+        GITHUB_RUN_ID: "12345",
+        GITHUB_RUN_ATTEMPT: "1",
+        GITHUB_EVENT_NAME: "pull_request",
+        GITHUB_REF: "refs/pull/42/merge",
+        GITHUB_SHA: "merge-sha",
+        HEAD_SHA: "candidate-sha",
+        GITHUB_REPOSITORY: "HoboCY/Jarvis",
+        RUNNER_TEMP: runnerTemp,
+        FULL_MATRIX_REQUESTED: scenario.requested,
+        ...Object.fromEntries(
+          Object.entries(jobEnvironmentNames).map(([id, variable]) => [variable, results[id]]))
+      };
+      const shellOptions = {
+        cwd: scenarioDirectory,
+        env: environment,
+        maxBuffer: 256 * 1024
+      };
+      await execFileAsync(
+        "bash",
+        ["-e", "-u", "-o", "pipefail", "-c", generateScript],
+        shellOptions);
+
+      const evidence = JSON.parse(await readFile(
+        join(scenarioDirectory, "artifacts/test-reports/phase9a/remote-verification.json"),
+        "utf8"));
+      assert.equal(evidence.fullMatrixRequested, scenario.requested === "true");
+      assert.equal(
+        evidence.fullMatrix.status,
+        scenario.requested === "true" ? "requested" : "not-requested");
+      assert.equal(evidence.headSha, "candidate-sha");
+      assert.equal(evidence.overallStatus, scenario.expectedOverallStatus);
+      for (const id of coreJobs) {
+        assert.equal(evidence.jobResults[id], "success");
+      }
+      for (const id of fullMatrixJobs) {
+        assert.equal(
+          evidence.jobResults[id],
+          scenario.requested === "true" ? results[id] : "not-requested");
+      }
+
+      const enforce = execFileAsync(
+        "bash",
+        ["-e", "-u", "-o", "pipefail", "-c", enforceScript],
+        shellOptions);
+      if (scenario.enforceSucceeds) {
+        await enforce;
+      } else {
+        await assert.rejects(enforce, error => error?.code !== 0,
+          `${scenario.name} must fail the summary enforcement step.`);
+      }
+    }
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
 
 test("Renderer handoff and startup observation preserve the strict scenario", async () => {
   const runner = await read("src/clients/desktop/scripts/renderer-scenario-runner.mjs");

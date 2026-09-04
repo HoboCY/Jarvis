@@ -9,6 +9,29 @@
 任务分支创建 PR 或触发/读取新的 GitHub Actions；因此不能把本地绿色写成远程
 通过，也不能把 Phase 9A 标记为 `PASS`。
 
+本轮 Phase 9A-R 只补齐预合并触发契约与远程证据汇总实现，阶段状态仍为
+`LOCAL_GREEN_REMOTE_UNVERIFIED`。最终远程 candidate SHA、Run ID、Job conclusion
+和 artifact 清单必须来自 PR checks 与 `jarvis-phase9a-remote-verification`
+artifact，不能由 tracked report 自行推断。
+
+## Phase 9A-R 预合并触发与 evidence
+
+首次合并前不能只依赖 `workflow_dispatch`：该 workflow 尚未存在于默认分支
+`main` 时，GitHub 无法从任务分支把它作为稳定的预合并入口。CI 现在让同一个
+Phase 9A PR 通过 `full-matrix` label 运行完整矩阵，并将 `pull_request` 事件扩展
+为 `opened`、`synchronize`、`reopened`、`labeled`；PR 加标签后，后续
+`synchronize` 仍会继续触发 E2E、Android、iOS 和 macOS jobs。核心五个 PR gates
+始终独立运行，Full Matrix 保留原有 `needs` 与成功前置，标签不能绕过失败依赖。
+
+`workflow_dispatch` 仍保留给 workflow 已进入默认分支后的未来任意 ref 验证，
+`main` push 也继续运行完整矩阵。本地普通无标签 PR 的汇总会将四个 Full Matrix
+`jobResults` 规范化为 `not-requested`；带标签、`main` push 或
+`workflow_dispatch` 时记录真实 result，任何 expected skipped 都使汇总失败。
+`phase9a-verification-summary` 使用 `always()` 等待九个 required jobs，先生成并
+上传 bounded `artifacts/test-reports/phase9a/remote-verification.json`，再以
+非零退出传播失败；PR evidence 的 `headSha` 取
+`github.event.pull_request.head.sha`，其它事件取 `github.sha`。
+
 ## Baseline
 
 | 项目 | 值 |
@@ -122,9 +145,22 @@ RED：新增静态合同测试最初因脚本/runner 的目标约束尚未实现
 
 GREEN：
 `node --test eng/scripts/prepare-electron-linux-sandbox.test.mjs eng/scripts/ci-workflow-contract.test.mjs`
-通过 `14/14`（sandbox standalone `9/9`，workflow contract `5/5`）；覆盖脚本拆分、
+通过 `15/15`（sandbox standalone `9/9`，workflow contract `6/6`）；覆盖脚本拆分、
 CI 触发器/job DAG/tool versions/timeouts/artifact、Renderer handoff/startup 稳态、
 descriptor pinning 以及生产面 sandbox bypass 禁止项。
+
+### Phase 9A-R 预合并触发与远程 evidence contract
+
+RED：合同测试新增了 `pull_request` 的 `labeled`/`synchronize` 触发、
+`full-matrix` label 门控、`success()` 前置、九-job summary、required artifact 和
+bounded evidence 字段；在 workflow 尚未实现时因缺少 `pull_request.types` 先失败。
+
+GREEN：Full Matrix 在带标签 PR、`main` push 或 `workflow_dispatch` 时运行，
+`phase9a-verification-summary` 对普通无标签 PR 将四个 Full Matrix result 规范化为
+`not-requested`，对请求场景保留真实 result 并将 skipped/失败传播为非零；summary
+artifact 在最终状态 gate 之前上传。PR evidence 使用
+`github.event.pull_request.head.sha`，其它事件使用 `github.sha`。当前合同测试
+`pnpm test:ci-contract` 通过 `15/15`；这仍是本地 GREEN，不是远程证据。
 
 ### Renderer observation
 
@@ -142,9 +178,10 @@ userData cleanup 断言均保留。当前本机 `test:renderer-scenario:built` �
 
 - `.github/workflows/ci.yml`：拆出 backend/workspace/contracts-security、Linux
   renderer、mobile static、E2E、Android native、iOS native、macOS release smoke；
-  保留 PR/main push，增加 `workflow_dispatch`、concurrency、固定版本、timeout、
-  冷缓存 Electron runtime 安装、早期 bounded evidence initializer、受控
-  D-Bus/Xvfb 准备和 bounded artifact 上传。
+  保留 PR/main push，增加带 `full-matrix` label 的预合并触发、
+  `workflow_dispatch`、concurrency、固定版本、timeout、冷缓存 Electron runtime
+  安装、早期 bounded evidence initializer、受控 D-Bus/Xvfb 准备、required artifact
+  上传和 `phase9a-verification-summary`。
 - `package.json`：公开 `test:headless` 与 `test:ci-contract`。
 - 根 `test:headless` 组合 `contracts-ts`、`realtime-agent`、`api-client-ts` 的
   现有测试和 Desktop headless；不重复 Mobile，也不启动 Renderer。
@@ -179,15 +216,21 @@ userData cleanup 断言均保留。当前本机 `test:renderer-scenario:built` �
 `contracts-security`、`desktop-renderer-linux`、`mobile-static`。完整矩阵
 `e2e` 只依赖 backend；`android-native`/`ios-native` 只依赖 mobile-static；
 `macos-release-smoke` 等待真实质量、renderer、mobile 和 E2E 前置。E2E/native/
-release jobs 仅在 main push 或任意 ref 的 `workflow_dispatch` 运行；artifact
-上传使用 `if: always()`，门禁步骤没有 `continue-on-error`。
+release jobs 在 main push、任意 ref 的 `workflow_dispatch` 或 PR 带
+`full-matrix` label 时运行；其 `success()` 条件不会绕过 `needs` 失败，带标签后的
+后续 synchronize 也会重新进入完整矩阵。`phase9a-verification-summary` 使用
+`always()` 汇总九个 jobs，普通无标签 PR 的 Full Matrix 结果为 `not-requested`，
+请求完整矩阵时 skipped/失败均使 summary 失败。artifact 上传使用
+`if: always()` 和 `if-no-files-found: error`，门禁步骤没有 `continue-on-error`。
 
 Linux renderer evidence artifact 名称为
 `jarvis-phase9a-desktop-renderer-evidence`，保存 bounded `scenario.json`，不
 上传 userData、credential 或秘密。其它 artifact：
 `jarvis-phase9a-mobile-static`、`jarvis-phase9a-e2e-reports`、
 `jarvis-phase9a-android-debug`、`jarvis-phase9a-ios-simulator-debug`、
-`jarvis-phase9a-macos-arm64-release-test`。
+`jarvis-phase9a-macos-arm64-release-test`、
+`jarvis-phase9a-remote-verification`（包含 bounded
+`artifacts/test-reports/phase9a/remote-verification.json`）。
 
 ## Security result
 
@@ -227,7 +270,7 @@ Linux renderer evidence artifact 名称为
 | `pnpm lint` | PASS |
 | `pnpm test:headless` | PASS；contracts 7、realtime 12、API client 4、Desktop unit 160 / wake 17 / package 14；不含 Mobile/Renderer |
 | `pnpm build` | PASS |
-| `pnpm test:ci-contract` | PASS；combined 14/14（sandbox 9/9，workflow 5/5） |
+| `pnpm test:ci-contract` | PASS；combined 15/15（sandbox 9/9，workflow 6/6） |
 | `pnpm check:openapi` | PASS；生成文件 byte-for-byte unchanged |
 | `git diff --exit-code -- artifacts/openapi/openapi.json packages/contracts-ts/src/generated/openapi.ts` | PASS |
 | `pnpm check:codex-schema` | PASS；275 files / 90 ClientRequest / 70 ServerNotification / 10 ServerRequest |
@@ -240,7 +283,7 @@ Linux renderer evidence artifact 名称为
 | `pnpm --filter @jarvis/desktop lint` | PASS |
 | `pnpm --filter @jarvis/desktop run test:unit` | PASS；160/160 |
 | `pnpm --filter @jarvis/desktop run test:wake-word` | PASS；17/17，含真实离线模型 fixture 与 CPU probe |
-| `pnpm --filter @jarvis/desktop run test:package` | PASS；14/14 package/build contracts，另验证 dist 中真实 wake fixture 与 CPU probe |
+| `pnpm --filter @jarvis/desktop run test:package` | PASS；14 个 package/build contracts，另验证 dist 中真实 wake fixture 与 CPU probe |
 | `pnpm --filter @jarvis/desktop build` | PASS |
 | `pnpm --filter @jarvis/desktop test:renderer-scenario:built`（macOS/Node 25） | PASS；最终 evidence 187,506 bytes、mode 0600，严格 observation/exit/stderr/profile/process/console 字段全部通过 |
 | 最终 built renderer scenario 连续 3 次（macOS/Node 25） | PASS；3/3，单次 evidence 187,506 bytes |
@@ -272,15 +315,16 @@ Linux renderer evidence artifact 名称为
 | --- | --- | --- | --- | --- |
 | #23 / `33623011371` | `a028fca` | phase-0 Test workspace renderer | failed（原始 baseline） | none recorded |
 | #24 / `33719867602` | `198385d` | phase-0 Test workspace renderer | failed（实际 baseline；sandbox SIGTRAP） | none recorded |
-| PR run | `PENDING` | backend-quality | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
-| PR run | `PENDING` | workspace-quality | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
-| PR run | `PENDING` | contracts-security | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
-| PR run | `PENDING` | desktop-renderer-linux | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-desktop-renderer-evidence` |
-| PR run | `PENDING` | mobile-static | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-mobile-static` |
-| Full Matrix dispatch | `PENDING` | e2e | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-e2e-reports` |
-| Full Matrix dispatch | `PENDING` | android-native | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-android-debug` |
-| Full Matrix dispatch | `PENDING` | ios-native | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-ios-simulator-debug` |
-| Full Matrix dispatch | `PENDING` | macos-release-smoke | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-macos-arm64-release-test` |
+| PR candidate（未创建） | `NOT_RUN` | backend-quality | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
+| PR candidate（未创建） | `NOT_RUN` | workspace-quality | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
+| PR candidate（未创建） | `NOT_RUN` | contracts-security | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
+| PR candidate（未创建） | `NOT_RUN` | desktop-renderer-linux | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-desktop-renderer-evidence` |
+| PR candidate（未创建） | `NOT_RUN` | mobile-static | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-mobile-static` |
+| PR full-matrix label（未创建） | `NOT_RUN` | e2e | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-e2e-reports` |
+| PR full-matrix label（未创建） | `NOT_RUN` | android-native | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-android-debug` |
+| PR full-matrix label（未创建） | `NOT_RUN` | ios-native | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-ios-simulator-debug` |
+| PR full-matrix label（未创建） | `NOT_RUN` | macos-release-smoke | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-macos-arm64-release-test` |
+| PR full-matrix label（未创建） | `NOT_RUN` | phase9a-verification-summary | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-remote-verification` |
 
 没有把 #24 当作修复后证据，也没有把 skipped 写成 passed。远程实际 job
 conclusion、artifact 上传和 Node 24.19.0 生效状态，必须由主代理在具备远程
@@ -291,19 +335,64 @@ conclusion、artifact 上传和 Node 24.19.0 生效状态，必须由主代理�
 以下命令供具备 GitHub 权限的操作者执行；它们不会改变本报告当前的远程状态，
 只有实际运行结果才能更新上面的 `NOT_RUN / UNVERIFIED` 记录：
 
-```sh
+```bash
+set -euo pipefail
 gh auth status
 git push -u origin codex/phase9a-ci-recovery
-gh pr create --base main --head codex/phase9a-ci-recovery --title "ci: restore green CI and isolate release gates" --body-file docs/phases/phase-9a-ci-recovery-report.md
-gh pr checks --watch
+gh label create full-matrix --description "Run the complete cross-platform verification matrix" --color "5319E7" --force
+gh pr create --base main --head codex/phase9a-ci-recovery --title "ci: restore green CI and isolate release gates" --body-file docs/phases/phase-9a-ci-recovery-report.md --label full-matrix
 phase9a_candidate_sha="$(git rev-parse HEAD)"
-gh workflow run .github/workflows/ci.yml --ref codex/phase9a-ci-recovery
-phase9a_run_id="$(gh run list --workflow .github/workflows/ci.yml --branch codex/phase9a-ci-recovery --event workflow_dispatch --commit "$phase9a_candidate_sha" --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh pr checks --watch
+phase9a_runs_json="$(gh run list --workflow .github/workflows/ci.yml --branch codex/phase9a-ci-recovery --event pull_request --limit 20 --json databaseId,headSha,event)"
+phase9a_run_ids="$(jq -r --arg candidate_sha "$phase9a_candidate_sha" '.[] | select(.event == "pull_request" and .headSha == $candidate_sha) | .databaseId' <<<"$phase9a_runs_json")"
+phase9a_run_id=""
+while IFS= read -r candidate_run_id; do
+  test -n "$candidate_run_id" || continue
+  phase9a_candidate_run="$(gh run view "$candidate_run_id" --json headSha,event,jobs)"
+  if jq -e --arg candidate_sha "$phase9a_candidate_sha" '
+    .headSha == $candidate_sha
+    and .event == "pull_request"
+    and ([.jobs[].name] as $job_names
+      | (["e2e", "android-native", "ios-native", "macos-release-smoke"]
+        | all(. as $name | ($job_names | index($name)) != null))
+      and ([.jobs[]
+        | select(.name == "e2e" or .name == "android-native" or .name == "ios-native" or .name == "macos-release-smoke")
+        | .conclusion] | all(. == null or . != "skipped")))
+  ' <<<"$phase9a_candidate_run" >/dev/null; then
+    phase9a_run_id="$candidate_run_id"
+    break
+  fi
+done <<<"$phase9a_run_ids"
 test -n "$phase9a_run_id"
-gh run watch "$phase9a_run_id" --exit-status
-gh run view "$phase9a_run_id" --json headSha,status,conclusion,jobs
+phase9a_watch_status=0
+gh run watch "$phase9a_run_id" --exit-status || phase9a_watch_status=$?
+phase9a_run_json="$(gh run view "$phase9a_run_id" --json headSha,event,status,conclusion,jobs)"
+jq -e --arg candidate_sha "$phase9a_candidate_sha" '
+  .headSha == $candidate_sha
+  and .event == "pull_request"
+  and .conclusion == "success"
+  and ([.jobs[]
+    | select(.name == "e2e" or .name == "android-native" or .name == "ios-native" or .name == "macos-release-smoke")
+    | .conclusion] | length == 4 and all(. == "success"))
+' <<<"$phase9a_run_json" >/dev/null
+phase9a_artifact_directory="$(mktemp -d)"
+trap 'rm -rf "$phase9a_artifact_directory"' EXIT
+gh run download "$phase9a_run_id" --name jarvis-phase9a-remote-verification --dir "$phase9a_artifact_directory"
+phase9a_evidence_file="$(find "$phase9a_artifact_directory" -type f -name remote-verification.json -print -quit)"
+test -n "$phase9a_evidence_file"
+jq -e --arg candidate_sha "$phase9a_candidate_sha" '
+  .fullMatrixRequested == true
+  and .fullMatrix.status == "requested"
+  and .headSha == $candidate_sha
+  and .overallStatus == "success"
+  and ([.jobResults["backend-quality"], .jobResults["workspace-quality"], .jobResults["contracts-security"], .jobResults["desktop-renderer-linux"], .jobResults["mobile-static"], .jobResults["e2e"], .jobResults["android-native"], .jobResults["ios-native"], .jobResults["macos-release-smoke"]] | length == 9 and all(. == "success"))
+' "$phase9a_evidence_file" >/dev/null
+test "$phase9a_watch_status" -eq 0
 gh api "repos/HoboCY/Jarvis/actions/runs/$phase9a_run_id/artifacts"
 ```
+
+本次预合并证明使用 PR 的 `full-matrix` label；`workflow_dispatch` 只在该 workflow
+已经进入默认分支后用于未来 ref，不作为首次合并前的唯一入口。
 
 ## Review, risks and rollback
 
@@ -333,6 +422,6 @@ credential、数据库或其它生成物。不得用回滚来隐藏真实 CI 失
 ## 下一步
 
 当前 scoped code/CI commits 已完成且最终 SHA 已锁定。用户/操作者需推送当前分支，
-以最终 HEAD 创建 PR，等待 core jobs，再对同一最终 SHA 通过 `workflow_dispatch` 执行
-Full Matrix；记录每个 job 的实际 conclusion、artifact 和失败日志。远程验证完成前
-不得标记 Phase 9A `PASS`。
+以最终 HEAD 创建 PR 并添加 `full-matrix` label，等待 core 与 Full Matrix jobs，记录
+每个 job 的实际 conclusion、artifact 和失败日志。远程验证完成前不得标记 Phase 9A
+`PASS`；本次不得把预合并 `workflow_dispatch` 当作替代入口。

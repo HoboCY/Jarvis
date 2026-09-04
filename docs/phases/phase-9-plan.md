@@ -18,7 +18,8 @@ CI 变绿而提前标记完成。
 拆分 Desktop headless、renderer、Backend、contracts/security、mobile 和发布
 门禁，并保留失败证据和严格退出/清理断言。使用固定 Node `24.19.0`、pnpm
 `10.24.0`、.NET `10.0.100` 与 Electron `44.0.0`；任务分支可通过
-`workflow_dispatch` 执行完整矩阵。
+`pull_request` 上的 `full-matrix` 标签在合并前执行完整矩阵；`workflow_dispatch`
+保留给该 workflow 已进入默认分支后的未来任意 ref 验证。
 
 ### Phase 9B：真实 Desktop Golden Path
 
@@ -73,9 +74,15 @@ Realtime/任务/通知恢复和版本可追溯性验收。Metro bundle 和静态
   和 owned process cleanup；sandbox 不允许通过参数、环境变量或 UI 选项关闭。
 - `test:headless` 不启动 GUI，但保留 unit、真实 wake-word fixture/CPU probe、
   package/build contract；完整 `test` 还运行 built renderer scenario。
-- PR 默认独立运行核心质量门禁；`main` push 与任意 ref 的 `workflow_dispatch`
-  运行 E2E/native/release 完整矩阵。artifact 上传可 `always`，质量门禁不可
-  `continue-on-error`。
+- PR 默认独立运行核心质量门禁；带 `full-matrix` 标签的 PR、`main` push 与任意
+  ref 的 `workflow_dispatch` 运行 E2E/native/release 完整矩阵，后续 `synchronize`
+  事件继续保留该标签门控。Full Matrix 保留原有 `needs`，标签不得绕过失败前置；
+  artifact 上传可 `always`，质量门禁不可 `continue-on-error`。
+- `phase9a-verification-summary` 以 `always()` 汇总九个 required jobs，向
+  `jarvis-phase9a-remote-verification` 上传 bounded
+  `artifacts/test-reports/phase9a/remote-verification.json`；普通无标签 PR 的
+  Full Matrix 明确为 `not-requested`，带标签、`main` push 或
+  `workflow_dispatch` 中任何 skipped/失败均使汇总失败。
 
 ## 后续进入条件
 

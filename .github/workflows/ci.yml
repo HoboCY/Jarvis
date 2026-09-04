@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -215,7 +216,7 @@ jobs:
         with:
           name: jarvis-phase9a-desktop-renderer-evidence
           path: ${{ runner.temp }}/jarvis-phase9a-renderer/scenario.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   mobile-static:
@@ -264,11 +265,11 @@ jobs:
           path: |
             src/clients/mobile/android/app/src/main/assets/index.android.bundle
             src/clients/mobile/ios/main.jsbundle
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   e2e:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ success() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-matrix'))) }}
     needs: backend-quality
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -303,11 +304,11 @@ jobs:
         with:
           name: jarvis-phase9a-e2e-reports
           path: artifacts/test-reports/phase6-e2e
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   android-native:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ success() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-matrix'))) }}
     needs: mobile-static
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -366,11 +367,11 @@ jobs:
         with:
           name: jarvis-phase9a-android-debug
           path: src/clients/mobile/android/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   ios-native:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ success() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-matrix'))) }}
     needs: mobile-static
     runs-on: macos-15
     timeout-minutes: 45
@@ -417,11 +418,11 @@ jobs:
         with:
           name: jarvis-phase9a-ios-simulator-debug
           path: ${{ runner.temp }}/JarvisMobileDerivedData/Build/Products/Debug-iphonesimulator/JarvisMobile.app
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   macos-release-smoke:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ success() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-matrix'))) }}
     needs: [backend-quality, workspace-quality, contracts-security, desktop-renderer-linux, mobile-static, e2e]
     runs-on: macos-15
     timeout-minutes: 60
@@ -474,5 +475,141 @@ jobs:
             src/clients/desktop/out/make
             artifacts/services
             artifacts/releases
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
+
+  phase9a-verification-summary:
+    if: ${{ always() }}
+    needs: [backend-quality, workspace-quality, contracts-security, desktop-renderer-linux, mobile-static, e2e, android-native, ios-native, macos-release-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      FULL_MATRIX_REQUESTED: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-matrix'))) }}
+      HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      BACKEND_RESULT: ${{ needs['backend-quality'].result }}
+      WORKSPACE_RESULT: ${{ needs['workspace-quality'].result }}
+      CONTRACTS_RESULT: ${{ needs['contracts-security'].result }}
+      DESKTOP_RENDERER_RESULT: ${{ needs['desktop-renderer-linux'].result }}
+      MOBILE_STATIC_RESULT: ${{ needs['mobile-static'].result }}
+      E2E_RESULT: ${{ needs.e2e.result }}
+      ANDROID_RESULT: ${{ needs['android-native'].result }}
+      IOS_RESULT: ${{ needs['ios-native'].result }}
+      MACOS_RESULT: ${{ needs['macos-release-smoke'].result }}
+    steps:
+      - name: Generate bounded remote verification evidence
+        run: |
+          set -euo pipefail
+          evidence_path="artifacts/test-reports/phase9a/remote-verification.json"
+          status_path="$RUNNER_TEMP/phase9a-summary-status"
+          mkdir -p "$(dirname "$evidence_path")"
+
+          full_matrix_status="not-requested"
+          full_matrix_requested_json=false
+          if [[ "$FULL_MATRIX_REQUESTED" == "true" ]]; then
+            full_matrix_status="requested"
+            full_matrix_requested_json=true
+          fi
+
+          e2e_result="$E2E_RESULT"
+          android_result="$ANDROID_RESULT"
+          ios_result="$IOS_RESULT"
+          macos_result="$MACOS_RESULT"
+          if [[ "$FULL_MATRIX_REQUESTED" != "true" ]]; then
+            e2e_result="not-requested"
+            android_result="not-requested"
+            ios_result="not-requested"
+            macos_result="not-requested"
+          fi
+
+          overall_status="success"
+          for result in \
+            "$BACKEND_RESULT" \
+            "$WORKSPACE_RESULT" \
+            "$CONTRACTS_RESULT" \
+            "$DESKTOP_RENDERER_RESULT" \
+            "$MOBILE_STATIC_RESULT"; do
+            if [[ "$result" != success ]]; then
+              overall_status="failure"
+            fi
+          done
+
+          if [[ "$FULL_MATRIX_REQUESTED" == "true" ]]; then
+            for result in \
+              "$E2E_RESULT" \
+              "$ANDROID_RESULT" \
+              "$IOS_RESULT" \
+              "$MACOS_RESULT"; do
+              if [[ "$result" != success ]]; then
+                overall_status="failure"
+              fi
+            done
+          fi
+
+          generated_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          jq -n \
+            --arg workflow_name "$GITHUB_WORKFLOW" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg ref "$GITHUB_REF" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg full_matrix_status "$full_matrix_status" \
+            --argjson full_matrix_requested "$full_matrix_requested_json" \
+            --arg backend_result "$BACKEND_RESULT" \
+            --arg workspace_result "$WORKSPACE_RESULT" \
+            --arg contracts_result "$CONTRACTS_RESULT" \
+            --arg desktop_renderer_result "$DESKTOP_RENDERER_RESULT" \
+            --arg mobile_static_result "$MOBILE_STATIC_RESULT" \
+            --arg e2e_result "$e2e_result" \
+            --arg android_result "$android_result" \
+            --arg ios_result "$ios_result" \
+            --arg macos_result "$macos_result" \
+            --arg overall_status "$overall_status" \
+            --arg generated_at_utc "$generated_at_utc" \
+            '{
+              workflowName: $workflow_name,
+              runId: $run_id,
+              runAttempt: $run_attempt,
+              eventName: $event_name,
+              ref: $ref,
+              headSha: $head_sha,
+              repository: $repository,
+              fullMatrixRequested: $full_matrix_requested,
+              fullMatrix: {
+                requested: $full_matrix_requested,
+                status: $full_matrix_status
+              },
+              jobResults: {
+                "backend-quality": $backend_result,
+                "workspace-quality": $workspace_result,
+                "contracts-security": $contracts_result,
+                "desktop-renderer-linux": $desktop_renderer_result,
+                "mobile-static": $mobile_static_result,
+                "e2e": $e2e_result,
+                "android-native": $android_result,
+                "ios-native": $ios_result,
+                "macos-release-smoke": $macos_result
+              },
+              overallStatus: $overall_status,
+              generatedAtUtc: $generated_at_utc
+            }' > "$evidence_path"
+          printf '%s\n' "$overall_status" > "$status_path"
+
+      - name: Upload remote verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-phase9a-remote-verification
+          path: artifacts/test-reports/phase9a/remote-verification.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce verification summary status
+        if: always()
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/phase9a-summary-status"
+          test "$(cat "$RUNNER_TEMP/phase9a-summary-status")" = success
