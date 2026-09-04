@@ -6,6 +6,14 @@ import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
+import {
+  calculateWorstCaseAuditDuration,
+  DEFAULT_PROCESS_TIMEOUT_MS,
+  MAX_ATTEMPTS,
+  MAX_PROCESS_TIMEOUT_MS,
+  MAX_RETRY_BACKOFF_MS,
+  WORKSPACE_QUALITY_JOB_BUDGET_MS
+} from "./check-package-audit.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -272,6 +280,101 @@ test("CI keeps quality gates independent and full matrix dispatchable", async ()
   for (const job of coreJobs) {
     assert.doesNotMatch(job, /needs:/);
   }
+});
+
+test("mobile static bootstrap builds shared packages before mobile typecheck", async () => {
+  const workflow = await read(".github/workflows/ci.yml");
+  const mobile = jobSection(workflow, "mobile-static");
+  const installIndex = mobile.indexOf("pnpm install --frozen-lockfile");
+  const typecheckIndex = mobile.indexOf("pnpm --filter @jarvis/mobile typecheck");
+  const buildCommands = [
+    "pnpm --filter @jarvis/contracts-ts build",
+    "pnpm --filter @jarvis/realtime-agent build",
+    "pnpm --filter @jarvis/api-client-ts build"
+  ];
+
+  assert.ok(installIndex >= 0, "mobile static must keep the frozen install.");
+  assert.ok(typecheckIndex > installIndex, "mobile typecheck must follow frozen install.");
+  const buildIndexes = buildCommands.map(command => mobile.indexOf(command));
+  for (const index of buildIndexes) {
+    assert.ok(index > installIndex && index < typecheckIndex,
+      "shared package builds must follow install and precede mobile typecheck.");
+  }
+  assert.ok(buildIndexes[0] < buildIndexes[1] && buildIndexes[1] < buildIndexes[2],
+    "contracts, realtime agent, and API client must build in order.");
+  assert.match(mobile, /bundle:android/);
+  assert.match(mobile, /bundle:ios/);
+});
+
+test("package audit is a bounded required runner after workspace quality gates", async () => {
+  const workflow = await read(".github/workflows/ci.yml");
+  const rootPackage = JSON.parse(await read("package.json"));
+  const runner = await read("eng/scripts/check-package-audit.mjs");
+  const workspace = jobSection(workflow, "workspace-quality");
+  const typecheckIndex = workspace.indexOf("pnpm typecheck");
+  const lintIndex = workspace.indexOf("pnpm lint");
+  const headlessIndex = workspace.indexOf("pnpm test:headless");
+  const buildIndex = workspace.indexOf("pnpm build");
+  const auditIndex = workspace.indexOf("pnpm check:package-audit");
+
+  assert.equal(rootPackage.scripts["check:package-audit"], "node eng/scripts/check-package-audit.mjs");
+  assert.match(rootPackage.scripts["test:ci-contract"], /check-package-audit\.test\.mjs/);
+  assert.ok(typecheckIndex < lintIndex && lintIndex < headlessIndex
+    && headlessIndex < buildIndex && buildIndex < auditIndex,
+  "audit must remain required and follow typecheck, lint, headless tests, and build.");
+  assert.match(runner, /registry=https:\/\/registry\.npmjs\.org/);
+  assert.match(runner, /audit-level=high/);
+  assert.match(runner, /MAX_ATTEMPTS/);
+  assert.match(runner, /MAX_RETRY_BACKOFF_MS/);
+  assert.match(runner, /DEFAULT_PROCESS_TIMEOUT_MS/);
+  assert.match(runner, /AUDIT_COMMAND\s*=\s*["']pnpm["']/);
+  assert.match(runner, /["']audit["']/);
+  assert.match(runner, /runAuditProcess/);
+  assert.doesNotMatch(runner, /Promise\.race/);
+  assert.match(runner, /attempt === maxAttempts/);
+  assert.match(runner, /maxOutputBytes/);
+  assert.doesNotMatch(workspace, /continue-on-error\s*:/);
+});
+
+test("package audit timeout and cleanup stay within the workspace job budget", async () => {
+  const workflow = await read(".github/workflows/ci.yml");
+  const runner = await read("eng/scripts/check-package-audit.mjs");
+  const workspace = jobSection(workflow, "workspace-quality");
+  const jobTimeoutMatch = workspace.match(/timeout-minutes:\s*(\d+)/);
+
+  assert.equal(jobTimeoutMatch?.[1], "30");
+  assert.ok(DEFAULT_PROCESS_TIMEOUT_MS > 250_000,
+    "default audit deadline must cover the known pnpm transport retry window.");
+  assert.ok(MAX_PROCESS_TIMEOUT_MS <= 600_000);
+  assert.ok(calculateWorstCaseAuditDuration({
+    maxAttempts: MAX_ATTEMPTS,
+    processTimeoutMs: MAX_PROCESS_TIMEOUT_MS,
+    retryBackoffMs: MAX_RETRY_BACKOFF_MS
+  }) < WORKSPACE_QUALITY_JOB_BUDGET_MS);
+  assert.match(runner, /detached:\s*process\.platform !== ["']win32["']/);
+  assert.match(runner, /SIGTERM/);
+  assert.match(runner, /SIGKILL/);
+  assert.match(runner, /close/);
+  assert.match(runner, /cleanupComplete/);
+  assert.match(runner, /processGroupGone/);
+});
+
+test("Phase 9A report preserves the real partial-failure state and existing PR flow", async () => {
+  const report = await read("docs/phases/phase-9a-ci-recovery-report.md");
+
+  assert.match(report, /^当前结论：`REMOTE_PARTIAL_FAILED`。$/m);
+  assert.doesNotMatch(report, /LOCAL_GREEN_NEW_CANDIDATE_UNVERIFIED/);
+  assert.match(report, /GitHub Actions `desktop-renderer-linux` \| PASS.*Run #26/);
+  assert.doesNotMatch(report, /GitHub Actions `desktop-renderer-linux` \| NOT_RUN/);
+  assert.doesNotMatch(report, /gh pr create/);
+  assert.match(report, /existing PR #7/);
+  assert.match(report, /报告形成时/);
+  assert.doesNotMatch(report, /GitHub Actions 仍未验证/);
+  assert.match(report, /Run #26.*\n.*desktop-renderer-linux.*success/);
+  assert.match(report, /mobile-static.*not produced/i);
+  assert.match(report, /android-native.*not produced/i);
+  assert.match(report, /ios-native.*not produced/i);
+  assert.match(report, /macos-release-smoke.*not produced/i);
 });
 
 function workflowStepSection(job, stepName) {

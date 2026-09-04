@@ -70,9 +70,6 @@ jobs:
       - name: Install TypeScript workspace with frozen lockfile
         run: pnpm install --frozen-lockfile
 
-      - name: Audit npm packages
-        run: pnpm check:package-audit
-
       - name: Typecheck workspace
         run: pnpm typecheck
 
@@ -84,6 +81,9 @@ jobs:
 
       - name: Build workspace
         run: pnpm build
+
+      - name: Audit npm packages
+        run: pnpm check:package-audit
 
   contracts-security:
     runs-on: ubuntu-latest
@@ -241,6 +241,15 @@ jobs:
 
       - name: Install TypeScript workspace with frozen lockfile
         run: pnpm install --frozen-lockfile
+
+      - name: Build shared contracts package
+        run: pnpm --filter @jarvis/contracts-ts build
+
+      - name: Build shared realtime agent package
+        run: pnpm --filter @jarvis/realtime-agent build
+
+      - name: Build shared API client package
+        run: pnpm --filter @jarvis/api-client-ts build
 
       - name: Typecheck React Native mobile client
         run: pnpm --filter @jarvis/mobile typecheck
