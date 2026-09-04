@@ -2,17 +2,25 @@
 
 ## 结论
 
-当前结论：`LOCAL_GREEN_REMOTE_UNVERIFIED`。
+当前结论：`REMOTE_PARTIAL_FAILED`。
+
+本轮 new candidate 已达到 local green，但仍为 remote unverified；new candidate SHA
+暂待最终提交，不能把本地结果写成新的远程成功。
+
+PR #7 的 previous candidate `396441c` 在 Run #26（ID `33867878871`）得到
+`REMOTE_PARTIAL_FAILED`；报告形成时本轮修复尚未提交，因此 new candidate SHA 暂待最终提交，
+不能把本地结果写成新的远程成功。
 
 本工作树已完成 Linux sandbox 路径、Desktop 测试拆分、Renderer observation
-可靠性修复和 CI job DAG 的本地合同验证。由于当前环境没有 GitHub CLI，未能对
-任务分支创建 PR 或触发/读取新的 GitHub Actions；因此不能把本地绿色写成远程
-通过，也不能把 Phase 9A 标记为 `PASS`。
+可靠性修复、CI job DAG，以及本轮 Mobile bootstrap 与 package audit runner 的
+本地合同验证。Run #26 的远程 partial failure 已记录；本轮没有创建、合并或写入
+新的远程验证，因此不能把本地绿色写成远程通过，也不能把 Phase 9A 标记为 `PASS`。
 
-本轮 Phase 9A-R 只补齐预合并触发契约与远程证据汇总实现，阶段状态仍为
-`LOCAL_GREEN_REMOTE_UNVERIFIED`。最终远程 candidate SHA、Run ID、Job conclusion
-和 artifact 清单必须来自 PR checks 与 `jarvis-phase9a-remote-verification`
-artifact，不能由 tracked report 自行推断。
+本轮 Phase 9A-R2 修复 Mobile static 的共享包 bootstrap、workspace audit 顺序和
+bounded package audit runner。阶段状态仍为 Run #26 的
+`REMOTE_PARTIAL_FAILED`，当前 new candidate 仅有 local green / remote unverified；最终远程
+candidate SHA、Run ID、Job conclusion 和 artifact 清单必须来自 PR checks 与
+`jarvis-phase9a-remote-verification` artifact，不能由 tracked report 自行推断。
 
 ## Phase 9A-R 预合并触发与 evidence
 
@@ -38,7 +46,10 @@ Phase 9A PR 通过 `full-matrix` label 运行完整矩阵，并将 `pull_request
 | --- | --- |
 | 用户提示中的 prompt baseline | `a028fca7212d1b63e347f65c4a444be693fa5c12` |
 | 实际起始 SHA / 当前 origin/main | `198385d1429b46167858457a920b5f370858363b` |
-| 结束实现 SHA（报告提交的 parent） | `c757004bc1d4f37235baf563a4e1480b5d4d6fb2` |
+| PR #7 previous candidate SHA | `396441c19b9d7851d91363ee747d9f6253654427` |
+| 本轮 new candidate SHA | `PENDING_FINAL_COMMIT_SHA` |
+| PR #7 Run / ID | `#26` / `33867878871` |
+| PR #7 remote status | `REMOTE_PARTIAL_FAILED` |
 | 分支 | `codex/phase9a-ci-recovery` |
 | 本地操作系统 | macOS arm64 |
 | 本地 Node / pnpm | `v25.0.0` / `10.24.0` |
@@ -48,6 +59,14 @@ Phase 9A PR 通过 `full-matrix` label 运行完整矩阵，并将 `pull_request
 
 本机 Node `25.0.0` 不是目标 CI 的等价环境；其本地成功只能作为开发验证，
 不能替代 Node `24.19.0` Linux 证据。
+
+PR #7 Run #26 的四个已远程通过 jobs 是 `backend-quality`、`contracts-security`、
+`desktop-renderer-linux` 和 `e2e`。`workspace-quality` 因 `ERR_SOCKET_TIMEOUT`
+传输错误失败；这不是漏洞报告。`mobile-static` 因共享包未在 Mobile typecheck
+前构建而出现 TS2307。Android、iOS、macOS 依赖失败的 Mobile/前置 jobs 而为
+`skipped`；不能把它们写成 passed。remote verification artifact 的
+`overallStatus` 为 failure，故 Run #26 是 `REMOTE_PARTIAL_FAILED`。Renderer 的
+hosted gate 已闭环并保留严格 observation/evidence 语义。
 
 ## 原始 CI RED 与根因
 
@@ -80,8 +99,9 @@ resolver 现从真实 binary 的 canonical dirname 推导同目录 sandbox，并
 打开并持有 descriptor，特权 mutator 只打开固定数字 proc-fd、校验传入 dev/ino/nlink
 后用自身 fd 执行 `fchown/fchmod`，再以同一 fd 校验 root:root/4755；随后非特权
 helper 重新检查当前目录项恒等性，shell 再调用同一 resolver 要求路径与初次完全
-一致。fixture 和静态合同为本地证据；最新 Node 24.19.0 独立 Debian 证据见下表，
-GitHub Actions 仍未验证。
+一致。fixture 和静态合同为本地证据；该段记录的是当时的 Node 24.19.0 独立 Debian
+验证窗口。随后 PR #7 Run #26 的 `desktop-renderer-linux` 已 success（见下表）；本轮
+new candidate 的同 SHA hosted evidence 仍待后续验证。
 
 ### Node 24 Linux D-Bus 集成修正
 
@@ -155,12 +175,39 @@ RED：合同测试新增了 `pull_request` 的 `labeled`/`synchronize` 触发、
 `full-matrix` label 门控、`success()` 前置、九-job summary、required artifact 和
 bounded evidence 字段；在 workflow 尚未实现时因缺少 `pull_request.types` 先失败。
 
-GREEN：Full Matrix 在带标签 PR、`main` push 或 `workflow_dispatch` 时运行，
+GREEN（历史 R1）：Full Matrix 在带标签 PR、`main` push 或 `workflow_dispatch` 时运行，
 `phase9a-verification-summary` 对普通无标签 PR 将四个 Full Matrix result 规范化为
 `not-requested`，对请求场景保留真实 result 并将 skipped/失败传播为非零；summary
 artifact 在最终状态 gate 之前上传。PR evidence 使用
 `github.event.pull_request.head.sha`，其它事件使用 `github.sha`。当前合同测试
-`pnpm test:ci-contract` 通过 `15/15`；这仍是本地 GREEN，不是远程证据。
+历史 R1 的合同测试为 `15/15`；这仍是本地 GREEN，不是远程证据。
+
+### Phase 9A-R2 Mobile bootstrap 与 package audit runner
+
+RED：新增公共 seam 测试先验证 Mobile static 必须在 typecheck 前按
+`contracts-ts → realtime-agent → api-client-ts` 构建，以及 audit runner 的固定
+registry、`audit-level=high`、重试预算和 workspace 顺序；起始 workflow 缺少三个
+build steps，root script 仍直接调用 `pnpm audit`，因此新增合同先以失败结束。
+
+本轮复核 RED：timeout budget/cleanup、JSON secret redaction 和报告远程状态合同先行
+失败；旧 runner 的默认 `30000ms` deadline 会早于已知约 `250s` 的 pnpm 内置 transport
+重试窗口返回 child timeout，SIGTERM-only 路径也无法证明 descendant 已退出，摘要会
+回显 quoted JSON secret/path，报告还保留了错误的 local-only 状态、NOT_RUN renderer
+记录和新建 PR 命令。
+
+GREEN：`mobile-static` 在 frozen install 后显式按上述顺序构建三个共享包，再执行
+Mobile typecheck/test/bundles；`workspace-quality` 将 required audit 移到 typecheck、
+lint、headless tests 和 build 之后。`check-package-audit.mjs` 只对严格识别的
+transport transient（含 nested metadata timeout/reset/DNS、明确 registry 429/5xx）
+有限重试；漏洞报告、锁文件/参数/权限/unknown/malformed/异常子进程和子进程
+timeout 立即失败，attempt/backoff/timeout/stdout/stderr/summary 都有界且脱敏。
+默认单次 audit deadline 为 `300000ms`；超时后 supervisor 发送 `SIGTERM`，等待
+`1000ms`，再对 POSIX detached process group 发送 `SIGKILL`，并在一个 bounded cleanup
+wait 内等待 child `close` 与 process group 清理；若仍未完成则 destroy stdio、unref
+并以 `cleanupComplete=false` 返回非成功结果。`node --test eng/scripts/check-package-audit.test.mjs`
+通过 `22/22`，`pnpm test:ci-contract` 通过 `41/41`；live audit exit 0、runner
+1 attempt，沿用
+`pnpm-workspace.yaml` 的 audit policy，未将 timeout 或 ignored finding 写成漏洞。
 
 ### Renderer observation
 
@@ -181,8 +228,21 @@ userData cleanup 断言均保留。当前本机 `test:renderer-scenario:built` �
   保留 PR/main push，增加带 `full-matrix` label 的预合并触发、
   `workflow_dispatch`、concurrency、固定版本、timeout、冷缓存 Electron runtime
   安装、早期 bounded evidence initializer、受控 D-Bus/Xvfb 准备、required artifact
-  上传和 `phase9a-verification-summary`。
-- `package.json`：公开 `test:headless` 与 `test:ci-contract`。
+  上传和 `phase9a-verification-summary`；Mobile static 在 typecheck 前构建三个
+  共享包，workspace audit 保持 required 且位于其它 workspace gates 之后。
+- `package.json`：公开 `test:headless`、`test:ci-contract` 和
+  `check:package-audit` runner。
+- `eng/scripts/check-package-audit.mjs`：固定官方 npm registry 与 high audit level，
+  由真实 child supervisor 管理 `300000ms` deadline、detached POSIX process group、
+  TERM/KILL cleanup 和 close 等待；仅重试明确 transport transient，并让 failure
+  summary 只包含 allowlisted markers。
+- `eng/scripts/check-package-audit.test.mjs`：22 条公共 runner seam 测试，覆盖
+  timeout retry/耗尽、漏洞/unknown/malformed/lockfile/permission、registry 429/5xx、
+  子进程 timeout/异常、真实 spawned shim 的 descendant cleanup、non-closing child 的
+  bounded settle、正常 exit descendant drain、CI deadline budget、
+  bounded output 和 JSON secret/path 脱敏。
+- `eng/scripts/ci-workflow-contract.test.mjs`：新增 Mobile bootstrap 顺序、package
+  audit runner 参数/有界重试/workspace 顺序合同，保留 summary/full-matrix truth table。
 - 根 `test:headless` 组合 `contracts-ts`、`realtime-agent`、`api-client-ts` 的
   现有测试和 Desktop headless；不重复 Mobile，也不启动 Renderer。
 - `src/clients/desktop/package.json`：拆出 `test:unit`、`test:wake-word`、
@@ -222,6 +282,11 @@ release jobs 在 main push、任意 ref 的 `workflow_dispatch` 或 PR 带
 `always()` 汇总九个 jobs，普通无标签 PR 的 Full Matrix 结果为 `not-requested`，
 请求完整矩阵时 skipped/失败均使 summary 失败。artifact 上传使用
 `if: always()` 和 `if-no-files-found: error`，门禁步骤没有 `continue-on-error`。
+
+`workspace-quality` 的 npm audit 仍是 required，但执行顺序为 typecheck、lint、
+headless tests、build、audit；audit runner 固定调用官方
+`pnpm audit --registry=https://registry.npmjs.org --audit-level=high`，保留
+`pnpm-workspace.yaml` audit policy。
 
 Linux renderer evidence artifact 名称为
 `jarvis-phase9a-desktop-renderer-evidence`，保存 bounded `scenario.json`，不
@@ -265,12 +330,13 @@ Linux renderer evidence artifact 名称为
 | `dotnet list Jarvis.sln package --vulnerable --include-transitive` | PASS；13 projects 未报告 vulnerable package |
 | `dotnet ef migrations has-pending-model-changes ...` | PASS；无 pending model changes |
 | `pnpm install --frozen-lockfile` | PASS；本机 Node 25 engine warning，非等价 CI |
-| `pnpm check:package-audit` | PASS（exit 0）；2 moderate、3 个由现有 audit policy 忽略的 high，未误报为零漏洞 |
+| `pnpm check:package-audit` | PASS（exit 0）；runner 1 attempt，官方 registry/high level，沿用 workspace audit policy；默认 deadline 300000ms，未观察 timeout，未把 ignored finding 写成零漏洞 |
 | `pnpm typecheck` | PASS |
 | `pnpm lint` | PASS |
 | `pnpm test:headless` | PASS；contracts 7、realtime 12、API client 4、Desktop unit 160 / wake 17 / package 14；不含 Mobile/Renderer |
 | `pnpm build` | PASS |
-| `pnpm test:ci-contract` | PASS；combined 15/15（sandbox 9/9，workflow 6/6） |
+| `node --test eng/scripts/check-package-audit.test.mjs` | PASS；22/22 |
+| `pnpm test:ci-contract` | PASS；combined 41/41（sandbox 9/9，workflow 10/10，audit runner 22/22） |
 | `pnpm check:openapi` | PASS；生成文件 byte-for-byte unchanged |
 | `git diff --exit-code -- artifacts/openapi/openapi.json packages/contracts-ts/src/generated/openapi.ts` | PASS |
 | `pnpm check:codex-schema` | PASS；275 files / 90 ClientRequest / 70 ServerNotification / 10 ServerRequest |
@@ -294,7 +360,13 @@ Linux renderer evidence artifact 名称为
 | `pnpm check:mobile-native-config -- --require-bundles` | PASS |
 | `tests/e2e/run-e2e.sh` | PASS；8 named E2E + 88 focused API integration + 41 device = 137 |
 | `git diff --check` | PASS |
-| `git status --short` | PASS；仅列出本票 12 个 owned paths |
+| `git status --short` | PASS；仅有本票 owned paths 与预先存在的未跟踪 `docs/phases/phase-9a-r-result-summary.md`；摘要未修改/删除/暂存 |
+| clean Mobile worktree | PASS；`/private/var/folders/lb/k1l6m22d4k32ys00l52cf__m0000gn/T/jarvis-phase9a-mobile-XXXXXX.eF6CFkzF2W` 从 detached `HEAD 396441c` 创建，无 node_modules/dist 复用 |
+| clean `pnpm install --frozen-lockfile` | PASS；1249 packages，Node 25 engine warning 仅因本机版本 |
+| clean shared builds | PASS；按 `contracts-ts → realtime-agent → api-client-ts` 顺序各 exit 0 |
+| clean Mobile typecheck/test | PASS；typecheck exit 0，tests 52/52 |
+| clean Mobile Android/iOS bundles | PASS；`bundle:android`、`bundle:ios` 各 exit 0 |
+| clean `pnpm check:mobile-native-config -- --require-bundles` | PASS；Android/iOS bundles 均存在且扫描通过 |
 
 此前独立 Debian 环境曾执行 Node `24.19.0` / pnpm `10.24.0` 的
 `pnpm check:package-audit`、`pnpm typecheck`、`pnpm lint`、`pnpm test:headless`、
@@ -307,7 +379,7 @@ Linux renderer evidence artifact 名称为
 | 环境 | 结果 | 证据边界 |
 | --- | --- | --- |
 | 独立 Debian 容器（Node `24.19.0` / pnpm `10.24.0` / Electron `44.0.0`，当前 descriptor pin；`CAP_SYS_ADMIN`/`CAP_SYS_PTRACE`） | PASS | 冷缓存 sandbox 从 `1000:1000:0755` 变为 `0:0:4755`；built renderer `exit=0`，evidence `188454` bytes、mode `0600`，`observationAvailable=true`、`childExitCode=0`、`stderrClean=true`、profile/userData 与两类 owned process cleanup 均为 true；无绝对路径或敏感值泄漏。普通无 `CAP_SYS_PTRACE` Docker 容器对跨 UID proc-fd dereference 会 `Permission denied`；GitHub hosted runner 的实际权限仍属远程 `UNVERIFIED` |
-| GitHub Actions `desktop-renderer-linux` | NOT_RUN / UNVERIFIED | `gh` 不可用，尚未运行同一候选 SHA |
+| GitHub Actions `desktop-renderer-linux` | PASS（PR #7 Run #26） | previous candidate `396441c` 的 hosted renderer gate 已 success；本轮 new candidate 仍 remote unverified |
 
 ## GitHub Actions verification
 
@@ -315,34 +387,37 @@ Linux renderer evidence artifact 名称为
 | --- | --- | --- | --- | --- |
 | #23 / `33623011371` | `a028fca` | phase-0 Test workspace renderer | failed（原始 baseline） | none recorded |
 | #24 / `33719867602` | `198385d` | phase-0 Test workspace renderer | failed（实际 baseline；sandbox SIGTRAP） | none recorded |
-| PR candidate（未创建） | `NOT_RUN` | backend-quality | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
-| PR candidate（未创建） | `NOT_RUN` | workspace-quality | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
-| PR candidate（未创建） | `NOT_RUN` | contracts-security | NOT_RUN / UNVERIFIED（`gh` unavailable） | none |
-| PR candidate（未创建） | `NOT_RUN` | desktop-renderer-linux | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-desktop-renderer-evidence` |
-| PR candidate（未创建） | `NOT_RUN` | mobile-static | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-mobile-static` |
-| PR full-matrix label（未创建） | `NOT_RUN` | e2e | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-e2e-reports` |
-| PR full-matrix label（未创建） | `NOT_RUN` | android-native | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-android-debug` |
-| PR full-matrix label（未创建） | `NOT_RUN` | ios-native | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-ios-simulator-debug` |
-| PR full-matrix label（未创建） | `NOT_RUN` | macos-release-smoke | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-macos-arm64-release-test` |
-| PR full-matrix label（未创建） | `NOT_RUN` | phase9a-verification-summary | NOT_RUN / UNVERIFIED（`gh` unavailable） | `jarvis-phase9a-remote-verification` |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | backend-quality | success | none |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | contracts-security | success | none |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | desktop-renderer-linux | success | `jarvis-phase9a-desktop-renderer-evidence` |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | e2e | success | `jarvis-phase9a-e2e-reports` |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | workspace-quality | failure（`ERR_SOCKET_TIMEOUT` transport；不是 vulnerability report） | none |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | mobile-static | failure（Mobile typecheck 的 TS2307；shared package build 缺失） | none（bundle 未生成，artifact not produced） |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | android-native | skipped（mobile-static failure） | none（artifact not produced） |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | ios-native | skipped（mobile-static failure） | none（artifact not produced） |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | macos-release-smoke | skipped（required upstream failure） | none（artifact not produced） |
+| PR #7 / Run #26 (`33867878871`) | `396441c` | phase9a-verification-summary | failure（remote artifact `overallStatus=failure`） | `jarvis-phase9a-remote-verification` |
 
-没有把 #24 当作修复后证据，也没有把 skipped 写成 passed。远程实际 job
-conclusion、artifact 上传和 Node 24.19.0 生效状态，必须由主代理在具备远程
-权限后补写；在此之前阶段状态保持 `LOCAL_GREEN_REMOTE_UNVERIFIED`。
+Run #26 是 previous candidate 的真实远程 partial failure：四个 jobs 通过，
+workspace/mobile 阻断，Android/iOS/macOS 明确为 skipped，remote artifact overall
+failure。没有把 #24 或 #26 当作本轮 new candidate 的成功证据，也没有把 skipped 写成
+passed。报告形成时 current new candidate 尚未提交或远程验证；提交后最终 SHA、Run ID、
+job conclusion 和 artifact 清单需重新核对。
 
 ### 用户可执行的远程验证命令
 
 以下命令供具备 GitHub 权限的操作者执行；它们不会改变本报告当前的远程状态，
-只有实际运行结果才能更新上面的 `NOT_RUN / UNVERIFIED` 记录：
+只有实际运行结果才能更新本轮 new candidate 的 `remote unverified` 记录：
+命令会先 verify existing PR #7，再 push 同一分支并观察 `synchronize` run，不会创建第二个 PR。
 
 ```bash
 set -euo pipefail
 gh auth status
+gh pr view 7 --json number,headRefName,baseRefName,headRefOid,labels
 git push -u origin codex/phase9a-ci-recovery
-gh label create full-matrix --description "Run the complete cross-platform verification matrix" --color "5319E7" --force
-gh pr create --base main --head codex/phase9a-ci-recovery --title "ci: restore green CI and isolate release gates" --body-file docs/phases/phase-9a-ci-recovery-report.md --label full-matrix
+gh pr edit 7 --add-label full-matrix
 phase9a_candidate_sha="$(git rev-parse HEAD)"
-gh pr checks --watch
+gh pr checks 7 --watch
 phase9a_runs_json="$(gh run list --workflow .github/workflows/ci.yml --branch codex/phase9a-ci-recovery --event pull_request --limit 20 --json databaseId,headSha,event)"
 phase9a_run_ids="$(jq -r --arg candidate_sha "$phase9a_candidate_sha" '.[] | select(.event == "pull_request" and .headSha == $candidate_sha) | .databaseId' <<<"$phase9a_runs_json")"
 phase9a_run_id=""
@@ -405,11 +480,12 @@ gh api "repos/HoboCY/Jarvis/actions/runs/$phase9a_run_id/artifacts"
 测试覆盖固定 mutator 安全属性与各 bypass 变体，报告已记录最新 Node24/Linux 证据。
 两轮 review findings 均已关闭：Standards `PASS`（P1=0、P2=0），Spec `PASS`
 （P1=0、P2=0）。残余仅为 GitHub Actions、远程 artifact 和其它外部 gate 的
-`UNVERIFIED`，不改变当前 `LOCAL_GREEN_REMOTE_UNVERIFIED` 状态。
+new-candidate `UNVERIFIED`；Run #26 的 previous candidate 状态明确为
+`REMOTE_PARTIAL_FAILED`。
 
 本票完成了本地公开 seam/TDD 合同检查。独立 Debian 容器已提供当前 descriptor
-pin、冷 runtime、D-Bus 和真实 renderer 证据，但 GitHub Actions 同 SHA 证据仍缺失；
-本地 Node 25 仅作开发验证。
+pin、冷 runtime、D-Bus 和真实 renderer 证据；Run #26 的 PR #7 renderer job 已 success，
+报告形成时本轮 new candidate 的同 SHA GitHub Actions 证据仍缺失；本地 Node 25 仅作开发验证。
 
 回滚可按文件范围恢复本票变更：先移除 CI 对新脚本和新 scripts 的引用，再删除
 sandbox helper/test 与 runner/scenario handoff 改动；不会删除用户 profile、
@@ -421,7 +497,8 @@ credential、数据库或其它生成物。不得用回滚来隐藏真实 CI 失
 
 ## 下一步
 
-当前 scoped code/CI commits 已完成且最终 SHA 已锁定。用户/操作者需推送当前分支，
-以最终 HEAD 创建 PR 并添加 `full-matrix` label，等待 core 与 Full Matrix jobs，记录
-每个 job 的实际 conclusion、artifact 和失败日志。远程验证完成前不得标记 Phase 9A
-`PASS`；本次不得把预合并 `workflow_dispatch` 当作替代入口。
+报告形成时 scoped code/CI 改动已完成本地验证但尚未 commit，new candidate SHA 暂待最终
+提交；提交后用户/操作者需推送当前分支，重新核对 PR #7 的 candidate SHA，等待
+core 与 Full Matrix jobs，记录每个 job 的实际 conclusion、artifact 和失败日志。远程
+验证完成前不得标记 Phase 9A `PASS`；本次不得把 Run #26 的 partial failure 或旧
+`workflow_dispatch` 结果当作新候选成功证据。
