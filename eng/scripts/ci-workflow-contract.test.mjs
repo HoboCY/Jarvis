@@ -359,23 +359,128 @@ test("package audit timeout and cleanup stay within the workspace job budget", a
   assert.match(runner, /processGroupGone/);
 });
 
-test("Phase 9A report preserves the real partial-failure state and existing PR flow", async () => {
+test("Phase 9A report records Run #27 PASS without overstating external release gates", async () => {
   const report = await read("docs/phases/phase-9a-ci-recovery-report.md");
-
-  assert.match(report, /^当前结论：`REMOTE_PARTIAL_FAILED`。$/m);
+  assert.match(report, /^当前结论：`PASS`。$/m);
   assert.doesNotMatch(report, /LOCAL_GREEN_NEW_CANDIDATE_UNVERIFIED/);
-  assert.match(report, /GitHub Actions `desktop-renderer-linux` \| PASS.*Run #26/);
-  assert.doesNotMatch(report, /GitHub Actions `desktop-renderer-linux` \| NOT_RUN/);
+  assert.match(report, /PR #7.*Open.*unmerged/i);
+  assertRun27Evidence(report);
+  assert.match(report, /signatureStatus=unsigned-test/);
+  assert.match(report, /notarizationStatus=not-run/);
+  assert.match(report, /external.*UNVERIFIED/i);
+  assert.doesNotMatch(report, /signatureStatus[^\n]*(?:PASS|passed)/i);
+  assert.doesNotMatch(report, /notarizationStatus[^\n]*(?:PASS|passed)/i);
   assert.doesNotMatch(report, /gh pr create/);
   assert.match(report, /existing PR #7/);
   assert.match(report, /报告形成时/);
-  assert.doesNotMatch(report, /GitHub Actions 仍未验证/);
-  assert.match(report, /Run #26.*\n.*desktop-renderer-linux.*success/);
-  assert.match(report, /mobile-static.*not produced/i);
-  assert.match(report, /android-native.*not produced/i);
-  assert.match(report, /ios-native.*not produced/i);
-  assert.match(report, /macos-release-smoke.*not produced/i);
+  assert.match(report, /Run #26[\s\S]*REMOTE_PARTIAL_FAILED/);
+  assert.match(report, /本报告.*evidence-only.*SHA/);
+  assert.match(report, /未启动 Phase 9B/);
+  assert.doesNotMatch(report, /已启动 Phase 9B/);
 });
+
+function assertRun27Evidence(report) {
+  const section = extractRun27EvidenceSection(report);
+  const expectedImplementationSha = "2c649d4be73ad0b4af608ec97dd54be577597624";
+  for (const field of [
+    "`runId=33877662591`",
+    "`runAttempt=1`",
+    "`eventName=pull_request`",
+    "`ref=refs/pull/7/merge`",
+    "`fullMatrixRequested=true`",
+    "`fullMatrix.requested=true`",
+    "`fullMatrix.status=requested`",
+    "`overallStatus=success`",
+    "`generatedAtUtc=2026-09-04T13:30:21Z`"
+  ]) {
+    assert.ok(section.includes(field), `Run #27 is missing ${field}.`);
+  }
+  const headShaMarker = `\`headSha=${expectedImplementationSha}\``;
+  assert.ok(section.includes(headShaMarker), `Run #27 is missing ${headShaMarker}.`);
+  assert.doesNotMatch(section, /`attempt=1`/);
+  assert.doesNotMatch(section, /`event=pull_request`/);
+
+  const expectedJobs = [
+    ["backend-quality", "success", "none"],
+    ["workspace-quality", "success", "none"],
+    ["contracts-security", "success", "none"],
+    ["desktop-renderer-linux", "success", "jarvis-phase9a-desktop-renderer-evidence"],
+    ["mobile-static", "success", "jarvis-phase9a-mobile-static"],
+    ["e2e", "success", "jarvis-phase9a-e2e-reports"],
+    ["android-native", "success", "jarvis-phase9a-android-debug"],
+    ["ios-native", "success", "jarvis-phase9a-ios-simulator-debug"],
+    ["macos-release-smoke", "success", "jarvis-phase9a-macos-arm64-release-test"],
+    ["phase9a-verification-summary", "success（第 10 个 check；JSON `jobResults` 保留前 9 个 required jobs）", "jarvis-phase9a-remote-verification"]
+  ];
+  const jobRows = parseMarkdownTable(
+    section,
+    "| Run | Commit SHA | Job | Conclusion | Artifact |"
+  );
+  assert.equal(jobRows.length, expectedJobs.length, "Run #27 must contain exactly 10 job rows.");
+  assert.equal(new Set(jobRows.map((row) => row[2])).size, expectedJobs.length);
+  assert.deepEqual(jobRows.map((row) => row[2]), expectedJobs.map(([job]) => job));
+  for (const [row, [job, conclusion, artifact]] of jobRows.map((row, index) => [row, expectedJobs[index]])) {
+    assert.equal(row[0], "PR #7 / Run #27 (`33877662591`)");
+    assert.equal(row[1], expectedImplementationSha);
+    if (job === "phase9a-verification-summary") {
+      assert.equal(row[3], conclusion);
+    } else {
+      assert.equal(row[3], "success");
+    }
+    assert.equal(row[4], artifact, `Run #27 artifact mapping for ${job} is incorrect.`);
+  }
+
+  const expectedArtifacts = [
+    ["jarvis-phase9a-android-debug", "538e69caaa566606d57749cdde16cabb307b125906bfd94b7daccd695e1c36ad"],
+    ["jarvis-phase9a-desktop-renderer-evidence", "0615a93e633556fe11e71e05c645ac4d50f36242457de49543e97c23e2080ffa"],
+    ["jarvis-phase9a-e2e-reports", "01b557e8a840bcb23b650a521dd291d558730f66beebf03076bebb084511efcb"],
+    ["jarvis-phase9a-ios-simulator-debug", "a147b70d70611043d27ead234a0ec24104b857c49319c400efdf267d11d76224"],
+    ["jarvis-phase9a-macos-arm64-release-test", "5729a459dbb1d08a2796ae8e963dad589dec4b416fb9cb86bd1d2de643ca8845"],
+    ["jarvis-phase9a-mobile-static", "83bfd70e2800d7cf3cc6d8d2069b01a0b8a8097d34bd31ad259299bcf4cc28a5"],
+    ["jarvis-phase9a-remote-verification", "f0f29ee8dcdd0cfd07a95cc33fc28f7cd8dbb64d4591a4df0430b2f70b695db6"]
+  ];
+  const artifactRows = parseMarkdownTable(
+    section,
+    "| Artifact | GitHub archive size | Digest | 内容复核 |"
+  );
+  assert.equal(artifactRows.length, expectedArtifacts.length, "Run #27 must contain exactly 7 artifacts.");
+  assert.equal(new Set(artifactRows.map((row) => row[0])).size, expectedArtifacts.length);
+  assert.deepEqual(artifactRows.map((row) => row[0]), expectedArtifacts.map(([name]) => name));
+  for (const [row, [name, digest]] of artifactRows.map((row, index) => [row, expectedArtifacts[index]])) {
+    assert.equal(row[0], name);
+    assert.equal(row[2], digest, `Run #27 digest for ${name} is incorrect.`);
+  }
+}
+
+function extractRun27EvidenceSection(report) {
+  const startMarker = "Run #27 是 validated implementation candidate 的完整矩阵远程证据：";
+  const endMarker = "### 用户可执行的远程验证命令";
+  const start = report.indexOf(startMarker);
+  const end = report.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(start, -1, "Run #27 evidence section is missing.");
+  assert.notEqual(end, -1, "Run #27 evidence section terminator is missing.");
+  return report.slice(start, end);
+}
+
+function parseMarkdownTable(section, header) {
+  const lines = section.split("\n");
+  const headerIndex = lines.indexOf(header);
+  assert.notEqual(headerIndex, -1, `Markdown table header is missing: ${header}`);
+  const rows = [];
+  for (const line of lines.slice(headerIndex + 2)) {
+    if (!line.startsWith("|")) {
+      break;
+    }
+    const cells = line.split("|").slice(1, -1).map((cell) => {
+      const value = cell.trim();
+      return value.startsWith("`") && value.endsWith("`")
+        ? value.slice(1, -1)
+        : value;
+    });
+    rows.push(cells);
+  }
+  return rows;
+}
 
 function workflowStepSection(job, stepName) {
   const start = job.indexOf(`      - name: ${stepName}`);
