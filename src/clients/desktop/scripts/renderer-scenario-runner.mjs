@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,15 +23,18 @@ const watchdogMs = 28_000;
 const forceKillGraceMs = 1_500;
 const shutdownGraceMs = 500;
 const processGroupDrainMs = 3_000;
+const maxCapturedStderrBytes = 32 * 1024;
+const maxObservationBytes = 512 * 1024;
 
 let userDataPath;
+let scenarioHandoffPath;
 let child;
 let childPromise;
 let childExited = false;
 let timedOut = false;
 let signalExitCode;
-let stdout = "";
-let stderr = "";
+let stdout = Buffer.alloc(0);
+let stderr = Buffer.alloc(0);
 
 function assertOwnedScenarioPath(path) {
   const resolvedPath = resolve(path);
@@ -48,6 +51,7 @@ function assertOwnedScenarioPath(path) {
 
 async function createScenarioUserData() {
   userDataPath = assertOwnedScenarioPath(await mkdtemp(join(temporaryRoot, userDataPrefix)));
+  scenarioHandoffPath = join(userDataPath, "scenario-observation.json");
   await chmod(userDataPath, 0o700);
   const mode = (await stat(userDataPath)).mode & 0o777;
   if (mode !== 0o700) {
@@ -148,14 +152,30 @@ async function waitForOwnedAppProcessesExit(pids) {
   return !ownedPids.some(processExists);
 }
 
-function parseObservation() {
-  const value = stdout.trim();
-  if (!value) {
+function parseObservation(serialized = stdout) {
+  const valueBuffer = Buffer.isBuffer(serialized) ? serialized : Buffer.from(serialized, "utf8");
+  if (valueBuffer.length === 0 || valueBuffer.length > maxObservationBytes) {
+    return undefined;
+  }
+  const value = valueBuffer.toString("utf8").trim();
+
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readHandoffObservation() {
+  if (typeof scenarioHandoffPath !== "string") {
     return undefined;
   }
 
   try {
-    return JSON.parse(value);
+    return parseObservation(await readFile(scenarioHandoffPath));
   } catch {
     return undefined;
   }
@@ -163,6 +183,22 @@ function parseObservation() {
 
 function wait(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function writeAtomicScenarioEvidence(serialized) {
+  if (!scenarioOutput) {
+    return;
+  }
+
+  const temporaryPath = `${scenarioOutput}.tmp-${process.pid}`;
+  await mkdir(dirname(scenarioOutput), { recursive: true });
+  try {
+    await writeFile(temporaryPath, serialized, { encoding: "utf8", mode: 0o600 });
+    await rename(temporaryPath, scenarioOutput);
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function runElectron() {
@@ -180,17 +216,32 @@ async function runElectron() {
       // built gate always exercises the package's canonical, freshly-built
       // renderer output.
       JARVIS_DESKTOP_SCENARIO_DIST: canonicalDistRoot,
+      // The child writes its complete observation into the runner-owned
+      // profile. The parent can therefore recover it even when Electron
+      // closes stdout before the pipe receives its final chunk.
+      JARVIS_DESKTOP_SCENARIO_OUTPUT: scenarioHandoffPath,
       JARVIS_DESKTOP_SCENARIO_USER_DATA: userDataPath
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
 
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", chunk => { stdout += chunk; });
+  child.stdout.on("data", chunk => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (stdout.length < maxObservationBytes) {
+      stdout = Buffer.concat([
+        stdout,
+        bytes.subarray(0, maxObservationBytes - stdout.length)
+      ]);
+    }
+  });
   child.stderr.on("data", chunk => {
-    stderr += chunk;
-    process.stderr.write(chunk);
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (stderr.length < maxCapturedStderrBytes) {
+      stderr = Buffer.concat([
+        stderr,
+        bytes.subarray(0, maxCapturedStderrBytes - stderr.length)
+      ]);
+    }
   });
 
   childPromise = new Promise(resolveChild => {
@@ -221,7 +272,7 @@ async function finish(result) {
     await childPromise;
   }
 
-  const observation = parseObservation();
+  const observation = parseObservation() ?? await readHandoffObservation();
   const processObservation = observation?.process && typeof observation.process === "object"
     ? observation.process
     : {};
@@ -241,11 +292,12 @@ async function finish(result) {
   const removed = ownedAppProcessesGone
     && ownedProcessGroupGone
     && await removeScenarioUserData();
-  const stderrClean = stderr.trim().length === 0;
+  const stderrClean = stderr.toString("utf8").trim().length === 0;
   const childExitCode = result?.code ?? (timedOut ? 124 : 1);
-  const finalObservation = observation && typeof observation === "object"
-    ? {
+  const finalObservation = observation
+      ? {
         ...observation,
+        observationAvailable: true,
         userData: {
           ...(observation.userData && typeof observation.userData === "object"
             ? observation.userData
@@ -260,14 +312,26 @@ async function finish(result) {
           ownedProcessGroupGone
         }
       }
-    : undefined;
+    : {
+        status: "failed",
+        observationAvailable: false,
+        failureReason: timedOut
+          ? "timeout"
+          : result?.error
+            ? "spawn-error"
+            : "missing-observation",
+        userData: { removed },
+        process: {
+          childExitCode,
+          stderrClean,
+          ownedAppProcessesGone,
+          ownedProcessGroupGone
+        }
+      };
 
   if (finalObservation) {
     const serialized = `${JSON.stringify(finalObservation, null, 2)}\n`;
-    if (scenarioOutput) {
-      await mkdir(dirname(scenarioOutput), { recursive: true });
-      await writeFile(scenarioOutput, serialized, "utf8");
-    }
+    await writeAtomicScenarioEvidence(serialized);
     process.stdout.write(serialized);
   }
 
@@ -277,18 +341,15 @@ async function finish(result) {
   if (!stderrClean) {
     console.error("Renderer scenario Electron stderr was not clean.");
   }
-  if (!finalObservation) {
+  if (!observation) {
     console.error("Renderer scenario did not return a JSON observation.");
-    if (stdout.trim()) {
-      console.error(stdout.trim().slice(-2_000));
-    }
   }
 
   const success = !timedOut
     && childExitCode === 0
     && removed
     && stderrClean
-    && finalObservation !== undefined;
+    && observation !== undefined;
   process.exitCode = success ? 0 : timedOut ? 124 : signalExitCode ?? 1;
 }
 
@@ -305,11 +366,12 @@ try {
   await createScenarioUserData();
   const result = await runElectron();
   if (result.error) {
-    console.error(result.error instanceof Error ? result.error.message : result.error);
+    console.error("Renderer scenario Electron process could not start.");
   }
   await finish(result);
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
+} catch {
+  console.error("Renderer scenario failed before producing its observation.");
+  let cleanupRemoved = false;
   try {
     terminateElectron("SIGKILL");
     if (childPromise) {
@@ -317,12 +379,28 @@ try {
     }
     await wait(shutdownGraceMs);
     const ownedProcessGroupGone = await waitForOwnedProcessGroupExit();
-    const removed = ownedProcessGroupGone && await removeScenarioUserData();
-    if (!removed) {
+    cleanupRemoved = ownedProcessGroupGone && await removeScenarioUserData();
+    if (!cleanupRemoved) {
       console.error("Renderer scenario userData cleanup failed.");
     }
-  } catch (cleanupError) {
-    console.error(cleanupError instanceof Error ? cleanupError.message : cleanupError);
+  } catch {
+    console.error("Renderer scenario cleanup failed.");
+  }
+  if (scenarioOutput) {
+    const failureObservation = {
+      status: "failed",
+      observationAvailable: false,
+      failureReason: "runner-error",
+      userData: { removed: cleanupRemoved },
+      process: { childExitCode: 1, stderrClean: stderr.toString("utf8").trim().length === 0 }
+    };
+    try {
+      const serialized = `${JSON.stringify(failureObservation, null, 2)}\n`;
+      await writeAtomicScenarioEvidence(serialized);
+      process.stdout.write(serialized);
+    } catch {
+      console.error("Renderer scenario evidence could not be written.");
+    }
   }
   process.exitCode = 1;
 }

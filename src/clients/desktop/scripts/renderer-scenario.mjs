@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,7 @@ const approvalIdTwo = "0198b0a1-0000-7000-8000-000000000210";
 const notificationIdTwo = "0198b0a1-0000-7000-8000-000000000211";
 const notificationIdThree = "0198b0a1-0000-7000-8000-000000000213";
 const scenarioUserDataPrefix = "jarvis-desktop-scenario-";
+const maxScenarioObservationBytes = 512 * 1024;
 const registeredChannels = new Set();
 const configuredUserDataPath = process.env.JARVIS_DESKTOP_SCENARIO_USER_DATA;
 const scenarioUserDataPath = typeof configuredUserDataPath === "string"
@@ -594,6 +595,91 @@ async function evaluate(window, expression) {
   return window.webContents.executeJavaScript(expression);
 }
 
+async function waitForRendererSurface(window) {
+  const deadline = Date.now() + 5_000;
+  let latest;
+  while (Date.now() < deadline) {
+    try {
+      latest = await evaluate(window, `(() => ({
+        mounted: Boolean(document.querySelector("#root")?.children.length),
+        sessionMenu: Boolean(document.querySelector(".session-menu summary")),
+        diagnostics: Boolean(document.querySelector(".diagnostics-button"))
+      }))()`);
+    } catch {
+      latest = undefined;
+    }
+    if (latest?.mounted && latest.sessionMenu && latest.diagnostics) {
+      return latest;
+    }
+    await wait(40);
+  }
+  throw new Error("The renderer did not expose its initial control surface.");
+}
+
+async function waitForConversationProjection(window) {
+  const deadline = Date.now() + 5_000;
+  let latest;
+  while (Date.now() < deadline) {
+    try {
+      latest = await evaluate(window, `(() => ({
+        title: document.querySelector(".workspace-context")?.textContent ?? "",
+        messagePresent: document.body.textContent?.includes("控制面板已连接") === true
+      }))()`);
+    } catch {
+      latest = undefined;
+    }
+    if (latest?.title === conversation.title && latest.messagePresent) {
+      return latest;
+    }
+    await wait(40);
+  }
+  throw new Error("The renderer did not project the requested conversation.");
+}
+
+async function waitForStableStartupConnection(window) {
+  const deadline = Date.now() + 8_000;
+  let stableSamples = 0;
+  let latest;
+  while (Date.now() < deadline) {
+    try {
+      latest = await evaluate(window, `(() => {
+        const button = document.querySelector(".connection-button");
+        const status = [...(button?.classList ?? [])]
+          .find(name => ["is-disconnected", "is-connecting", "is-connected", "is-degraded"]
+            .includes(name))
+          ?.slice(3) ?? null;
+        return {
+          status,
+          disabled: button instanceof HTMLButtonElement ? button.disabled : null,
+          label: button?.textContent?.trim() ?? ""
+        };
+      })()`);
+    } catch {
+      latest = undefined;
+    }
+    const settled = latest?.status !== null
+      && latest?.status !== "connecting"
+      && latest?.disabled === false;
+    stableSamples = settled ? stableSamples + 1 : 0;
+    if (stableSamples >= 3) {
+      return { ...latest, stable: true, stableSamples };
+    }
+    await wait(50);
+  }
+  throw new Error("The renderer startup Realtime connection did not reach a stable state.");
+}
+
+async function writeAtomicJson(path, value) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > maxScenarioObservationBytes) {
+    throw new Error("The renderer scenario observation exceeded its bounded size.");
+  }
+  const temporaryPath = `${path}.tmp-${process.pid}`;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(temporaryPath, serialized, { encoding: "utf8", mode: 0o600 });
+  await rename(temporaryPath, path);
+}
+
 async function buildRealtimeRecoveryHarness() {
   const result = await build({
     absWorkingDir: repositoryRoot,
@@ -808,7 +894,7 @@ async function runScenario() {
   await window.loadFile(join(distRoot, "renderer/index.html"));
   window.show();
   window.focus();
-  await wait(350);
+  await waitForRendererSurface(window);
   await evaluate(window, `(() => {
     document.querySelector(".session-menu summary")?.click();
     const input = document.querySelector('input[aria-label="Conversation ID"]');
@@ -826,6 +912,7 @@ async function runScenario() {
     button?.click();
   })()`);
   await wait(100);
+  await waitForConversationProjection(window);
   const initial = await evaluate(window, `(() => {
     const root = document.querySelector("#root");
     const requiredLabels = ["助手", "会话", "任务", "审批", "设置", "Typed message", "发送文字", "运行诊断", "生成配对码"];
@@ -852,10 +939,10 @@ async function runScenario() {
       scrollWidth: document.documentElement.scrollWidth
     };
   })()`);
-  // Startup Realtime is intentionally one-shot. Let its success/failure
-  // settle before exercising an unrelated diagnostics failure so the two
+  // Startup Realtime is intentionally one-shot. Observe a settled button
+  // state before exercising an unrelated diagnostics failure so the two
   // user-facing action messages cannot race in this scenario.
-  await wait(250);
+  const startupConnection = await waitForStableStartupConnection(window);
 
   await evaluate(window, `document.querySelector(".diagnostics-button")?.click()`);
   await wait(120);
@@ -892,7 +979,8 @@ async function runScenario() {
     failureAttemptCount: ${diagnosticsAttempts}
   }))()`);
   const startupRealtime = {
-    clientSecretRequests: realtimeClientSecretRequests
+    clientSecretRequests: realtimeClientSecretRequests,
+    connection: startupConnection
   };
   const initialDeliveryFeedback = await readInitialNotificationDeliveryFeedback(window);
   const expectedInitialDeliveryFeedback = [
@@ -1535,6 +1623,15 @@ async function runScenario() {
     },
     consoleErrors
   };
+  // Persist the complete bounded observation before evaluating the assertions.
+  // The runner-owned handoff survives Electron's stdout teardown and lets the
+  // parent report failed assertions without embedding the whole observation in
+  // stderr. Direct invocations still receive the JSON on stdout.
+  if (scenarioOutput) {
+    await writeAtomicJson(scenarioOutput, observation);
+  } else {
+    console.log(JSON.stringify(observation, null, 2));
+  }
   if (!initial.mounted || !initial.requiredLabelsPresent || !initial.realProjectionPresent
     || !initial.persistedConversationPresent
     || !initial.secretFree
@@ -1547,6 +1644,9 @@ async function runScenario() {
     || !ipcRecovery.recovered
     || ipcRecovery.failureAttemptCount !== 3
     || startupRealtime.clientSecretRequests !== 1
+    || !startupRealtime.connection?.stable
+    || startupRealtime.connection.disabled
+    || startupRealtime.connection.status === "connecting"
     || !["connected", "degraded"].includes(realtimeRecoveryPersistence.failure.status)
     || realtimeRecoveryPersistence.failure.persistenceRetryReason !== "event-ingest"
     || realtimeRecoveryPersistence.failure.ingestCalls !== 1
@@ -1650,14 +1750,8 @@ async function runScenario() {
     || !observation.userData.ownerOnly
     || !observation.userData.isolated
     || consoleErrors.length > 0) {
-    throw new Error(`Desktop renderer scenario failed: ${JSON.stringify(observation)}`);
+    throw new Error("Desktop renderer scenario assertion failed.");
   }
-
-  if (scenarioOutput) {
-    await mkdir(dirname(scenarioOutput), { recursive: true });
-    await writeFile(scenarioOutput, `${JSON.stringify(observation, null, 2)}\n`, "utf8");
-  }
-  console.log(JSON.stringify(observation, null, 2));
 }
 
 let finished = false;
