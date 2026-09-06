@@ -31,7 +31,7 @@ public sealed class DeviceNodeOptions
     public string? WorkingDirectory { get; set; }
     public string CodexHome { get; set; } = string.Empty;
     public string CodexBinaryPath { get; set; } = "codex";
-    public string[] CodexArguments { get; set; } = ["app-server"];
+    public string[] CodexArguments { get; set; } = [];
     public int PollingIntervalMs { get; set; } = 1_000;
     public int HeartbeatIntervalMs { get; set; } = 10_000;
     public int MaxRestartAttempts { get; set; } = 3;

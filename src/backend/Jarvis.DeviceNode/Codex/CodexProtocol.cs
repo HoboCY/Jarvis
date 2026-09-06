@@ -228,7 +228,11 @@ public sealed record CodexRuntimeOptions(
     {
         get
         {
-            var result = (Arguments ?? ["app-server"]).ToList();
+            var configuredArguments = Arguments is { Count: > 0 }
+                ? Arguments
+                : ["app-server"];
+            var result = new List<string>(configuredArguments.Count);
+            result.AddRange(configuredArguments);
             if (PermissionProfile is not null)
             {
                 foreach (var overrideValue in PermissionProfile.CliConfigOverrides)
