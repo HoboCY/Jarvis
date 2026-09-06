@@ -206,11 +206,14 @@ pnpm phase9b:validate-live-evidence artifacts/live/phase9b/e6823a71-5a51-459f-89
 
 ## GitHub Actions
 
-交付使用 draft PR 和 `full-matrix` 标签，禁止自动合并。最终 PR head 的十个 job 和七份 artifact
-必须逐项核对，不能以本地代码候选或旧 run 的成功代替。
-[本分支 Actions](https://github.com/HoboCY/Jarvis/actions?query=branch%3Acodex%2Fphase9b-desktop-golden-path)
-保存远端运行；交付回复及 PR 描述记录最终 head、run URL、job/artifact 结论。
-本报告冻结本地与 live 证据，后续文档提交不会改写 live candidate SHA。
+**远端交付被审批策略阻断；未创建 PR，最终 head 的 CI 为 NOT RUN。** 本地报告提交
+`9c993668aa354da3d93e93cad764b8c2782a7873` 完成后，具名分支的 `git push --set-upstream`
+在进程启动前被拒绝，原因为 `approval required by policy, but AskForApproval is set to Never`。
+没有改用其他传输方式重试该写入，也没有以旧 CI 或本地测试声称远端通过。
+
+后续交付应使用 draft PR 和 `full-matrix` 标签，禁止自动合并。最终 PR head 的十个 job 和七份
+artifact 必须逐项核对；live 证据仍绑定实际安装的 `daea6e6`，后续文档提交不改写该身份。
+当前没有可引用的 Phase 9B PR URL、run ID 或远端候选 SHA。
 
 ## Review
 
@@ -236,7 +239,8 @@ D 的 453ms 取自 I 的相同取消窗口，没有声称完成独立 D 或 prov
 | `423e738df09a26b43643478a61f4f799077a6eff` | Desktop 子进程保留预算控制环境变量 |
 | `daea6e626592cab238c579c31fa65e914215e354` | 持久取消、迭代器并发、续租冲突及审批执行范围 |
 
-报告与计划的最终文档提交由 PR commit 列表标识；其父代码候选就是本次真实运行 SHA。
+`9c993668aa354da3d93e93cad764b8c2782a7873` 记录验收报告与回滚计划；其父代码候选就是本次真实运行 SHA。
+本次远端策略阻断另以文档提交记录，最终本地 head 由交付回复标识；这些提交均未推送。
 
 ## Next
 
