@@ -39,6 +39,7 @@ import {
   type DesktopActionFailureKind,
   type DesktopIpcHandler
 } from "../renderer/desktop-ipc.js";
+import { configurePhase9bLiveProfile } from "./live-profile.js";
 
 type JsonRecord = Record<string, unknown>;
 type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
@@ -137,6 +138,11 @@ let backendConnectionState: BackendConnectionState = {
   revision: 0
 };
 const notificationProjectionCache = new NotificationProjectionCache();
+
+// This runs before Electron's single-instance lock and ready lifecycle so a
+// live run receives a run-specific safeStorage namespace after its isolated
+// profile and ownership marker have passed validation.
+configurePhase9bLiveProfile(app);
 
 function configureBackendBearer(): void {
   try {
