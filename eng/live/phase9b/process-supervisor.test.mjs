@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { execPath } from "node:process";
 import { test } from "node:test";
@@ -42,6 +43,47 @@ test("owned process timeout terminates only the owned process group", async () =
   assert.equal(result.status, "TIMEOUT");
   assert.equal(result.errorCategory, "TIMEOUT");
   assert.equal(result.restarts, 0);
+});
+
+test("live child receives only the explicit nonsecret control environment", async () => {
+  const supervisor = new ProcessSupervisor({ timeoutMs: 1_000 });
+  const environment = {
+    JARVIS_PHASE9B_ADMISSION_DESCRIPTOR: "/private/run/admission.json",
+    JARVIS_PHASE9B_REALTIME_CALL_URL: "https://fixture.openai.azure.com/openai/v1/realtime/calls",
+    JARVIS_PHASE9B_FORGED_CONTROL: "must-not-pass",
+    OPENAI_API_KEY: "provider-key-must-not-pass",
+    DEEPSEEK_API_KEY: "provider-key-must-not-pass",
+    UNRELATED_ENVIRONMENT: "must-not-pass"
+  };
+  const script = [
+    "process.stdout.write(JSON.stringify({",
+    "descriptor: process.env.JARVIS_PHASE9B_ADMISSION_DESCRIPTOR ?? null,",
+    "realtimeCallUrl: process.env.JARVIS_PHASE9B_REALTIME_CALL_URL ?? null,",
+    "forgedControl: process.env.JARVIS_PHASE9B_FORGED_CONTROL ?? null,",
+    "openAiKey: process.env.OPENAI_API_KEY ?? null,",
+    "deepSeekKey: process.env.DEEPSEEK_API_KEY ?? null,",
+    "unrelated: process.env.UNRELATED_ENVIRONMENT ?? null",
+    "}));"
+  ].join(" ");
+  const expectedOutput = JSON.stringify({
+    descriptor: environment.JARVIS_PHASE9B_ADMISSION_DESCRIPTOR,
+    realtimeCallUrl: environment.JARVIS_PHASE9B_REALTIME_CALL_URL,
+    forgedControl: null,
+    openAiKey: null,
+    deepSeekKey: null,
+    unrelated: null
+  });
+
+  const handle = await supervisor.start(execPath, ["-e", script], { env: environment });
+  const result = await handle.waitForExit();
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(result.stdout, {
+    length: Buffer.byteLength(expectedOutput),
+    sha256: createHash("sha256").update(expectedOutput).digest("hex")
+  });
+  assert.equal(result.stderr.length, 0);
+  await supervisor.stopAll();
 });
 
 test("launcher exit still drains descendants in the owned process group", async () => {
