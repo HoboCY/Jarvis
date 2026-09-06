@@ -1,5 +1,5 @@
 import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, systemPreferences, Tray } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, session, shell, systemPreferences, Tray } from "electron";
 import { randomUUID } from "node:crypto";
 import { chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +40,8 @@ import {
   type DesktopIpcHandler
 } from "../renderer/desktop-ipc.js";
 import { configurePhase9bLiveProfile } from "./live-profile.js";
+import { configurePhase9bLiveBudget } from "./phase9b-live-budget.js";
+import { createPhase9bRealtimeObserver, phase9bObservationArguments } from "./phase9b-realtime-observation.js";
 
 type JsonRecord = Record<string, unknown>;
 type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
@@ -142,7 +144,9 @@ const notificationProjectionCache = new NotificationProjectionCache();
 // This runs before Electron's single-instance lock and ready lifecycle so a
 // live run receives a run-specific safeStorage namespace after its isolated
 // profile and ownership marker have passed validation.
-configurePhase9bLiveProfile(app);
+const phase9bLiveProfile = configurePhase9bLiveProfile(app);
+const phase9bLiveBudget = configurePhase9bLiveBudget(phase9bLiveProfile);
+const phase9bRealtimeObserver = createPhase9bRealtimeObserver(phase9bLiveProfile);
 
 function configureBackendBearer(): void {
   try {
@@ -463,6 +467,7 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
     minHeight: 620,
     webPreferences: {
       ...secureWebPreferences,
+      additionalArguments: phase9bObservationArguments(phase9bLiveProfile),
       preload: new URL("../preload/index.cjs", import.meta.url).pathname
     }
   });
@@ -670,6 +675,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.whenReady().then(() => {
+    phase9bLiveBudget?.attach(session.defaultSession);
     configureBackendBearer();
     wakeWordService = new SherpaWakeWordService({
       modelRoot: wakeWordModelRoot(),
@@ -680,6 +686,18 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
     handleDesktopIpc("app:getVersion", () => app.getVersion());
+    if (phase9bRealtimeObserver !== undefined) {
+      handleDesktopIpc("phase9b:observeRealtimeConnection", (event, value: unknown) => {
+        const contents = mainWindow?.webContents;
+        if (contents === undefined || typeof event !== "object" || event === null
+            || !("sender" in event) || event.sender !== contents
+            || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+            || contents.mainFrame.url !== rendererEntryUrl) {
+          throw desktopActionFailure("terminal", "forbidden");
+        }
+        phase9bRealtimeObserver(value);
+      });
+    }
     handleDesktopIpc("wake-word:start", async (_event, value: unknown) => {
       try {
         const input = requiredBody(value);
@@ -790,7 +808,7 @@ if (!app.requestSingleInstanceLock()) {
         { version: 1, events: input.events },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    handleDesktopIpc("backend:delegateTask", (_event, value: unknown) => {
+    handleDesktopIpc("backend:delegateTask", async (_event, value: unknown) => {
       const input = requiredBody(value);
       const requiredCapabilities = requiredStringArray(input.requiredCapabilities, "requiredCapabilities", 20);
       const sourceMessageIds = requiredUuidArray(input.sourceMessageIds, "sourceMessageIds");
@@ -800,6 +818,11 @@ if (!app.requestSingleInstanceLock()) {
       const expectedOutput = input.expectedOutput === null || input.expectedOutput === undefined
         ? null
         : requiredString(input.expectedOutput, "expectedOutput", 100_000);
+      const logicalId = randomUUID();
+      await phase9bLiveBudget?.reserve(
+        "delegationAttempts",
+        logicalId,
+        `desktop-delegation:${logicalId}`);
       return requestBackend(
         taskApiPath,
         "POST",

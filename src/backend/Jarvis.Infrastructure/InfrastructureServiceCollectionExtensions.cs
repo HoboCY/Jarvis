@@ -22,6 +22,7 @@ using Jarvis.Infrastructure.Responses;
 using Jarvis.Infrastructure.Summaries;
 using Jarvis.Infrastructure.Resilience;
 using Jarvis.Infrastructure.Observability;
+using Jarvis.Infrastructure.Budgets;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
@@ -80,6 +81,17 @@ public static class InfrastructureServiceCollectionExtensions
             .Validate(options => options.CircuitSamplingDurationMs >= 501, "Resilience:CircuitSamplingDurationMs must be at least 501ms.")
             .Validate(options => options.CircuitBreakDurationMs >= 501, "Resilience:CircuitBreakDurationMs must be at least 501ms.")
             .ValidateOnStart();
+        services.AddOptions<Phase9bBudgetAdmissionOptions>()
+            .Bind(configuration.GetSection(Phase9bBudgetAdmissionOptions.SectionName))
+            .Validate(options => !options.Enabled
+                || Path.IsPathFullyQualified(options.DescriptorPath),
+                "BudgetAdmission:DescriptorPath must be an absolute path when enabled.")
+            .Validate(options => !options.Enabled
+                || Guid.TryParse(options.RunId, out _),
+                "BudgetAdmission:RunId must be a GUID when enabled.")
+            .ValidateOnStart();
+        services.AddSingleton<IPhase9bBudgetAdmission, Phase9bBudgetAdmissionClient>();
+        services.AddTransient<Phase9bProviderAdmissionHandler>();
         services.AddScoped<DatabaseInitializer>();
         services.AddOptions<IdempotencyOptions>()
             .Bind(configuration.GetSection(IdempotencyOptions.SectionName))
@@ -177,7 +189,8 @@ public static class InfrastructureServiceCollectionExtensions
             client.Timeout = TimeSpan.FromSeconds(30);
         })
             .AddJarvisHttpResilience(serviceProvider =>
-                serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ResilienceOptions>>().Value);
+                serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ResilienceOptions>>().Value)
+            .AddHttpMessageHandler<Phase9bProviderAdmissionHandler>();
         services.AddSingleton<IRealtimeSafetyIdentifierProvider, ConfiguredRealtimeSafetyIdentifierProvider>();
         services.AddScoped<IRealtimeStore, EfRealtimeStore>();
         services.AddScoped<RealtimeService>();

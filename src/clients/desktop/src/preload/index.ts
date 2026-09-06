@@ -152,3 +152,9 @@ const jarvisApi = {
 };
 
 contextBridge.exposeInMainWorld("jarvis", jarvisApi);
+
+if (process.argv.includes("--phase9b-observe-realtime")) {
+  contextBridge.exposeInMainWorld("jarvisPhase9b", {
+    observeRealtimeConnection: (value: unknown): Promise<void> => invoke("phase9b:observeRealtimeConnection", value)
+  });
+}

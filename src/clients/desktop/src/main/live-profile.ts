@@ -22,9 +22,9 @@ export type Phase9bApplication = {
 
 /**
  * Validate the narrow, explicit live launch contract before Electron is ready.
- * The user-data directory and owner marker are created by the harness; the
- * renderer and IPC surface are unchanged. Returning undefined keeps ordinary
- * launches on the existing app name and profile.
+ * The user-data directory and owner marker are created by the harness.
+ * Returning undefined keeps ordinary launches on the existing app name and
+ * profile, without the optional live observation entry point.
  */
 export function resolvePhase9bLiveProfile(
   argv: readonly string[],

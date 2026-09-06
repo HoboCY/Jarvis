@@ -13,6 +13,7 @@ import {
   type RealtimeTransportLayer
 } from "@openai/agents-realtime";
 import type { WakeWordDetector } from "./wake-word.js";
+import { projectPhase9bRealtimeConnection } from "./phase9b-realtime-observation.js";
 
 export interface DesktopRealtimeBackend {
   markConnected: (input: {
@@ -405,6 +406,14 @@ export class DesktopRealtimeController {
         model: input.model,
         ...(input.webRtcUrl ? { url: input.webRtcUrl } : {})
       });
+      if (typeof window !== "undefined" && window.jarvisPhase9b !== undefined
+          && session.transport instanceof OpenAIRealtimeWebRTC) {
+        const observation = projectPhase9bRealtimeConnection(
+          input.realtimeSessionId, session.transport.connectionState.peerConnection);
+        if (observation !== undefined) {
+          await window.jarvisPhase9b.observeRealtimeConnection(observation);
+        }
+      }
       if (mediaStream) {
         session.mute(true);
       }

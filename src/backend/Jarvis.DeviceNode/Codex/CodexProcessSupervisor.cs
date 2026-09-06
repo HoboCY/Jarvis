@@ -1,4 +1,5 @@
 using Jarvis.Application.Devices;
+using Jarvis.Infrastructure.Budgets;
 using Jarvis.Infrastructure.Observability;
 
 namespace Jarvis.DeviceNode.Codex;
@@ -35,13 +36,16 @@ public sealed class CodexProcessSupervisor
 {
     private readonly Func<CancellationToken, Task<ICodexRuntime>> runtimeFactory;
     private readonly CodexSupervisorOptions options;
+    private readonly IPhase9bBudgetAdmission? budgetAdmission;
 
     public CodexProcessSupervisor(
         Func<CancellationToken, Task<ICodexRuntime>> runtimeFactory,
-        CodexSupervisorOptions? options = null)
+        CodexSupervisorOptions? options = null,
+        IPhase9bBudgetAdmission? budgetAdmission = null)
     {
         this.runtimeFactory = runtimeFactory ?? throw new ArgumentNullException(nameof(runtimeFactory));
         this.options = options ?? new CodexSupervisorOptions();
+        this.budgetAdmission = budgetAdmission;
         if (this.options.MaxRestartAttempts < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "MaxRestartAttempts cannot be negative.");
@@ -55,15 +59,18 @@ public sealed class CodexProcessSupervisor
         Func<ICodexRuntime, string, CancellationToken, Task<T>> execute,
         Action<CodexSupervisorState>? onState = null,
         Func<CodexSupervisorState, CancellationToken, Task>? onStateAsync = null,
+        Guid? logicalTaskId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(execute);
 
         var threadId = string.IsNullOrWhiteSpace(existingThreadId) ? null : existingThreadId;
+        var invocationId = Guid.NewGuid();
         for (var restartAttempt = 0; ; restartAttempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            await ReserveBudgetAsync(logicalTaskId, restartAttempt, invocationId, cancellationToken).ConfigureAwait(false);
             await using var runtime = await runtimeFactory(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -113,6 +120,53 @@ public sealed class CodexProcessSupervisor
                 await Task.Delay(options.EffectiveRestartDelay, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    private async Task ReserveBudgetAsync(
+        Guid? logicalTaskId,
+        int restartAttempt,
+        Guid invocationId,
+        CancellationToken cancellationToken)
+    {
+        if (budgetAdmission?.Enabled != true)
+        {
+            return;
+        }
+
+        if (logicalTaskId is not Guid taskId || taskId == Guid.Empty)
+        {
+            throw new Phase9bBudgetAdmissionException("ADMISSION_INVALID");
+        }
+
+        var retryRequestSuffix = $"restart:{restartAttempt}";
+        if (restartAttempt == 0)
+        {
+            var taskReservation = await budgetAdmission.ReserveAsync(
+                "codexTasks",
+                taskId,
+                $"codex:{taskId:D}",
+                cancellationToken).ConfigureAwait(false);
+
+            // A durable task reservation is intentionally idempotent. If a
+            // new supervisor takes over after a process restart, the replay
+            // still represents a new execution attempt and must consume the
+            // shared retry budget before another runtime is launched.
+            if (!taskReservation.Replayed)
+            {
+                return;
+            }
+
+            // Keep takeover separate from the first in-process restart. They
+            // are two physical launches even though both occur before the
+            // supervisor's outer restart counter advances.
+            retryRequestSuffix = "takeover";
+        }
+
+        await budgetAdmission.ReserveAsync(
+            "retries",
+            taskId,
+            $"retry:{taskId:D}:{invocationId:N}:{retryRequestSuffix}",
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static void Notify(Action<CodexSupervisorState>? onState, CodexSupervisorState state)

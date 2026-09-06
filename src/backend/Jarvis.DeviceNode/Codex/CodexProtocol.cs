@@ -16,6 +16,7 @@ public static class CodexProtocolMethods
     public const string Initialized = "initialized";
     public const string ThreadStart = "thread/start";
     public const string ThreadResume = "thread/resume";
+    public const string ThreadRead = "thread/read";
     public const string TurnStart = "turn/start";
     public const string TurnInterrupt = "turn/interrupt";
     public const string ProcessExited = "process/exited";
@@ -287,6 +288,14 @@ public interface ICodexRuntime : IAsyncDisposable
 
     Task<CodexThreadHandle> ResumeThreadAsync(string threadId, CapabilityPolicy policy, string? cwd, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads the persisted thread history with full turn items. The default
+    /// implementation keeps older test/runtime adapters fail-closed until
+    /// they explicitly support the pinned app-server request.
+    /// </summary>
+    Task<JsonElement> ReadThreadAsync(string threadId, CancellationToken cancellationToken = default) =>
+        Task.FromException<JsonElement>(new NotSupportedException("The Codex runtime does not support thread/read."));
+
     Task<CodexTurnHandle> StartTurnAsync(string threadId, string input, CancellationToken cancellationToken = default);
 
     Task InterruptTurnAsync(string threadId, string turnId, CancellationToken cancellationToken = default);
@@ -489,6 +498,18 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 JarvisTelemetry.BoundedTags(("operation", "resume")).ToArray());
             throw;
         }
+    }
+
+    public async Task<JsonElement> ReadThreadAsync(
+        string threadId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
+        await EnsureInitializedAsync(cancellationToken);
+        return await SendRequestAsync(
+            CodexProtocolMethods.ThreadRead,
+            new { threadId, includeTurns = true },
+            cancellationToken);
     }
 
     public async Task<CodexTurnHandle> StartTurnAsync(string threadId, string input, CancellationToken cancellationToken = default)

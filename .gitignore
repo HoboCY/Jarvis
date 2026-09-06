@@ -19,6 +19,7 @@ artifacts/openapi/.server.log
 artifacts/releases/
 artifacts/services/
 artifacts/test-reports/
+artifacts/live/
 src/clients/desktop/out/
 src/backend/Jarvis.Api/jarvis.db*
 

@@ -1,6 +1,7 @@
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using Jarvis.Application.Responses;
+using Jarvis.Infrastructure.Budgets;
 using Microsoft.Extensions.Options;
 using OpenAI.Responses;
 
@@ -65,17 +66,28 @@ public sealed class DeepSeekResponsesRuntime : IResponsesRuntime
 }
 
 public sealed class DeepSeekResponsesClientFactory(
-    IOptions<DeepSeekOptions> options) : IResponsesClientFactory
+    IOptions<DeepSeekOptions> options,
+    IPhase9bBudgetAdmission admission) : IResponsesClientFactory, IDisposable
 {
+    private readonly HttpClient? httpClient = admission.Enabled
+        ? Phase9bProviderHttpClient.Create(admission)
+        : null;
+
     public ResponsesClient Create(string model)
     {
         var settings = options.Value;
-        return new ResponsesClient(
-            new ApiKeyCredential(settings.ApiKey),
-            new ResponsesClientOptions
-            {
-                Endpoint = new Uri(settings.BaseUrl, UriKind.Absolute),
-                RetryPolicy = new ClientRetryPolicy(0)
-            });
+        var clientOptions = new ResponsesClientOptions
+        {
+            Endpoint = new Uri(settings.BaseUrl, UriKind.Absolute),
+            RetryPolicy = new ClientRetryPolicy(0)
+        };
+        if (httpClient is not null)
+        {
+            clientOptions.Transport = new HttpClientPipelineTransport(httpClient);
+        }
+
+        return new ResponsesClient(new ApiKeyCredential(settings.ApiKey), clientOptions);
     }
+
+    public void Dispose() => httpClient?.Dispose();
 }

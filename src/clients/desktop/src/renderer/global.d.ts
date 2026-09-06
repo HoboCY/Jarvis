@@ -1,4 +1,12 @@
 interface Window {
+  jarvisPhase9b?: {
+    observeRealtimeConnection: (value: {
+      realtimeSessionId: string;
+      peerConnectionState: RTCPeerConnectionState;
+      remoteAudioTrackCount: number;
+      liveRemoteAudioTrackCount: number;
+    }) => Promise<void>;
+  };
   jarvis: {
     getAppVersion: () => Promise<string>;
     getDiagnostics: () => Promise<unknown>;
