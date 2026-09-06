@@ -114,10 +114,20 @@ commands and results in the acceptance report.
 The acceptance report distinguishes verified, unsupported, blocked and unverified scenarios.
 Review the final diff independently for standards and specification fit. Push only scoped
 commits and open a PR against main with the `full-matrix` label; do not merge it automatically.
-Remote success must refer to the final candidate SHA. Phase 9C does not begin in this task.
+Remote CI success must refer to the final PR head SHA; live evidence remains bound to its
+installed candidate SHA. Phase 9C does not begin in this task.
 
-Harness changes add opt-in commands and ignored evidence output. An optional Desktop
-automation seam must require the live flag, isolated profile and an owned run marker, expose
-only bounded scenario actions, and remain unavailable during ordinary application startup.
-Rollback is removal of this branch's scoped changes and cleanup of owned temporary runtime
-data; daily services, credentials and user content are outside the mutation scope.
+Harness commands, budget admission and Desktop audio observation are opt-in and require
+an isolated owned run. Product fixes also affect ordinary startup, Codex completion and
+cancellation, lease renewal, default device selection and approval request identity.
+
+The `20260906075325_Phase9BApprovalRequestScope` migration changes approval uniqueness
+from `(DeviceId, RequestId)` to `(DeviceId, ExecutionId, RequestId)`. Up accepts existing
+rows because the old constraint is stronger. Once separate executions reuse a native
+request ID, Down cannot restore the old unique index losslessly. Rollback requires a
+pre-upgrade database backup or an explicit plan for conflicting data; never silently delete
+user rows. Reverting binaries alone is insufficient after applying this migration.
+
+Remove owned temporary runtime data and revert scoped code only when appropriate for the
+persisted schema. Daily services, credentials and unrelated user content remain outside
+the cleanup scope. The acceptance report records actual cleanup and any security failure.
