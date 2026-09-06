@@ -230,6 +230,12 @@ public sealed partial class DeviceNodeWorker(
         var task = claim.Task;
         var execution = claim.Execution;
         var leaseOwner = claim.LeaseOwner;
+        if (task.Status == TaskStatusValue.CancellationRequested)
+        {
+            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (claim.CapabilityEnvelope is null)
         {
             await AppendEventSafeAsync(
@@ -291,6 +297,7 @@ public sealed partial class DeviceNodeWorker(
                 TimeSpan.FromMilliseconds(Math.Max(0, nodeOptions.RestartDelayMs))),
             budgetAdmission);
 
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
             await supervisor.RunAsync(
@@ -306,8 +313,8 @@ public sealed partial class DeviceNodeWorker(
                     turnState,
                     effectivePolicy,
                     token),
-                onStateAsync: (state, token) => ObserveSupervisorStateAsync(state, task, execution, leaseOwner, token),
-                cancellationToken: cancellationToken,
+                onStateAsync: (state, token) => ObserveSupervisorStateAsync(state, task, execution, leaseOwner, executionCancellation, token),
+                cancellationToken: executionCancellation.Token,
                 logicalTaskId: task.Id).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -316,6 +323,10 @@ public sealed partial class DeviceNodeWorker(
         }
         catch (CodexTurnStartUncertainException exception)
         {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
             LogExecutionFailure(logger, exception, task.Id);
             await AppendEventSafeAsync(
                 task.Id,
@@ -332,6 +343,10 @@ public sealed partial class DeviceNodeWorker(
         }
         catch (Phase9bBudgetAdmissionException exception)
         {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
             LogExecutionFailure(logger, exception, task.Id);
             await AppendFailureAsync(
                 task,
@@ -343,6 +358,10 @@ public sealed partial class DeviceNodeWorker(
         }
         catch (Exception exception)
         {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
             LogExecutionFailure(logger, exception, task.Id);
             await AppendEventSafeAsync(
                 task.Id,
@@ -376,6 +395,12 @@ public sealed partial class DeviceNodeWorker(
             && executionId == claimedExecution.Id
             ? execution
             : claimedExecution;
+        if (durableTask.Status == TaskStatusValue.CancellationRequested)
+        {
+            await AppendCancellationAsync(durableTask, durableExecution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return "The durable Codex task was cancelled before turn execution.";
+        }
+
         if (durableTask.Status is TaskStatusValue.Succeeded or TaskStatusValue.Failed or TaskStatusValue.Cancelled
             || durableExecution.Status is TaskExecutionStatusValue.Succeeded or TaskExecutionStatusValue.Failed or TaskExecutionStatusValue.Cancelled)
         {
@@ -436,7 +461,7 @@ public sealed partial class DeviceNodeWorker(
             turn = await StartTurnOnceAsync(runtime, threadId, task.Goal, turnState, cancellationToken).ConfigureAwait(false);
         }
 
-        await controlPlane.AppendEventAsync(
+        var turnStarted = await controlPlane.AppendEventAsync(
             task.Id,
             new DeviceTaskEventRequest(
                 $"codex-turn-started:{turn.TurnId}",
@@ -447,6 +472,14 @@ public sealed partial class DeviceNodeWorker(
             leaseOwner,
             $"codex-turn-started:{turn.TurnId}",
             cancellationToken).ConfigureAwait(false);
+        if (turnStarted.Status == TaskStatusValue.CancellationRequested)
+        {
+            // The start intent may have committed before cancellation arrived.
+            // Interrupt its accepted native turn before handling further events.
+            await runtime.InterruptTurnAsync(threadId, turn.TurnId, cancellationToken).ConfigureAwait(false);
+            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return "Codex task cancelled during turn start.";
+        }
 
         using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var cancellationRequested = false;
@@ -1108,7 +1141,13 @@ public sealed partial class DeviceNodeWorker(
             turnCancellation.Cancel();
             try
             {
-                await Task.WhenAll(leaseRenewal, cancellationMonitor).ConfigureAwait(false);
+                // An async iterator cannot be disposed while MoveNextAsync is
+                // still pending. Drain the cancelled read before leaving its scope.
+                await Task.WhenAll(
+                    leaseRenewal,
+                    cancellationMonitor,
+                    (Task?)nextRuntimeEvent ?? Task.CompletedTask,
+                    (Task?)userInputTask ?? Task.CompletedTask).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (turnCancellation.IsCancellationRequested)
             {
@@ -1344,6 +1383,24 @@ public sealed partial class DeviceNodeWorker(
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<bool> ResolveDurableCancellationAfterRuntimeExitAsync(
+        TaskResponse task,
+        TaskExecutionResponse execution,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        // RunAsync disposes the native process before an exception escapes.
+        // Cancellation therefore remains authoritative even if interrupt failed.
+        var durableTask = await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false);
+        if (durableTask.Status == TaskStatusValue.CancellationRequested)
+        {
+            await AppendCancellationAsync(durableTask, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+
+        return durableTask.Status is TaskStatusValue.Succeeded or TaskStatusValue.Failed or TaskStatusValue.Cancelled;
+    }
+
     private async Task AppendCancellationAsync(
         TaskResponse task,
         TaskExecutionResponse execution,
@@ -1388,10 +1445,20 @@ public sealed partial class DeviceNodeWorker(
         TaskResponse task,
         TaskExecutionResponse execution,
         string leaseOwner,
+        CancellationTokenSource executionCancellation,
         CancellationToken cancellationToken)
     {
         if (state.Status == CodexSupervisorStatus.Recovering)
         {
+            var durableTask = await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false);
+            if (durableTask.Status == TaskStatusValue.CancellationRequested)
+            {
+                // Leave the supervisor so its runtime is disposed before the
+                // outer cancellation path acknowledges the durable request.
+                executionCancellation.Cancel();
+                return;
+            }
+
             await AppendEventSafeAsync(
                 task.Id,
                 new DeviceTaskEventRequest(

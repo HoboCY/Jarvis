@@ -1,6 +1,7 @@
 using Jarvis.DeviceNode;
 using Jarvis.DeviceNode.Codex;
 using Jarvis.Contracts;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
@@ -1354,8 +1355,17 @@ done
         }
     }
 
-    [Fact]
-    public async System.Threading.Tasks.Task FakeJsonlCancellationWinsTheInputRaceWithoutSendingAnAnswer()
+    [Theory]
+    [InlineData("pending", false)]
+    [InlineData("pending", true)]
+    [InlineData("claimed", false)]
+    [InlineData("beforeTurn", false)]
+    [InlineData("turnStarting", false)]
+    [InlineData("recovery", false)]
+    [InlineData("recoveryProbeUnavailable", false)]
+    public async System.Threading.Tasks.Task FakeJsonlCancellationWinsTheInputRaceWithoutSendingAnAnswer(
+        string cancellationStage,
+        bool rejectInterrupt)
     {
         var root = Directory.CreateTempSubdirectory("jarvis-fake-codex-user-input-cancel-");
         var script = Path.Combine(root.FullName, "fake-codex.sh");
@@ -1376,6 +1386,21 @@ done
               if echo "$line" | grep -q '"method":"turn/interrupt"'; then echo '{"id":4,"result":{}}'; fi
             done
             """.Replace("__REQUESTS_PATH__", requestsPath, StringComparison.Ordinal);
+        if (rejectInterrupt)
+        {
+            scriptContents = scriptContents.Replace("{\"id\":4,\"result\":{}}", "{\"id\":4,\"error\":{\"code\":-32000,\"message\":\"interrupt unavailable\"}}", StringComparison.Ordinal);
+        }
+        if (cancellationStage == "recovery")
+        {
+            scriptContents = scriptContents.Replace("{\"id\":1,\"result\":{}}", "{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"initialization unavailable\"}}", StringComparison.Ordinal);
+        }
+        if (cancellationStage == "recoveryProbeUnavailable")
+        {
+            scriptContents = scriptContents.Replace(
+                "echo '{\"id\":1,\"result\":{}}'",
+                $"if [ ! -e '{root.FullName}/initialized-once' ]; then touch '{root.FullName}/initialized-once'; exit 1; fi; echo '{{\"id\":1,\"result\":{{}}}}'",
+                StringComparison.Ordinal);
+        }
         await File.WriteAllTextAsync(script, scriptContents);
         if (!OperatingSystem.IsWindows())
         {
@@ -1433,9 +1458,17 @@ done
                 "cancel-owner",
                 30_000,
                 new CapabilityEnvelopeContract(ReadFiles: true, AllowedRoots: [taskRoot]));
+            if (cancellationStage == "claimed")
+            {
+                claim = claim with { Task = task with { Status = TaskStatusValue.CancellationRequested } };
+            }
             var controlPlane = new RecordingControlPlane
             {
-                CancelUserInputAfterPolls = 1
+                CancelUserInputAfterPolls = 1,
+                CancellationRequested = cancellationStage == "claimed",
+                CancelWhenTaskRead = cancellationStage is "beforeTurn" or "recovery",
+                CancelWhenTurnStarting = cancellationStage == "turnStarting",
+                FailTaskReads = cancellationStage == "recoveryProbeUnavailable" ? 1 : 0
             };
             var options = Options.Create(new DeviceNodeOptions
             {
@@ -1444,7 +1477,7 @@ done
                 CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
                 HeartbeatIntervalMs = 30_000,
                 PollingIntervalMs = 25,
-                MaxRestartAttempts = 0,
+                MaxRestartAttempts = cancellationStage.StartsWith("recovery", StringComparison.Ordinal) ? 1 : 0,
                 Capabilities = new CapabilityEnvelopeOptions
                 {
                     ReadFiles = true,
@@ -1464,8 +1497,41 @@ done
                 new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
 
             Assert.True(controlPlane.CancellationRequested);
-            Assert.Contains(controlPlane.Events, item => item.EventType == "task.cancelled");
-            var responseLines = (await File.ReadAllLinesAsync(requestsPath))
+            Assert.Single(controlPlane.Events, item => item.EventType == "task.cancelled");
+            Assert.DoesNotContain(controlPlane.Events, item => item.EventType is "task.failed" or "task.completed");
+            if (cancellationStage != "recoveryProbeUnavailable")
+            {
+                Assert.DoesNotContain(controlPlane.Events, item => item.EventType == "task.recovering");
+            }
+            Assert.Equal(TaskStatusValue.Cancelled, controlPlane.LastTaskStatus);
+            var requestLines = File.Exists(requestsPath) ? await File.ReadAllLinesAsync(requestsPath) : [];
+            if (cancellationStage == "recoveryProbeUnavailable")
+            {
+                Assert.Equal(0, controlPlane.FailTaskReads);
+                Assert.Equal(2, requestLines.Count(line => line.Contains("\"method\":\"initialize\"", StringComparison.Ordinal)));
+                Assert.DoesNotContain(controlPlane.Events, item => item.EventType == "task.recovering");
+            }
+            if (cancellationStage == "recovery")
+            {
+                Assert.Single(requestLines, line => line.Contains("\"method\":\"initialize\"", StringComparison.Ordinal));
+            }
+            if (cancellationStage == "claimed")
+            {
+                Assert.Empty(requestLines);
+            }
+            if (cancellationStage is "pending" or "turnStarting")
+            {
+                Assert.Single(requestLines, line => line.Contains("\"method\":\"turn/interrupt\"", StringComparison.Ordinal));
+            }
+            if (cancellationStage == "turnStarting")
+            {
+                Assert.Null(controlPlane.UserInputResponse);
+            }
+            if (cancellationStage is not ("pending" or "turnStarting" or "recoveryProbeUnavailable"))
+            {
+                Assert.DoesNotContain(requestLines, line => line.Contains("\"method\":\"turn/start\"", StringComparison.Ordinal));
+            }
+            var responseLines = requestLines
                 .Select(line => JsonDocument.Parse(line).RootElement.Clone())
                 .Where(item => item.TryGetProperty("result", out _))
                 .ToArray();
@@ -1601,6 +1667,18 @@ done
     [Fact]
     public async System.Threading.Tasks.Task FakeJsonlLeaseLossWinsTheInputRaceWithoutSendingAnAnswer()
     {
+        await VerifyLeaseLossWithPendingRuntimeReadAsync();
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ConcurrentLeaseLossPreservesTheFailureWhileRuntimeReadsArePending()
+    {
+        await System.Threading.Tasks.Task.WhenAll(
+            Enumerable.Range(0, 12).Select(_ => VerifyLeaseLossWithPendingRuntimeReadAsync()));
+    }
+
+    private static async System.Threading.Tasks.Task VerifyLeaseLossWithPendingRuntimeReadAsync()
+    {
         var root = Directory.CreateTempSubdirectory("jarvis-fake-codex-user-input-lease-loss-");
         var script = Path.Combine(root.FullName, "fake-codex.sh");
         var requestsPath = Path.Combine(root.FullName, "requests.jsonl");
@@ -1694,10 +1772,11 @@ done
                     AllowedRoots = [root.FullName]
                 }
             });
+            var logger = new RecordingWorkerLogger();
             var worker = new DeviceNodeWorker(
                 options,
                 controlPlane,
-                NullLogger<DeviceNodeWorker>.Instance,
+                logger,
                 timeProvider: TimeProvider.System,
                 userInputWaiter: new PollingUserInputWaiter(controlPlane, options, TimeProvider.System));
 
@@ -1706,7 +1785,10 @@ done
                 Jarvis.Application.Devices.CapabilityPolicy.Create(options.Value.Capabilities.ToEnvelope()),
                 new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token);
 
-            Assert.Contains(controlPlane.Events, item => item.EventType == "task.failed");
+            Assert.Single(controlPlane.Events, item => item.EventType == "task.failed");
+            var failure = Assert.Single(logger.Exceptions);
+            var cause = Assert.IsType<InvalidOperationException>(failure.InnerException);
+            Assert.Contains("lease could not be renewed", cause.Message, StringComparison.Ordinal);
             var responseLines = (await File.ReadAllLinesAsync(requestsPath))
                 .Select(line => JsonDocument.Parse(line).RootElement.Clone())
                 .Where(item => item.TryGetProperty("result", out _))
@@ -2220,6 +2302,21 @@ done
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
+    private sealed class RecordingWorkerLogger : ILogger<DeviceNodeWorker>
+    {
+        public ConcurrentQueue<Exception> Exceptions { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (exception is not null)
+            {
+                Exceptions.Enqueue(exception);
+            }
+        }
+    }
+
     private sealed class RecordingControlPlane : IDeviceNodeControlPlane
     {
         public Queue<ApprovalStatusValue> ApprovalStatuses { get; set; } = new([ApprovalStatusValue.Pending]);
@@ -2230,7 +2327,10 @@ done
         public int UserInputPollCount { get; private set; }
         public int CancelUserInputAfterPolls { get; set; }
         public bool FailLeaseRenewal { get; set; }
-        public bool CancellationRequested { get; private set; }
+        public bool CancellationRequested { get; set; }
+        public bool CancelWhenTaskRead { get; set; }
+        public bool CancelWhenTurnStarting { get; set; }
+        public int FailTaskReads { get; set; }
         public TaskStatusValue LastTaskStatus { get; private set; } = TaskStatusValue.Running;
         public IReadOnlyDictionary<string, TaskUserInputAnswer>? UserInputAnswers { get; set; }
         public DeviceTaskUserInputResponse? UserInputResponse { get; private set; }
@@ -2247,6 +2347,15 @@ done
 
         public System.Threading.Tasks.Task<TaskResponse> GetTaskAsync(Guid taskId, CancellationToken cancellationToken)
         {
+            if (FailTaskReads > 0)
+            {
+                FailTaskReads--;
+                throw new HttpRequestException("Temporary control-plane read failure.");
+            }
+            if (CancelWhenTaskRead)
+            {
+                CancellationRequested = true;
+            }
             var pending = UserInputResponse is null
                 ? null
                 : new TaskUserInputResponse(
@@ -2303,6 +2412,10 @@ done
         public System.Threading.Tasks.Task<DeviceTaskEventResponse> AppendEventAsync(Guid taskId, DeviceTaskEventRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken)
         {
             Events.Enqueue(request);
+            if (CancelWhenTurnStarting && request.EventType == "codex.turn.starting")
+            {
+                CancellationRequested = true;
+            }
             if (request.EventType == "task.completed")
             {
                 LastTaskStatus = TaskStatusValue.Succeeded;
@@ -2315,7 +2428,10 @@ done
             {
                 LastTaskStatus = TaskStatusValue.Cancelled;
             }
-            return System.Threading.Tasks.Task.FromResult(new DeviceTaskEventResponse(taskId, request.ExecutionId, true, false, LastTaskStatus, TaskExecutionStatusValue.Running));
+            var taskStatus = CancellationRequested && LastTaskStatus == TaskStatusValue.Running
+                ? TaskStatusValue.CancellationRequested
+                : LastTaskStatus;
+            return System.Threading.Tasks.Task.FromResult(new DeviceTaskEventResponse(taskId, request.ExecutionId, true, false, taskStatus, TaskExecutionStatusValue.Running));
         }
 
         public System.Threading.Tasks.Task<DeviceApprovalResponse> CreateApprovalAsync(Guid taskId, DeviceApprovalRequest request, string leaseOwner, string idempotencyKey, CancellationToken cancellationToken)

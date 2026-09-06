@@ -31,6 +31,7 @@ public sealed class EfDeviceStore(
     private const long LeaseDurationMs = 30_000;
     private const long DeviceHeartbeatFreshnessMs = 60_000;
     private const long ApprovalLifetimeMs = 5 * 60_000;
+    private const int MaxLeaseWriteAttempts = 3;
 
     public async Task<DeviceOperation<DeviceListResponse>> ListOwnedAsync(
         Guid userId,
@@ -398,33 +399,58 @@ public sealed class EfDeviceStore(
             return Invalid<DeviceTaskLeaseRenewResponse>("The Idempotency-Key header is required.");
         }
 
-        var task = await db.Tasks.SingleOrDefaultAsync(item => item.Id == taskId && item.AssignedDeviceId == deviceId, cancellationToken);
-        if (task is null)
-        {
-            return new(DeviceOperationStatus.NotFound, Detail: "Task not found for this device.");
-        }
-
         var requestHash = Hash(request);
         var scope = $"devices:{deviceId:D}:tasks:{taskId:D}:lease-renew";
-        var existing = await FindIdempotencyAsync(task.UserId, scope, idempotencyKey, cancellationToken);
-        if (existing is not null)
+        for (var attempt = 1; attempt <= MaxLeaseWriteAttempts; attempt++)
         {
-            return Replay<DeviceTaskLeaseRenewResponse>(existing, requestHash, json => JsonSerializer.Deserialize<DeviceTaskLeaseRenewResponse>(json, JsonOptions));
+            try
+            {
+                var task = await db.Tasks.SingleOrDefaultAsync(item => item.Id == taskId && item.AssignedDeviceId == deviceId, cancellationToken);
+                if (task is null)
+                {
+                    return new(DeviceOperationStatus.NotFound, Detail: "Task not found for this device.");
+                }
+
+                var existing = await FindIdempotencyAsync(task.UserId, scope, idempotencyKey, cancellationToken);
+                if (existing is not null)
+                {
+                    return Replay<DeviceTaskLeaseRenewResponse>(existing, requestHash, json => JsonSerializer.Deserialize<DeviceTaskLeaseRenewResponse>(json, JsonOptions));
+                }
+
+                var nowMs = Now();
+                var renewed = task.Status == DomainTaskStatus.CancellationRequested
+                    ? task.RenewCancellationLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs)
+                    : task.RenewLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs);
+                if (!renewed)
+                {
+                    return new(DeviceOperationStatus.Conflict, new DeviceTaskLeaseRenewResponse(task.Id, false, task.LeaseExpiresAtMs, ToContractStatus(task.Status)), "The lease is not owned or has expired.");
+                }
+
+                var response = new DeviceTaskLeaseRenewResponse(task.Id, true, task.LeaseExpiresAtMs, ToContractStatus(task.Status));
+                AddIdempotency(task.UserId, scope, idempotencyKey, requestHash, 200, response, nowMs);
+                await db.SaveChangesAsync(cancellationToken);
+                return new(DeviceOperationStatus.Succeeded, response);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                db.ChangeTracker.Clear();
+                if (attempt < MaxLeaseWriteAttempts)
+                {
+                    await System.Threading.Tasks.Task.Delay(TimeSpan.FromMilliseconds(10L * attempt), cancellationToken);
+                }
+            }
         }
 
-        var nowMs = Now();
-        var renewed = task.Status == DomainTaskStatus.CancellationRequested
-            ? task.RenewCancellationLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs)
-            : task.RenewLease(request.LeaseOwner, checked(nowMs + LeaseDurationMs), nowMs);
-        if (!renewed)
-        {
-            return new(DeviceOperationStatus.Conflict, new DeviceTaskLeaseRenewResponse(task.Id, false, task.LeaseExpiresAtMs, ToContractStatus(task.Status)), "The lease is not owned or has expired.");
-        }
-
-        var response = new DeviceTaskLeaseRenewResponse(task.Id, true, task.LeaseExpiresAtMs, ToContractStatus(task.Status));
-        AddIdempotency(task.UserId, scope, idempotencyKey, requestHash, 200, response, nowMs);
-        await db.SaveChangesAsync(cancellationToken);
-        return new(DeviceOperationStatus.Succeeded, response);
+        var persistedTask = await db.Tasks.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == taskId && item.AssignedDeviceId == deviceId, cancellationToken);
+        var failureResponse = persistedTask is null
+            ? null
+            : new DeviceTaskLeaseRenewResponse(
+                persistedTask.Id,
+                false,
+                persistedTask.LeaseExpiresAtMs,
+                ToContractStatus(persistedTask.Status));
+        return new(DeviceOperationStatus.Conflict, failureResponse, "The task changed while its lease was being renewed. Retry the lease renewal.");
     }
 
     public async Task<DeviceOperation<TaskResponse>> GetTaskAsync(Guid deviceId, Guid taskId, CancellationToken cancellationToken)
@@ -523,6 +549,29 @@ public sealed class EfDeviceStore(
         if (task.Status is DomainTaskStatus.Succeeded or DomainTaskStatus.Failed or DomainTaskStatus.Cancelled)
         {
             return new(DeviceOperationStatus.Conflict, Detail: "A terminal task cannot receive another event.");
+        }
+
+        var isCancellationConfirmation = string.Equals(request.EventType, "task.cancelled", StringComparison.OrdinalIgnoreCase);
+        var isLateTurnStarted = string.Equals(request.EventType, "codex.turn.started", StringComparison.Ordinal);
+        if (task.Status == DomainTaskStatus.CancellationRequested
+            && !isCancellationConfirmation
+            && !isLateTurnStarted)
+        {
+            return new(DeviceOperationStatus.Conflict, Detail: "A cancellation-requested task can only receive its cancellation confirmation.");
+        }
+
+        if (task.Status == DomainTaskStatus.CancellationRequested
+            && isLateTurnStarted
+            && (execution.CodexTurnId is not null
+                || request.PayloadJson is not null
+                || request.ProgressSummary is not null
+                || request.ResultSummary is not null
+                || request.ResultPayloadJson is not null
+                || request.Artifacts is { Count: > 0 }
+                || request.ErrorCode is not null
+                || request.ErrorMessage is not null))
+        {
+            return new(DeviceOperationStatus.Conflict, Detail: "A late Codex turn-start completion cannot carry task progress or result data.");
         }
 
         var sequence = (await db.TaskEvents.Where(item => item.TaskId == taskId).Select(item => (long?)item.Sequence).MaxAsync(cancellationToken) ?? 0L) + 1L;
@@ -672,7 +721,11 @@ public sealed class EfDeviceStore(
 
         if (!string.IsNullOrWhiteSpace(request.RequestId))
         {
-            var replay = await db.Approvals.AsNoTracking().SingleOrDefaultAsync(item => item.DeviceId == deviceId && item.RequestId == request.RequestId, cancellationToken);
+            var replay = await db.Approvals.AsNoTracking().SingleOrDefaultAsync(
+                item => item.DeviceId == deviceId
+                    && item.ExecutionId == request.ExecutionId
+                    && item.RequestId == request.RequestId,
+                cancellationToken);
             if (replay is not null)
             {
                 if (replay.ExecutionId != request.ExecutionId
