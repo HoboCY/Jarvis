@@ -24,6 +24,28 @@ public sealed class DeviceNodeTests
     }
 
     [Fact]
+    public async System.Threading.Tasks.Task CodexAppServerClientPreservesProcessStartFailureDuringDispose()
+    {
+        var root = Directory.CreateTempSubdirectory("jarvis-codex-start-failure-");
+        try
+        {
+            var missingBinary = Path.Combine(root.FullName, "missing-codex");
+            var exception = await Record.ExceptionAsync(async () =>
+            {
+                await using var client = new CodexAppServerClient(new CodexRuntimeOptions(missingBinary, []));
+                await client.InitializeAsync();
+            });
+
+            var processStartException = Assert.IsType<System.ComponentModel.Win32Exception>(exception);
+            Assert.Equal(2, processStartException.NativeErrorCode);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async System.Threading.Tasks.Task ControlPlaneRequestsCarryTheActiveCorrelationId()
     {
         using var activity = new Activity("device-node-test").Start();
@@ -1702,6 +1724,8 @@ done
         {
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
+        var codexBinaryPath = OperatingSystem.IsWindows() ? script : "/bin/sh";
+        var codexArguments = OperatingSystem.IsWindows() ? Array.Empty<string>() : new[] { script };
 
         try
         {
@@ -1760,8 +1784,8 @@ done
             };
             var options = Options.Create(new DeviceNodeOptions
             {
-                CodexBinaryPath = script,
-                CodexArguments = [],
+                CodexBinaryPath = codexBinaryPath,
+                CodexArguments = codexArguments,
                 CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
                 HeartbeatIntervalMs = 750,
                 PollingIntervalMs = 25,

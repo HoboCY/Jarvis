@@ -24,7 +24,8 @@ J 在手动加载原会话的明确范围内通过。未合并本分支，未开
 
 - 分支：`codex/phase9b-desktop-golden-path`，从上述 merge 创建独立 worktree。
 - **真实运行代码 SHA：`daea6e626592cab238c579c31fa65e914215e354`。**
-  后续文档提交和 PR 的最终 head 不改变本轮实际安装的代码身份。
+  后续 CI 修复及文档提交以 PR head 标识，未重新进行真实 provider 调用；不能把本轮结果
+  当作后续提交的重新 live 验证。
 - 原 worktree 及其未跟踪的 Phase 9A 结果摘要保持原样。
 
 | 实际解包安装的产物 | 字节数 | SHA-256 |
@@ -204,6 +205,15 @@ pnpm phase9b:validate-live-evidence artifacts/live/phase9b/e6823a71-5a51-459f-89
 最终并发/取消定向检查覆盖 9 个 Node 与 27 个 API 用例；完整测试包含这些用例。
 离线测试不会访问付费 provider，不能替代上表未通过的真实场景。
 
+2026-09-07 的 CI 补充修复保留临时目录安全检查，仅让 preflight 测试使用私有临时父目录。
+并发 JSONL 夹具改由 `/bin/sh` 读取临时脚本，避免 Linux 直接执行刚写入的脚本时触发
+`Text file busy`。产品代码在 `Process.Start()` 失败时立即释放未启动的对象、清空字段并
+原样抛出启动异常，防止后续 `DisposeAsync()` 的“未关联进程”覆盖原始原因；不吞掉退出等待异常。
+Linux 完整 live contracts 已在带 init、可执行临时目录且禁用网络的容器中通过 71/71。
+缺失可执行文件的公开 client 回归先在旧代码下复现清理异常覆盖，再验证保留
+`Win32Exception` / `NativeErrorCode=2`。修复后 Device Node 测试在 macOS 与 Linux 各通过 78/78；
+macOS 完整 live contracts 也通过 71/71。
+
 ## GitHub Actions
 
 2026-09-07 用户明确要求继续推送后，正常具名分支推送成功，远端 SHA 与
@@ -214,6 +224,11 @@ pnpm phase9b:validate-live-evidence artifacts/live/phase9b/e6823a71-5a51-459f-89
 禁止自动合并。远端 CI 的实际状态见 [PR checks](https://github.com/HoboCY/Jarvis/pull/8/checks)；
 最终 head、run URL、十个 job 和七份 artifact 的核对结果在 PR 描述与交付回复中记录，
 不能用旧 run 或本地测试代替。live 证据仍绑定实际安装的 `daea6e6`，后续文档提交不改写该身份。
+
+首轮 [Run #32](https://github.com/HoboCY/Jarvis/actions/runs/34078922161) 对应
+`275c69d804e55c6d87595131dbad1db130d556ed`，因上述临时目录及进程启动失败路径未通过。
+workspace、Desktop renderer、mobile-static、Android 和 iOS 原生检查成功；E2E 与 macOS
+因前置失败被跳过，summary 随之失败。该 run 不计为最终远端通过证据。
 
 ## Review
 
@@ -241,7 +256,7 @@ D 的 453ms 取自 I 的相同取消窗口，没有声称完成独立 D 或 prov
 
 `9c993668aa354da3d93e93cad764b8c2782a7873` 记录验收报告与回滚计划；其父代码候选就是本次真实运行 SHA。
 `1f09342027eaf69c574393bfab97af1788bc09f1` 记录当时的远端策略阻断；以上提交已于
-2026-09-07 推送。后续交付状态文档提交由 PR commit 列表标识，最终 head 见交付回复。
+2026-09-07 推送。后续 CI 修复与交付文档提交由 PR commit 列表标识，最终 head 见交付回复。
 
 ## Next
 

@@ -416,20 +416,27 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 startInfo.ArgumentList.Add(argument);
             }
 
-            process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-            if (!process.Start())
+            var startedProcess = process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            try
             {
-                process.Dispose();
+                if (!startedProcess.Start())
+                {
+                    throw new InvalidOperationException("Codex app-server could not be started.");
+                }
+            }
+            catch
+            {
+                startedProcess.Dispose();
                 process = null;
-                throw new InvalidOperationException("Codex app-server could not be started.");
+                throw;
             }
 
             JarvisTelemetry.CodexProcessStarts.Add(
                 1,
                 JarvisTelemetry.BoundedTags(("operation", "start")).ToArray());
 
-            readTask = ReadStdoutAsync(process, CancellationToken.None);
-            stderrTask = ReadStderrAsync(process, CancellationToken.None);
+            readTask = ReadStdoutAsync(startedProcess, CancellationToken.None);
+            stderrTask = ReadStderrAsync(startedProcess, CancellationToken.None);
         }
 
         var initializeParams = new

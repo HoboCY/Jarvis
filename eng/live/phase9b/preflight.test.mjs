@@ -129,6 +129,7 @@ test("provider probes require every offline gate to pass", async () => {
 
 test("Codex version probing uses a disposable CODEX_HOME", async () => {
   const root = await mkdtemp(join(tmpdir(), "jarvis-phase9b-preflight-home-"));
+  const privateTempRoot = await mkdtemp(join(tmpdir(), "jarvis-phase9b-preflight-tmp-"));
   const bin = join(root, "bin");
   const homeDirectory = join(root, "home");
   const sentinel = join(root, "observed-codex-home.txt");
@@ -146,27 +147,39 @@ test("Codex version probing uses a disposable CODEX_HOME", async () => {
     `printf '%s' "$CODEX_HOME" > '${sentinel}'\nprintf '%s\\n' '0.146.0'`
   );
   try {
-    const result = await verifyToolchain({
-      versions: {
-        node: process.versions.node,
-        pnpm: "10.24.0",
-        dotnetSdk: "10.0.100",
-        codex: {
-          version: "0.146.0",
-          sha256: createHash("sha256").update(codexText).digest("hex")
-        }
-      },
-      codexPath: join(bin, "codex"),
-      env: { PATH: bin },
-      repositoryRoot: join(root, "repo"),
-      homeDirectory
-    });
+    const previousTmpDir = process.env.TMPDIR;
+    process.env.TMPDIR = privateTempRoot;
+    let result;
+    try {
+      result = await verifyToolchain({
+        versions: {
+          node: process.versions.node,
+          pnpm: "10.24.0",
+          dotnetSdk: "10.0.100",
+          codex: {
+            version: "0.146.0",
+            sha256: createHash("sha256").update(codexText).digest("hex")
+          }
+        },
+        codexPath: join(bin, "codex"),
+        env: { PATH: bin },
+        repositoryRoot: join(root, "repo"),
+        homeDirectory
+      });
+    } finally {
+      if (previousTmpDir === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = previousTmpDir;
+      }
+    }
     assert.equal(result.status, "PASS");
     const observed = await readFile(sentinel, "utf8");
     assert.notEqual(observed, homeDirectory);
     assert.equal(observed.startsWith(root), false);
     await assert.rejects(() => stat(observed), { code: "ENOENT" });
   } finally {
+    await rm(privateTempRoot, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
