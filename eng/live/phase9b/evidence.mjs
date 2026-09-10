@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { DEFAULT_BUDGETS } from "./budgets.mjs";
+import { sanitizeDesktopAutomationOutput } from "./desktop-automation.mjs";
 
 const SCHEMA_VERSION = 1;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -34,6 +35,7 @@ const TOP_LEVEL_STATUS_VALUES = new Set([
   "BLOCKED_PROVIDER_CONFIG",
   "BLOCKED_PROVIDER_ACCESS",
   "BLOCKED_CODEX_AUTH",
+  "BLOCKED_SECURITY_REMEDIATION",
   "LIVE_BUDGET_EXHAUSTED"
 ]);
 const ERROR_CATEGORIES = new Set([
@@ -41,6 +43,7 @@ const ERROR_CATEGORIES = new Set([
   "BLOCKED_CREDENTIALS",
   "BLOCKED_PROVIDER_ACCESS",
   "BLOCKED_CODEX_AUTH",
+  "BLOCKED_SECURITY_REMEDIATION",
   "SCENARIO_DRIVER_UNAVAILABLE",
   "SCENARIO_DRIVER_FAILED",
   "TIMEOUT",
@@ -50,11 +53,17 @@ const ERROR_CATEGORIES = new Set([
   "PROCESS_ERROR",
   "SECRET_DETECTED",
   "INVALID_PROVIDER_CONFIG",
+  "INVALID_AUTOMATION_OUTPUT",
   "BLOCKED_TOOLCHAIN",
   "PLATFORM_UNSUPPORTED",
   "VALIDATION_FAILED",
   "CLEANUP_FAILED",
   "UNVERIFIED"
+]);
+export const SECURITY_REMEDIATION_STATUSES = Object.freeze([
+  "UNVERIFIED",
+  "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE",
+  "BLOCKED_SECURITY_REMEDIATION"
 ]);
 const BUDGET_KEYS = Object.keys(DEFAULT_BUDGETS);
 const SENSITIVE_KEY_PATTERN = /(?:api[-_]?key|access[-_]?token|bearer|authorization|headers?|prompt|transcript|database|audio|environment|provider[-_]?body|external[-_]?id)/i;
@@ -97,8 +106,12 @@ export function createEvidence(input = {}) {
     scenarios: input.scenarios ?? [],
     artifacts: input.artifacts ?? [],
     errors: input.errors ?? [],
-    secretScan: input.secretScan ?? { passed: true }
+    secretScan: input.secretScan ?? { passed: true },
+    securityRemediation: input.securityRemediation ?? { status: "UNVERIFIED" }
   };
+  if (input.desktopAutomation !== undefined) {
+    evidence.desktopAutomation = input.desktopAutomation;
+  }
   for (const [key, value] of Object.entries(input)) {
     if (!Object.hasOwn(evidence, key)) {
       evidence[key] = value;
@@ -110,7 +123,7 @@ export function createEvidence(input = {}) {
 
 export function validateEvidence(evidence) {
   assertPlainObject(evidence);
-  assertExactKeys(evidence, [
+  assertAllowedKeys(evidence, [
     "schemaVersion",
     "runId",
     "baselineSha",
@@ -125,7 +138,26 @@ export function validateEvidence(evidence) {
     "scenarios",
     "artifacts",
     "errors",
-    "secretScan"
+    "secretScan",
+    "securityRemediation",
+    "desktopAutomation"
+  ], [
+    "schemaVersion",
+    "runId",
+    "baselineSha",
+    "candidateSha",
+    "startedAtUtc",
+    "finishedAtUtc",
+    "status",
+    "platform",
+    "toolchain",
+    "provider",
+    "budgets",
+    "scenarios",
+    "artifacts",
+    "errors",
+    "secretScan",
+    "securityRemediation"
   ]);
   if (evidence.schemaVersion !== SCHEMA_VERSION
       || !RUN_ID_PATTERN.test(evidence.runId)
@@ -170,6 +202,7 @@ export function validateEvidence(evidence) {
   }
   const hasBudgetError = evidence.errors.some((error) => error.category === "BUDGET_EXHAUSTED");
   const hasSecretError = evidence.errors.some((error) => error.category === "SECRET_DETECTED");
+  const hasSecurityError = evidence.errors.some((error) => error.category === "BLOCKED_SECURITY_REMEDIATION");
   if (evidence.status === "LIVE_BUDGET_EXHAUSTED" && !hasBudgetError) {
     throw invalidEvidence();
   }
@@ -177,6 +210,28 @@ export function validateEvidence(evidence) {
       && evidence.status !== "LIVE_BUDGET_EXHAUSTED"
       && !(evidence.status === "FAIL" && hasSecretError)) {
     throw invalidEvidence();
+  }
+  if (evidence.status === "BLOCKED_SECURITY_REMEDIATION" && !hasSecurityError) {
+    throw invalidEvidence();
+  }
+  if (hasSecurityError && evidence.status !== "BLOCKED_SECURITY_REMEDIATION") {
+    throw invalidEvidence();
+  }
+  validateSecurityRemediation(evidence.securityRemediation);
+  if (evidence.status === "PASS"
+      && evidence.securityRemediation.status !== "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE") {
+    throw invalidEvidence();
+  }
+  if (evidence.status === "BLOCKED_SECURITY_REMEDIATION"
+      && evidence.securityRemediation.status !== "BLOCKED_SECURITY_REMEDIATION") {
+    throw invalidEvidence();
+  }
+  if (evidence.desktopAutomation !== undefined) {
+    try {
+      sanitizeDesktopAutomationOutput(evidence.desktopAutomation);
+    } catch {
+      throw invalidEvidence();
+    }
   }
   assertPlainObject(evidence.secretScan);
   assertExactKeys(evidence.secretScan, ["passed"]);
@@ -199,25 +254,18 @@ export function validateEvidence(evidence) {
   return true;
 }
 
+export function validateSecurityRemediationStatus(status) {
+  if (!SECURITY_REMEDIATION_STATUSES.includes(status)) {
+    throw invalidEvidence();
+  }
+  return status;
+}
+
 export function hashExternalId(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) {
     throw invalidEvidence();
   }
   return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-export function summarizeOutput(value, { maxBytes = 4 * 1024 * 1024 } = {}) {
-  if (!Buffer.isBuffer(value) && typeof value !== "string") {
-    throw invalidEvidence();
-  }
-  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
-  if (bytes.length > maxBytes) {
-    throw invalidEvidence();
-  }
-  return {
-    length: bytes.length,
-    sha256: createHash("sha256").update(bytes).digest("hex")
-  };
 }
 
 export function scanKnownSecrets(value, secretValues = []) {
@@ -370,6 +418,12 @@ function validateProvider(value) {
   }
 }
 
+function validateSecurityRemediation(value) {
+  assertPlainObject(value);
+  assertExactKeys(value, ["status"]);
+  validateSecurityRemediationStatus(value.status);
+}
+
 function validateBudgets(value) {
   assertPlainObject(value);
   assertExactKeys(value, ["limits", "used"]);
@@ -401,7 +455,6 @@ function validateScenario(value, provider) {
     "errorCategory",
     "counts",
     "ids",
-    "output",
     "artifactPaths"
   ], ["id", "status", "startedAtUtc", "finishedAtUtc", "durationMs"]);
   if (!boundedIdentifier(value.id)
@@ -452,14 +505,6 @@ function validateScenario(value, provider) {
       } else if (!JARVIS_ID_PATTERN.test(id)) {
         throw invalidEvidence();
       }
-    }
-  }
-  if (value.output !== undefined) {
-    assertPlainObject(value.output);
-    assertExactKeys(value.output, ["length", "sha256"]);
-    if (!Number.isSafeInteger(value.output.length) || value.output.length < 0 || value.output.length > 4 * 1024 * 1024
-        || !SHA256_PATTERN.test(value.output.sha256)) {
-      throw invalidEvidence();
     }
   }
   if (value.artifactPaths !== undefined) {

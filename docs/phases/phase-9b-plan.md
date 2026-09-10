@@ -1,5 +1,84 @@
 # Phase 9B — Desktop live acceptance
 
+## Phase 9B-R resumption — 2026-09-10
+
+The controlling specification is PR #8 comment `5567414121`, with the user's
+2026-09-10 security confirmation and execution-order clarification. Work remains
+on `codex/phase9b-desktop-golden-path`; the verified starting HEAD is
+`243d6db220ff2b00bcde4fc32df762d8cc7076f5`, based on
+`5df7533141107585cfbaa90a9c40d78a7b0b959a`. PR #8 remains Draft and must not be
+merged; no new PR or Phase 9C work is authorized.
+
+Security remediation is `RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE`, based on the
+user's explicit non-secret confirmation. The historical UI-output incident stays
+recorded. There is no established Provider API Key exposure and no provider-key
+rotation requirement. No exposed value or derived representation is reproduced.
+
+Execution order:
+
+1. Enforce restricted automation output and prove it with offline contracts.
+2. Repair normal Realtime quit, safe automatic live rotation, SignalR reconnect
+   HTTP catch-up, and selected-Conversation restoration before auto-connect.
+3. Probe the pinned Codex `0.146.0` restart protocol and implement only proven
+   recovery behavior, with bounded fail-closed handling where unsupported.
+4. Complete offline regression, actual macOS packaging, and publish checks.
+5. Only after the offline gates pass, execute a new isolated targeted gap run,
+   freeze the candidate, and run the complete A–J acceptance from that exact SHA.
+
+Every new live run requires a fresh CODEX_HOME, Desktop profile, database, bearer,
+device identity, allowed root, owner marker, launchd labels, and run ID. Prior
+runtime resources and logins must not be reused. Automation output remains limited
+to approved state fields, enums, counts, UUIDs, booleans, bounded error codes, and
+SHAs; OAuth URLs, tokens, credentials, private text, generic DOM/UI dumps, full
+accessibility trees, and unrestricted screenshots remain prohibited.
+
+The prior `LIVE_PARTIAL` run remains historical evidence only. No new live result
+or final candidate is claimed by this resumption record. Provider boundaries,
+hard budgets, migration rollback limits, and exact-SHA review/CI requirements in
+the specification remain in force.
+
+Initial offline verification on the resumption baseline:
+
+- Restricted automation and evidence contracts passed 85/85 tests; lint passed.
+  Independent Standards and Spec review found no remaining P1/P2 after fixing
+  the real interactive CLI service-state projection and requiring the explicit
+  resolved security status for every new PASS evidence record. These are offline
+  contract results, not live Desktop acceptance.
+- A subsequent emitting-boundary review found that the inherited process
+  supervisor could still expose a length and digest derived from arbitrary raw
+  process output. No actual credential exposure was established. The process
+  output projection now contains only fixed observed/suppressed booleans. The
+  direct writer and bundle validator also reject generic scenario output; the
+  arbitrary-output summary producer/export was removed. Full live-harness
+  contracts pass 90/90 and harness lint passes. Independent follow-up review of
+  the remaining evidence boundary found no P1/P2 and re-ran the focused tests
+  25/25 successfully. The user's resolved incident status is unchanged.
+- Added exact-name Git ignore rules for `appsettings.secrets.json` and
+  `secrets.json`. Filename/index checks confirm they are ignored and neither is
+  tracked or staged; the corresponding example templates remain trackable.
+  No credential content was read for this check.
+- Locked .NET restore, tool restore, frozen pnpm install, and the pinned Codex
+  schema/canonical checks passed. Node `24.19.0` and Codex `0.146.0` were obtained
+  in a new tool-only directory and checked against their published/pinned hashes.
+- The npm audit found current high-severity advisories in `extract-zip` and
+  `js-yaml`; this gate has not passed. Fixes must not add audit suppressions.
+- The initial NuGet CLI vulnerability command timed out, including bounded
+  retries. Diagnostic request metadata showed historical package-registration
+  enumeration. Re-running `dotnet list Jarvis.sln package --vulnerable
+  --include-transitive --no-restore --format json` with `--configfile` pointing to
+  a temporary configuration that explicitly sets the official nuget.org
+  `auditSources` completed in 9.3 seconds: 13 projects, no vulnerable packages.
+  The package source remained the same official source; no advisory was
+  suppressed. The initial timed-out invocations remain recorded as timeouts.
+  A separate comparison of all 13 restored solution projects and 112 unique
+  resolved packages against the official NuGet vulnerability catalog found no
+  matches. It used NuGet's `VersionRange.Satisfies` implementation and a positive
+  control detected the known `System.Text.Json` `8.0.0` advisories. This supplemental
+  comparison independently corroborated the successful CLI audit. The catalog
+  base SHA-256 was
+  `e50e838b5b651f067a8756c33e2aca03a145e36fe6161b717bdf06ea03f083dc`.
+- No provider request or new authenticated live run was made by these checks.
+
 ## Scope and approved provider change
 
 The user requested execution of the Phase 9B instructions in the ChatGPT conversation

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 
@@ -132,8 +131,8 @@ export class ProcessSupervisor {
         errorCategory: secretDetected ? "SECRET_DETECTED" : value.errorCategory ?? null,
         exitCode: value.exitCode ?? null,
         signal: value.signal ?? null,
-        stdout: secretDetected ? null : stdout.finish(),
-        stderr: secretDetected ? null : stderr.finish(),
+        stdout: stdout.finish(),
+        stderr: stderr.finish(),
         ...(secretDetected ? { outputSuppressed: true } : {})
       };
       this.#ownedProcesses.delete(child);
@@ -254,8 +253,8 @@ export class ProcessSupervisor {
       errorCategory: outputSuppressed ? "SECRET_DETECTED" : timedOut ? "TIMEOUT" : processResult.errorCategory,
       exitCode: processResult.exitCode,
       signal: processResult.signal,
-      stdout: outputSuppressed ? null : stdout.finish(),
-      stderr: outputSuppressed ? null : stderr.finish(),
+      stdout: stdout.finish(),
+      stderr: stderr.finish(),
       ...(outputSuppressed ? { outputSuppressed: true } : {})
     };
   }
@@ -395,42 +394,35 @@ function sendSignal(child, pid, signal) {
 }
 
 function createOutputSummary(maxBytes, secretValues) {
-  const hash = createHash("sha256");
   const knownSecrets = [...new Set((secretValues ?? [])
     .filter((value) => typeof value === "string" && value.length > 0 && value.length <= 4096))];
   const maxTailLength = Math.max(511, ...knownSecrets.map((secret) => secret.length - 1));
   let tail = "";
-  let length = 0;
-  let hashed = 0;
+  let observed = false;
   let secretDetected = false;
   return {
     add(chunk) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
       const text = bytes.toString("utf8");
+      observed = observed || bytes.length > 0;
       const probe = tail + text;
       if (knownSecrets.some((secret) => probe.includes(secret)) || KNOWN_SECRET_PATTERN.test(probe)) {
         secretDetected = true;
       }
       tail = probe.slice(-maxTailLength);
-      length += bytes.length;
-      if (hashed < maxBytes) {
-        const slice = bytes.subarray(0, maxBytes - hashed);
-        hash.update(slice);
-        hashed += slice.length;
-      }
       return secretDetected;
     },
     hasSecret() {
       return secretDetected;
     },
     finish() {
-      return { length, sha256: hash.digest("hex") };
+      return { observed, suppressed: secretDetected };
     }
   };
 }
 
 function emptyOutputSummary() {
-  return { length: 0, sha256: createHash("sha256").digest("hex") };
+  return { observed: false, suppressed: false };
 }
 
 function safeError(code, message) {

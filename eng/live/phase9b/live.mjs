@@ -5,8 +5,15 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createBudgetTracker, withTimeout } from "./budgets.mjs";
 import { createRunIsolation } from "./isolation.mjs";
-import { createEvidence, REQUIRED_SCENARIO_IDS, scanKnownSecrets, writeLiveEvidence } from "./evidence.mjs";
+import {
+  createEvidence,
+  REQUIRED_SCENARIO_IDS,
+  scanKnownSecrets,
+  validateSecurityRemediationStatus,
+  writeLiveEvidence
+} from "./evidence.mjs";
 import { runPreflight } from "./preflight.mjs";
+import { createSafeScenarioDriver } from "./desktop-automation.mjs";
 
 const DEFAULT_BASELINE_SHA = "0000000000000000000000000000000000000000";
 const DEFAULT_CANDIDATE_SHA = "0000000000000000000000000000000000000000";
@@ -21,6 +28,7 @@ export async function runLive({
   preflightResult,
   preflightOptions = {},
   driver,
+  securityRemediationStatus,
   scenarioTimeoutMs = 120_000,
   globalTimeoutMs = 15 * 60 * 1000,
   driverDrainTimeoutMs = 5_000,
@@ -32,11 +40,20 @@ export async function runLive({
   stopOwnedProcesses
 } = {}) {
   const startedAtUtc = new Date().toISOString();
+  const securityStatus = securityRemediationStatus === undefined
+    ? "UNVERIFIED"
+    : validateSecurityRemediationStatus(securityRemediationStatus);
+  const preflightProviderCallRequested = preflightOptions.noProviderCall === false;
+  const preflightSecurityGateBlocked = preflightProviderCallRequested
+    && securityStatus !== "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE";
   const preflight = preflightResult ?? await runPreflight({
     repositoryRoot,
     homeDirectory,
-    noProviderCall: true,
-    ...preflightOptions
+    ...preflightOptions,
+    noProviderCall: preflightSecurityGateBlocked
+      ? true
+      : preflightOptions.noProviderCall ?? true,
+    securityRemediationStatus: securityStatus
   });
   const budget = createBudgetTracker(budgetOptions);
   const preflightProviderCalls = preflight.network?.providerCalls ?? 0;
@@ -61,6 +78,8 @@ export async function runLive({
   let status = "LIVE_PARTIAL";
   let runError;
   let cleanupError;
+  let desktopAutomation;
+  let securityGateBlocked = preflightSecurityGateBlocked;
   let driverTask;
   let driverSettled = true;
   let secretDetected = false;
@@ -76,7 +95,15 @@ export async function runLive({
     : stopOwnedProcesses;
   const scenarioStartedAtUtc = new Date().toISOString();
   try {
-    if (preflightBudgetError !== undefined) {
+    if (securityGateBlocked) {
+      scenarios = [createScenario(
+        "security-remediation",
+        "BLOCKED",
+        "BLOCKED_SECURITY_REMEDIATION",
+        scenarioStartedAtUtc
+      )];
+      status = "BLOCKED_SECURITY_REMEDIATION";
+    } else if (preflightBudgetError !== undefined) {
       throw preflightBudgetError;
     } else if (preflight.status === "BLOCKED_CREDENTIALS") {
       scenarios = [createScenario(
@@ -94,6 +121,16 @@ export async function runLive({
         scenarioStartedAtUtc
       )];
       status = preflight.status;
+    } else if (typeof driver === "function"
+        && securityStatus !== "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE") {
+      scenarios = [createScenario(
+        "security-remediation",
+        "BLOCKED",
+        "BLOCKED_SECURITY_REMEDIATION",
+        scenarioStartedAtUtc
+      )];
+      status = "BLOCKED_SECURITY_REMEDIATION";
+      securityGateBlocked = true;
     } else if (typeof driver !== "function") {
       scenarios = [createScenario(
         "desktop-golden-path",
@@ -103,10 +140,11 @@ export async function runLive({
       )];
       status = "LIVE_PARTIAL";
     } else {
+      const safeDriver = createSafeScenarioDriver(driver);
       const driverResult = await withTimeout(
         (signal) => {
           driverSettled = false;
-          driverTask = Promise.resolve().then(() => driver({
+          driverTask = Promise.resolve().then(() => safeDriver({
             isolation,
             budget,
             preflight,
@@ -132,6 +170,7 @@ export async function runLive({
         throw safeError("VALIDATION_FAILED", "Scenario driver returned no scenarios.");
       }
       scenarios = driverResult.scenarios;
+      desktopAutomation = driverResult.automation;
       status = aggregateStatus(scenarios);
       if (status === "PASS" && !hasCompleteScenarioSet(scenarios)) {
         status = "LIVE_PARTIAL";
@@ -237,9 +276,14 @@ export async function runLive({
     artifacts: [],
     errors: [
       ...(runError === undefined ? [] : [{ category: driverErrorCategory(runError) }]),
-      ...(cleanupError === undefined ? [] : [{ category: "CLEANUP_FAILED" }])
+      ...(cleanupError === undefined ? [] : [{ category: "CLEANUP_FAILED" }]),
+      ...(securityGateBlocked ? [{ category: "BLOCKED_SECURITY_REMEDIATION" }] : [])
     ],
-    secretScan: { passed: true }
+    secretScan: { passed: true },
+    securityRemediation: {
+      status: securityGateBlocked ? "BLOCKED_SECURITY_REMEDIATION" : securityStatus
+    },
+    ...(desktopAutomation === undefined ? {} : { desktopAutomation })
   });
   const written = await writeLiveEvidence({ repositoryRoot, evidence, secretValues });
   const relativeEvidencePath = `artifacts/live/phase9b/${runId}/evidence.json`;
@@ -341,6 +385,7 @@ function driverErrorCategory(error) {
     "BUDGET_EXHAUSTED",
     "CLEANUP_FAILED",
     "INVALID_PROVIDER_CONFIG",
+    "INVALID_AUTOMATION_OUTPUT",
     "PROCESS_ERROR",
     "PROCESS_START_FAILED",
     "SECRET_DETECTED",
@@ -397,7 +442,8 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === currentFile) {
       preflightOptions: {
         codexPath: process.env.PHASE9B_CODEX_PATH,
         noProviderCall: true
-      }
+      },
+      securityRemediationStatus: process.env.PHASE9B_SECURITY_REMEDIATION_STATUS
     });
     process.stdout.write(`${JSON.stringify({
       schemaVersion: 1,

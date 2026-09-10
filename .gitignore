@@ -26,3 +26,5 @@ src/backend/Jarvis.Api/jarvis.db*
 *.user
 *.suo
 *.swp
+**/appsettings.secrets.json
+**/secrets.json

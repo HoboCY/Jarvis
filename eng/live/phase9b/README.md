@@ -23,7 +23,11 @@ toolchain, and credential presence checks completed; it does not prove
 provider access. Missing credentials, an unsupported platform, or a toolchain
 failure returns a `BLOCKED_*` status and exit status `1`. The default mode is
 offline. Provider access is only enabled by an explicit caller-owned probe;
-the contract test command never invokes a provider.
+provider-call mode also requires the explicit
+`RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE` security status before the probe
+boundary. An omitted or unresolved status returns
+`BLOCKED_SECURITY_REMEDIATION` without invoking the probe. The contract test
+command never invokes a provider.
 
 The interactive runner is a long-lived JSONL process:
 
@@ -35,6 +39,7 @@ PHASE9B_PROVIDER_PREFLIGHT_CALLS=2 \
 PHASE9B_API_PATH=/absolute/path/to/Jarvis.Api \
 PHASE9B_DEVICE_NODE_PATH=/absolute/path/to/Jarvis.DeviceNode \
 PHASE9B_DESKTOP_APP_PATH=/absolute/path/to/Jarvis.app \
+PHASE9B_SECURITY_REMEDIATION_STATUS=RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE \
 pnpm phase9b:live
 ```
 
@@ -61,9 +66,11 @@ The only accepted commands are:
 
 Each command is a bounded object. Extra fields, scripts, arbitrary paths,
 provider payloads, and caller-supplied status values are rejected. `prepare`
-returns a safe run id and private paths, including the nonce fixture path; it
-never returns the nonce or a bearer. `start` starts only owned processes and
-arms the durable admission ledger plus the SQLite budget observer. `observe`
+returns a safe run id and bounded readiness and budget metadata; private paths,
+including the nonce fixture path, remain trusted process internals and are
+never serialized. It never returns the nonce or a bearer. `start` starts only
+owned processes and arms the durable admission ledger plus the SQLite budget
+observer. `observe`
 reads authenticated health, device, conversation, and database facts. The
 `stop` and `restart` commands accept only `api`, `deviceNode`, or `desktop`;
 Desktop restart omits the bootstrap bearer and uses its existing encrypted
@@ -71,6 +78,34 @@ store. Required normal Desktop close actions still use the product UI.
 `finish` is idempotent and stops
 owned process groups before removing the owner-marked runtime root. SIGINT,
 SIGTERM, and the hard runtime timeout use the same cleanup path.
+
+Future Desktop automation must use `desktop-automation.mjs`. Stage 1 provides
+the adapter contract and offline fixture seam; it is not an attached Desktop
+live driver, and it does not add product controls. Its page adapter has only
+`readTestId(testId)` and `clickTestId(testId)` operations. The fixed
+state ids are `phase9b-app-status`, `phase9b-realtime-status`,
+`phase9b-realtime-remote-track-count`, `phase9b-conversation-id`,
+`phase9b-message-count`, `phase9b-task-count`, `phase9b-notification-count`,
+`phase9b-approval-count`, `phase9b-device-status`,
+`phase9b-codex-task-status`, `phase9b-user-input-status`,
+`phase9b-approval-status`, `phase9b-signalr-status`, and
+`phase9b-artifact-sha256`. The fixed action ids cover connect/disconnect
+Realtime, send fixture, pause/resume SignalR, load conversation, answer input,
+approve, deny, restart Device Node, and quit: `phase9b-connect-realtime`,
+`phase9b-disconnect-realtime`, `phase9b-send-fixture`,
+`phase9b-pause-signalr`, `phase9b-resume-signalr`,
+`phase9b-load-conversation`, `phase9b-answer-input`, `phase9b-approve`,
+`phase9b-deny`, `phase9b-restart-device-node`, and `phase9b-quit`. The adapter exports only bounded
+states and enums, counts, UUIDs, booleans, error codes, and SHA-256 values;
+caller selectors, evaluation, scripts, DOM or accessibility text, clipboard,
+Keychain data, screenshots, URLs, credentials, private text, and absolute
+paths are rejected. `runLive` sanitizes the driver result before it reaches
+evidence, and an explicit
+`RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE` status is required before a complete
+scenario set can become `PASS`.
+When this status is omitted or unresolved, `prepare` and any live scenario
+driver stop with `BLOCKED_SECURITY_REMEDIATION` before starting owned services
+or entering a driver boundary.
 
 The interactive CLI reports bounded observations; it does not fabricate A-J
 scenario outcomes or automatically export a completed evidence bundle. The

@@ -113,6 +113,7 @@ test("provider probes require every offline gate to pass", async () => {
       platform: { platform: "darwin", arch: "arm64", osVersion: "15.6" },
       toolVersions: { node: "24.19.0", pnpm: "10.24.0", dotnet: "10.0.100", codex: "0.146.0" },
       noProviderCall: false,
+      securityRemediationStatus: "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE",
       providerProbe: async () => {
         providerCalls += 1;
       }
@@ -122,6 +123,52 @@ test("provider probes require every offline gate to pass", async () => {
     assert.equal(result.checks.provider.status, "UNVERIFIED");
     assert.equal(providerCalls, 0);
     assert.equal(result.network.providerCalls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("provider probes stop at the security gate before the caller-owned boundary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jarvis-phase9b-preflight-security-"));
+  const repositoryRoot = join(root, "repo");
+  const homeDirectory = join(root, "home");
+  const userSecretsPath = join(root, "secrets.json");
+  try {
+    await mkdir(join(repositoryRoot, "src", "backend", "Jarvis.Api"), { recursive: true });
+    await mkdir(homeDirectory);
+    await writeFile(
+      join(repositoryRoot, "src", "backend", "Jarvis.Api", "Jarvis.Api.csproj"),
+      "<Project><PropertyGroup><UserSecretsId>preflight-security-test</UserSecretsId></PropertyGroup></Project>"
+    );
+    await writeFile(userSecretsPath, JSON.stringify({
+      "OpenAI:ApiKey": "fixture-openai-key",
+      "OpenAI:RealtimeModel": "gpt-realtime-2.1-mini",
+      "Responses:Provider": "DeepSeek",
+      "Responses:Model": "deepseek-v4-flash",
+      "Responses:SummarizerModel": "deepseek-v4-flash",
+      "DeepSeek:ApiKey": "fixture-deepseek-key"
+    }));
+    let providerCalls = 0;
+    const result = await runPreflight({
+      repositoryRoot,
+      homeDirectory,
+      userSecretsPath,
+      versionsPath: join(process.cwd(), "eng", "versions.json"),
+      env: {},
+      platform: { platform: "darwin", arch: "arm64", osVersion: "15.6" },
+      toolVersions: { node: "24.19.0", pnpm: "10.24.0", dotnet: "10.0.100", codex: "0.146.0" },
+      noProviderCall: false,
+      securityRemediationStatus: "UNVERIFIED",
+      providerProbe: async () => {
+        providerCalls += 1;
+      }
+    });
+
+    assert.equal(result.status, "BLOCKED_SECURITY_REMEDIATION");
+    assert.deepEqual(result.securityRemediation, { status: "UNVERIFIED" });
+    assert.equal(result.checks.provider.status, "BLOCKED_SECURITY_REMEDIATION");
+    assert.equal(result.network.providerCalls, 0);
+    assert.equal(providerCalls, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

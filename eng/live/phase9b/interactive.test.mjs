@@ -8,13 +8,34 @@ import { PassThrough, Readable, Writable } from "node:stream";
 import { test } from "node:test";
 import {
   INTERACTIVE_COMMANDS,
-  createInteractiveSession,
+  createInteractiveSession as createInteractiveSessionRaw,
   reconcileBudget,
   parseInteractiveCommand,
-  runInteractiveCli
+  runInteractiveCli as runInteractiveCliRaw,
+  writeSafeLine
 } from "./interactive.mjs";
 import { createBudgetTracker } from "./budgets.mjs";
 import { createAdmissionClient } from "./admission.mjs";
+import { ProcessSupervisor } from "./process-supervisor.mjs";
+
+const RESOLVED_SECURITY_STATUS = "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE";
+
+function createInteractiveSession(options = {}) {
+  return createInteractiveSessionRaw({
+    securityRemediationStatus: RESOLVED_SECURITY_STATUS,
+    ...options
+  });
+}
+
+function runInteractiveCli(options = {}) {
+  return runInteractiveCliRaw({
+    ...options,
+    sessionOptions: {
+      securityRemediationStatus: RESOLVED_SECURITY_STATUS,
+      ...options.sessionOptions
+    }
+  });
+}
 
 const fixtureProvider = {
   openAi: {
@@ -156,6 +177,51 @@ test("interactive command parser accepts only bounded commands and UUIDs", () =>
   }
 });
 
+test("CLI output projection rejects unknown or private fields with a fixed result", () => {
+  const capture = captureOutput();
+  assert.equal(writeSafeLine(capture.output, {
+    schemaVersion: 1,
+    status: "FAIL",
+    apiKey: "sk-proj-123456789012"
+  }), false);
+  assert.deepEqual(JSON.parse(capture.value()), {
+    schemaVersion: 1,
+    status: "FAIL",
+    errorCategory: "OUTPUT_REJECTED"
+  });
+  assert.equal(writeSafeLine(capture.output, {
+    schemaVersion: 1,
+    status: "PASS",
+    timestamp: Date.now()
+  }), true);
+});
+
+test("interactive prepare blocks before runtime setup when security resolution is omitted", async () => {
+  const fixture = await createFixture();
+  const session = createInteractiveSessionRaw({
+    repositoryRoot: fixture.repositoryRoot,
+    homeDirectory: fixture.homeDirectory,
+    baseDirectory: fixture.baseDirectory,
+    desktopAppPath: fixture.desktopAppPath,
+    providerConfig: fixtureProvider,
+    preflightResult: fixturePreflight()
+  });
+  try {
+    const prepared = await session.prepare();
+    assert.deepEqual(prepared, {
+      schemaVersion: 1,
+      status: "BLOCKED_SECURITY_REMEDIATION",
+      securityRemediation: { status: "BLOCKED_SECURITY_REMEDIATION" },
+      errorCategory: "BLOCKED_SECURITY_REMEDIATION"
+    });
+    assert.equal(session.isolation, undefined);
+    assert.equal((await session.finish()).status, "FINISHED");
+  } finally {
+    await session.finish().catch(() => {});
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("budget reconciliation keeps provider, realtime, delegation, and Codex facts separate", () => {
   const budget = createBudgetTracker();
   const facts = {
@@ -221,10 +287,9 @@ test("prepare writes provider-only production configuration and keeps secrets ou
     assert.equal(result.status, "PREPARED");
     assert.match(result.runId, /^[0-9a-f-]{36}$/);
     assert.equal(result.budgets.used.providerRequests, 2);
-    assert.equal(typeof result.paths.codexHome, "string");
-    assert.equal(typeof result.paths.desktopApp, "string");
-    assert.equal(typeof result.nonceFixture.path, "string");
-    assert.equal(Object.hasOwn(result.nonceFixture, "value"), false);
+    assert.equal(Object.hasOwn(result, "paths"), false);
+    assert.equal(Object.hasOwn(result, "nonceFixture"), false);
+    assert.equal(typeof session.privatePaths.nonceFixturePath, "string");
     assert.equal(JSON.stringify(result).includes(secretValues[0]), false);
     assert.equal(JSON.stringify(result).includes(secretValues[1]), false);
     assert.equal(JSON.stringify(result).includes(secretValues[2]), false);
@@ -397,6 +462,88 @@ test("start and observe run only owned fixture services, then finish removes the
   }
 });
 
+test("CLI emitting seam completes the prepare start observe stop restart finish path", async () => {
+  const fixture = await createFixture();
+  const capture = captureOutput();
+  const input = Readable.from([
+    '{"command":"prepare"}\n',
+    '{"command":"start"}\n',
+    '{"command":"observe"}\n',
+    '{"command":"stop","service":"desktop"}\n',
+    '{"command":"restart","service":"desktop"}\n',
+    '{"command":"finish"}\n'
+  ]);
+  const delegate = new ProcessSupervisor({ maxRestarts: 0, timeoutMs: 30_000, killGraceMs: 1_000 });
+  let databaseCreated = false;
+  const processSupervisor = {
+    start: async (command, args, options) => {
+      if (!databaseCreated && options.cwd?.endsWith("/runtime/api")) {
+        databaseCreated = true;
+        const root = join(options.cwd, "..", "..");
+        const databasePath = join(root, "database", "jarvis.db");
+        await createFixtureDatabase(databasePath);
+        await reserveFixtureFacts({
+          privatePaths: { admissionDescriptorPath: join(root, "runtime", "admission", "descriptor.json") }
+        });
+      }
+      return await delegate.start(command, args, options);
+    },
+    stopAll: () => delegate.stopAll()
+  };
+  try {
+    const result = await runInteractiveCli({
+      input,
+      output: capture.output,
+      sessionOptions: {
+        repositoryRoot: fixture.repositoryRoot,
+        homeDirectory: fixture.homeDirectory,
+        baseDirectory: fixture.baseDirectory,
+        desktopAppPath: fixture.desktopAppPath,
+        providerConfig: fixtureProvider,
+        preflightResult: fixturePreflight(),
+        processSupervisor,
+        codexPath: process.execPath,
+        apiBinaryPath: process.execPath,
+        apiArguments: ["-e", `
+          const http = require('node:http');
+          const port = Number(new URL(process.env.ASPNETCORE_URLS).port);
+          const routes = {
+            '/health/live': { healthy: true, status: 'live' },
+            '/health/ready': { healthy: true, status: 'ready' },
+            '/api/v1/diagnostics': { database: { available: true }, work: { onlineDevices: 1 } },
+            '/api/v1/devices': { items: [{ id: 'fixture-device' }] }
+          };
+          const server = http.createServer((request, response) => {
+            const value = routes[request.url] || { error: 'not-found' };
+            response.writeHead(routes[request.url] ? 200 : 404, { 'content-type': 'application/json' });
+            response.end(JSON.stringify(value));
+          });
+          server.listen(port, '127.0.0.1');
+          process.on('SIGTERM', () => server.close(() => process.exit(0)));
+        `],
+        deviceNodePath: process.execPath,
+        deviceNodeArguments: ["-e", "setInterval(() => {}, 1000);"],
+        desktopExecutablePath: process.execPath,
+        desktopArguments: ["-e", "setInterval(() => {}, 1000);"],
+        budgetPollMs: 100
+      }
+    });
+    assert.equal(result.status, "FINISHED");
+    const lines = capture.value().trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(lines.map((line) => line.status), [
+      "PREPARED", "STARTED", "OBSERVED", "STOPPED", "RESTARTED", "FINISHED"
+    ]);
+    assert.equal(lines[1].services.api, "ready");
+    assert.equal(lines[2].services.api, "started");
+    assert.equal(lines[3].services.desktop, "stopped");
+    assert.equal(lines[4].services.desktop, "started");
+    assert.equal(lines[0].runId, lines.at(-1).runId);
+    assert.equal(JSON.stringify(lines).includes(fixture.root), false);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("launchd mode owns API and Device Node while Desktop remains foreground supervised", async () => {
   const fixture = await createFixture();
   const originalFetch = globalThis.fetch;
@@ -484,9 +631,9 @@ test("launchd mode owns API and Device Node while Desktop remains foreground sup
     assert.equal(desktopHandles.length, 1);
 
     const observed = await session.observe();
-    assert.equal(observed.services.api, true);
-    assert.equal(observed.services.deviceNode, true);
-    assert.equal(observed.services.desktop, true);
+    assert.equal(observed.services.api, "started");
+    assert.equal(observed.services.deviceNode, "started");
+    assert.equal(observed.services.desktop, "started");
 
     await session.finish();
     assert.equal(launchdCalls.at(-1), "stopAll");
@@ -1199,6 +1346,8 @@ test("CLI keeps the prepared runtime alive until finish and rejects user supplie
     assert.equal(result.status, "FINISHED");
     const lines = capture.value().trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(lines[0].status, "PREPARED");
+    assert.equal(Object.hasOwn(lines[0], "paths"), false);
+    assert.equal(JSON.stringify(lines).includes(fixture.root), false);
     assert.equal(lines[1].status, "FAIL");
     assert.equal(lines[1].errorCategory, "INVALID_COMMAND");
     assert.equal(lines[2].status, "FINISHED");

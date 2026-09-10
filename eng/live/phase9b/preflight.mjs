@@ -5,6 +5,7 @@ import { chmod, lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { loadProviderConfig } from "./credentials.mjs";
+import { validateSecurityRemediationStatus } from "./evidence.mjs";
 import { createOwnedTempRoot } from "./isolation.mjs";
 
 const EXPECTED_TOOLCHAIN = Object.freeze({
@@ -27,8 +28,14 @@ export async function runPreflight({
   platform = { platform: process.platform, arch: process.arch, osVersion: "unknown" },
   toolVersions,
   noProviderCall = true,
-  providerProbe
+  providerProbe,
+  securityRemediationStatus
 } = {}) {
+  const securityStatus = securityRemediationStatus === undefined
+    ? "UNVERIFIED"
+    : validateSecurityRemediationStatus(securityRemediationStatus);
+  const securityGateBlocked = !noProviderCall
+    && securityStatus !== "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE";
   const checks = {
     platform: verifyPlatform(platform),
     toolchain: { status: "BLOCKED_TOOLCHAIN", errors: [] },
@@ -65,7 +72,9 @@ export async function runPreflight({
   };
 
   const network = { providerCalls: 0 };
-  if (!noProviderCall
+  if (securityGateBlocked) {
+    checks.provider = { status: "BLOCKED_SECURITY_REMEDIATION" };
+  } else if (!noProviderCall
       && checks.platform.status === "PASS"
       && checks.toolchain.status === "PASS"
       && credentialResult.status === "PASS"
@@ -80,11 +89,12 @@ export async function runPreflight({
     }
   }
 
-  const status = chooseStatus(checks);
+  const status = chooseStatus(checks, securityGateBlocked);
   return {
     schemaVersion: 1,
     status,
     mode: noProviderCall ? "offline" : "provider-call-enabled",
+    securityRemediation: { status: securityStatus },
     network,
     checks
   };
@@ -300,7 +310,10 @@ function parseArguments(argv) {
   return options;
 }
 
-function chooseStatus(checks) {
+function chooseStatus(checks, securityGateBlocked = false) {
+  if (securityGateBlocked) {
+    return "BLOCKED_SECURITY_REMEDIATION";
+  }
   if (checks.credentials.status === "BLOCKED_CREDENTIALS") {
     return "BLOCKED_CREDENTIALS";
   }

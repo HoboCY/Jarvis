@@ -10,8 +10,9 @@ import { createRunIsolation, adoptExternalCodexHome, writePrivateJson } from "./
 import { ProcessSupervisor } from "./process-supervisor.mjs";
 import { LaunchdSupervisor } from "./launchd-supervisor.mjs";
 import { runPreflight } from "./preflight.mjs";
-import { scanKnownSecrets } from "./evidence.mjs";
+import { scanKnownSecrets, validateSecurityRemediationStatus } from "./evidence.mjs";
 import { createAdmissionServer } from "./admission.mjs";
+import { sanitizeInteractiveOutput } from "./desktop-automation.mjs";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const API_READY_TIMEOUT_MS = 30_000;
@@ -80,6 +81,7 @@ export class InteractiveSession {
   #preflight;
   #providerResult;
   #providerConfig;
+  #securityRemediationStatus = "UNVERIFIED";
   #budget;
   #providerPreflightCalls = 0;
   #supervisor;
@@ -149,6 +151,17 @@ export class InteractiveSession {
     }
 
     const options = this.#options;
+    this.#securityRemediationStatus = this.#readSecurityRemediationStatus();
+    if (this.#securityRemediationStatus !== "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE") {
+      this.#prepared = true;
+      this.#prepareResult = {
+        schemaVersion: 1,
+        status: "BLOCKED_SECURITY_REMEDIATION",
+        securityRemediation: { status: "BLOCKED_SECURITY_REMEDIATION" },
+        errorCategory: "BLOCKED_SECURITY_REMEDIATION"
+      };
+      return this.#prepareResult;
+    }
     this.#isolation = await createRunIsolation({
       repositoryRoot: options.repositoryRoot ?? process.cwd(),
       homeDirectory: options.homeDirectory ?? homedir(),
@@ -305,15 +318,10 @@ export class InteractiveSession {
         mode: this.#launchdMode ? "launchd-api-device-owned-desktop" : "direct-owned-processes",
         status: this.#launchdMode ? "PASS" : "UNVERIFIED",
         ...(this.#launchdMode
-          ? { labels: this.#launchdSupervisor.labels }
+          ? { labelsConfigured: true }
           : { reason: "LAUNCHD_NOT_WIRED" })
       },
       services: { api: "ready", deviceNode: "started", desktop: "started" },
-      paths: {
-        codexHome: this.#isolation.directories.codexHome,
-        desktopApp: context.desktopAppPath,
-        nonceFixture: this.#privatePaths.nonceFixturePath
-      },
       budgets: await this.#readAdmissionBudget(),
       budgetGuard: {
         status: "ARMED",
@@ -484,9 +492,9 @@ export class InteractiveSession {
       runId: this.#isolation.runId,
       service,
       services: {
-        api: this.#isHandleRunning("api"),
-        deviceNode: this.#isHandleRunning("deviceNode"),
-        desktop: this.#isHandleRunning("desktop")
+        api: serviceState(this.#isHandleRunning("api")),
+        deviceNode: serviceState(this.#isHandleRunning("deviceNode")),
+        desktop: serviceState(this.#isHandleRunning("desktop"))
       },
       ...(status === "RESTARTED" && service === "desktop"
         ? { desktopBearerSource: "encrypted-store" }
@@ -535,9 +543,9 @@ export class InteractiveSession {
       status: "OBSERVED",
       runId: this.#isolation.runId,
       services: {
-        api: launchdServices?.api ?? this.#isHandleRunning("api"),
-        deviceNode: launchdServices?.deviceNode ?? this.#isHandleRunning("deviceNode"),
-        desktop: this.#isHandleRunning("desktop")
+        api: serviceState(launchdServices?.api ?? this.#isHandleRunning("api")),
+        deviceNode: serviceState(launchdServices?.deviceNode ?? this.#isHandleRunning("deviceNode")),
+        desktop: serviceState(this.#isHandleRunning("desktop"))
       },
       api: {
         live: projectHealth(live, "live"),
@@ -1211,13 +1219,7 @@ export class InteractiveSession {
       schemaVersion: 1,
       status,
       runId: this.#isolation.runId,
-      paths: {
-        codexHome: this.#isolation.directories.codexHome,
-        desktopApp: this.#options.desktopAppPath ?? defaultDesktopAppPath(this.#options.repositoryRoot ?? process.cwd()),
-        nonceFixture: this.#privatePaths.nonceFixturePath,
-        admissionDescriptor: this.#privatePaths.admissionDescriptorPath
-      },
-      nonceFixture: { path: this.#privatePaths.nonceFixturePath },
+      securityRemediation: { status: this.#securityRemediationStatus },
       preflight: {
         status: this.#preflight.status,
         providerCalls: this.#providerPreflightCalls
@@ -1228,6 +1230,15 @@ export class InteractiveSession {
       },
       budgets: this.#budget.snapshot()
     };
+  }
+
+  #readSecurityRemediationStatus() {
+    const value = this.#options.securityRemediationStatus;
+    try {
+      return validateSecurityRemediationStatus(value === undefined ? "UNVERIFIED" : value);
+    } catch {
+      throw safeError("INVALID_COMMAND", "Security remediation status is invalid.");
+    }
   }
 }
 
@@ -1290,7 +1301,22 @@ export async function runInteractiveCli({
                     ? await session.restart(command.service)
                 : await session.finish();
           if (result !== false) {
-            writeSafeLine(output, result);
+            const outputAccepted = writeSafeLine(output, result);
+            if (!outputAccepted) {
+              if (command.command === "finish") {
+                finalResult = {
+                  schemaVersion: 1,
+                  status: "FAIL",
+                  ...(session.runId === null ? {} : { runId: session.runId }),
+                  errorCategory: "OUTPUT_REJECTED",
+                  cleaned: true
+                };
+                finalResultWritten = true;
+              } else {
+                await requestShutdown("OUTPUT_REJECTED");
+              }
+              break;
+            }
           }
           if (command.command === "finish") {
             if (result !== false) {
@@ -1302,7 +1328,10 @@ export async function runInteractiveCli({
         } catch (error) {
           if (!stopping) {
             const errorResult = cliErrorResult(session, error);
-            writeSafeLine(output, errorResult);
+            if (!writeSafeLine(output, errorResult)) {
+              await requestShutdown("OUTPUT_REJECTED");
+              break;
+            }
             if (errorResult.status === "LIVE_BUDGET_EXHAUSTED") {
               finalResult = errorResult;
             }
@@ -1312,7 +1341,9 @@ export async function runInteractiveCli({
     } catch (error) {
       if (!stopping) {
         const errorResult = cliErrorResult(session, error);
-        writeSafeLine(output, errorResult);
+        if (!writeSafeLine(output, errorResult)) {
+          await requestShutdown("OUTPUT_REJECTED");
+        }
         if (errorResult.status === "LIVE_BUDGET_EXHAUSTED") {
           finalResult = errorResult;
         }
@@ -1337,19 +1368,17 @@ export async function runInteractiveCli({
           cleaned: true
         };
       if (!finalResultWritten && finalResult !== false) {
-        writeSafeLine(output, finalResult);
-        finalResultWritten = true;
+        finalResultWritten = writeSafeLine(output, finalResult);
       }
     } else if (finalResult === undefined) {
       try {
         finalResult = await session.finish();
         if (finalResult !== false) {
-          writeSafeLine(output, finalResult);
-          finalResultWritten = true;
+          finalResultWritten = writeSafeLine(output, finalResult);
         }
       } catch (error) {
         finalResult = cliErrorResult(session, error);
-        writeSafeLine(output, finalResult);
+        finalResultWritten = writeSafeLine(output, finalResult);
       }
     }
   }
@@ -1551,15 +1580,37 @@ function projectMessageCount(value) {
   return Number.isSafeInteger(amount) && amount >= 0 ? amount : 0;
 }
 
+function serviceState(running) {
+  return running === true ? "started" : "stopped";
+}
+
 function delay(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
-function writeSafeLine(output, value) {
+export function writeSafeLine(output, value) {
+  let serialized;
   try {
-    output.write(`${JSON.stringify(value)}\n`);
+    serialized = `${JSON.stringify(sanitizeInteractiveOutput(value))}\n`;
+  } catch {
+    serialized = `${JSON.stringify({
+      schemaVersion: 1,
+      status: "FAIL",
+      errorCategory: "OUTPUT_REJECTED"
+    })}\n`;
+    try {
+      output.write(serialized);
+    } catch {
+      // The caller owns the output stream; no raw error is safe to report here.
+    }
+    return false;
+  }
+  try {
+    output.write(serialized);
+    return true;
   } catch {
     // The caller owns the output stream; no raw error is safe to report here.
+    return false;
   }
 }
 
@@ -1599,6 +1650,7 @@ function safeErrorCategory(error) {
     "BLOCKED_CODEX_AUTH",
     "BLOCKED_PROVIDER_ACCESS",
     "BLOCKED_PROVIDER_CONFIG",
+    "BLOCKED_SECURITY_REMEDIATION",
     "BLOCKED_TOOLCHAIN",
     "BUDGET_EXHAUSTED",
     "CLEANUP_FAILED",
@@ -1610,6 +1662,7 @@ function safeErrorCategory(error) {
     "DEVICE_NODE_BINARY_UNAVAILABLE",
     "INVALID_COMMAND",
     "INVALID_COMMAND_STATE",
+    "INVALID_AUTOMATION_OUTPUT",
     "INTERRUPTED",
     "INVALID_PROVIDER_CONFIG",
     "INVALID_RUN_ID",
@@ -1626,6 +1679,7 @@ function safeErrorCategory(error) {
     "LAUNCHD_UNAVAILABLE",
     "OBSERVATION_INVALID",
     "OWNERSHIP_MARKER_INVALID",
+    "OUTPUT_REJECTED",
     "PORT_ALLOCATION_FAILED",
     "PRIVATE_FILE_INTEGRITY",
     "PROCESS_ERROR",
@@ -1665,6 +1719,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === currentFile) {
       deviceNodePath: process.env.PHASE9B_DEVICE_NODE_PATH,
       desktopAppPath: process.env.PHASE9B_DESKTOP_APP_PATH,
       preflightProviderCalls: providerPreflightCalls,
+      securityRemediationStatus: process.env.PHASE9B_SECURITY_REMEDIATION_STATUS,
       useLaunchd: process.env.PHASE9B_USE_LAUNCHD === "1"
     }
   });

@@ -1,5 +1,29 @@
 # Phase 9B Result
 
+## Phase 9B-R 当前执行记录 — 2026-09-10
+
+- 安全门禁：`RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE`。依据用户明确的非敏感确认，
+  本次没有仍有效或可复用认证材料的泄露；不要求轮换 Azure OpenAI / DeepSeek Key。
+  此结论不抹去下文的历史 UI 输出事件，也不重现任何暴露值。
+- 起始 HEAD：`243d6db220ff2b00bcde4fc32df762d8cc7076f5`；远端分支和 PR Head
+  已重新核对一致。Base 为 `5df7533141107585cfbaa90a9c40d78a7b0b959a`。
+- 执行范围：现有 PR #8 / `codex/phase9b-desktop-golden-path`，仍为 Draft；
+  不新建 PR、不合并、不进入 Phase 9C。
+- 安全输出限制的离线合同 85/85 通过，lint 通过；独立 Standards / Spec 复核无剩余
+  P1/P2。后续输出边界检查发现旧进程摘要仍有无来源的 length / digest 通道，
+  supervisor 已改为 observed / suppressed 布尔状态；直接 writer 和 bundle validator
+  也已拒绝通用输出摘要。完整合同 90/90、harness lint 通过，独立追加复核无剩余
+  P1/P2，重点测试复跑 25/25 通过。
+  未据此认定发生凭据泄露，安全事件的 resolved 结论保持不变。
+- `appsettings.secrets.json` 和 `secrets.json` 已加入精确文件名 Git 忽略规则；
+  元数据检查确认未跟踪、未暂存，example 模板仍可跟踪，未读取凭据内容。
+- 当前进行 Desktop 四项修复。新的协议探针、targeted run、最终 A–J run
+  均尚未执行，尚未冻结最终候选；历史 CI / live 结果不能证明本轮改动。
+- 新一轮运行须重建独立 CODEX_HOME、Desktop profile、数据库、bearer、设备身份、
+  allowed root、运行目录、owner marker 和 launchd labels；旧资源及登录不得复用。
+
+以下是保留的原 Phase 9B 历史结果；其 `LIVE_PARTIAL` 状态未重新标记为 PASS。
+
 **状态：`LIVE_PARTIAL`。** 已使用真实打包 Desktop、Azure OpenAI Realtime、DeepSeek Responses
 和 Codex App Server 执行本轮验收。A/E/F/G/H 通过；B/C/D 保留 UNVERIFIED；I 失败；
 J 在手动加载原会话的明确范围内通过。未合并本分支，未开始 Phase 9C。

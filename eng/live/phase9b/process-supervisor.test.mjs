@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { execPath } from "node:process";
 import { test } from "node:test";
@@ -16,7 +15,10 @@ test("owned process supervisor returns bounded output summaries and restart coun
   assert.equal(result.exitCode, 0);
   assert.equal(result.restarts, 0);
   assert.equal(result.attempts, 1);
-  assert.deepEqual(result.stdout, { length: 2, sha256: "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df" });
+  assert.deepEqual(result.stdout, { observed: true, suppressed: false });
+  assert.deepEqual(result.stderr, { observed: false, suppressed: false });
+  assert.equal("length" in result.stdout, false);
+  assert.equal("sha256" in result.stdout, false);
 });
 
 test("known secrets split across stdout chunks fail closed without returning a digest", async () => {
@@ -31,8 +33,8 @@ test("known secrets split across stdout chunks fail closed without returning a d
   assert.equal(result.errorCategory, "SECRET_DETECTED");
   assert.equal(result.restarts, 0);
   assert.equal(result.attempts, 1);
-  assert.equal(result.stdout, null);
-  assert.equal(result.stderr, null);
+  assert.deepEqual(result.stdout, { observed: true, suppressed: true });
+  assert.deepEqual(result.stderr, { observed: false, suppressed: false });
   assert.equal(result.outputSuppressed, true);
 });
 
@@ -65,25 +67,72 @@ test("live child receives only the explicit nonsecret control environment", asyn
     "unrelated: process.env.UNRELATED_ENVIRONMENT ?? null",
     "}));"
   ].join(" ");
-  const expectedOutput = JSON.stringify({
-    descriptor: environment.JARVIS_PHASE9B_ADMISSION_DESCRIPTOR,
-    realtimeCallUrl: environment.JARVIS_PHASE9B_REALTIME_CALL_URL,
-    forgedControl: null,
-    openAiKey: null,
-    deepSeekKey: null,
-    unrelated: null
-  });
-
   const handle = await supervisor.start(execPath, ["-e", script], { env: environment });
   const result = await handle.waitForExit();
 
   assert.equal(result.status, "PASS");
-  assert.deepEqual(result.stdout, {
-    length: Buffer.byteLength(expectedOutput),
-    sha256: createHash("sha256").update(expectedOutput).digest("hex")
-  });
-  assert.equal(result.stderr.length, 0);
+  assert.deepEqual(result.stdout, { observed: true, suppressed: false });
+  assert.deepEqual(result.stderr, { observed: false, suppressed: false });
+  assert.equal("length" in result.stdout, false);
+  assert.equal("sha256" in result.stdout, false);
   await supervisor.stopAll();
+});
+
+test("unknown free text from either stream is represented only by fixed booleans", async () => {
+  const supervisor = new ProcessSupervisor({ timeoutMs: 1_000 });
+  const result = await supervisor.run(execPath, [
+    "-e",
+    "process.stdout.write('unclassified fixture text'); process.stderr.write('runtime detail fixture text');"
+  ]);
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(result.stdout, { observed: true, suppressed: false });
+  assert.deepEqual(result.stderr, { observed: true, suppressed: false });
+  assert.equal("length" in result.stdout, false);
+  assert.equal("sha256" in result.stdout, false);
+  assert.equal("length" in result.stderr, false);
+  assert.equal("sha256" in result.stderr, false);
+});
+
+test("runtime error preserves only stream observation metadata", async () => {
+  const supervisor = new ProcessSupervisor({ timeoutMs: 1_000 });
+  const result = await supervisor.run(execPath, [
+    "-e",
+    "process.stderr.write('runtime error fixture'); process.exit(7);"
+  ]);
+
+  assert.equal(result.status, "FAIL");
+  assert.equal(result.exitCode, 7);
+  assert.deepEqual(result.stdout, { observed: false, suppressed: false });
+  assert.deepEqual(result.stderr, { observed: true, suppressed: false });
+});
+
+test("owned live stop settles with bounded boolean output metadata", async () => {
+  const supervisor = new ProcessSupervisor({ timeoutMs: 1_000, killGraceMs: 50 });
+  const handle = await supervisor.start(execPath, [
+    "-e",
+    "setTimeout(() => process.stdout.write('long lived fixture'), 10); setInterval(() => {}, 1_000);"
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const result = await handle.stop();
+
+  assert.equal(result.status, "FAIL");
+  assert.equal(typeof result.stdout.observed, "boolean");
+  assert.equal(result.stdout.suppressed, false);
+  assert.deepEqual(result.stderr, { observed: false, suppressed: false });
+});
+
+test("owned live finish drains both streams without exposing emitted text", async () => {
+  const supervisor = new ProcessSupervisor({ timeoutMs: 1_000 });
+  const handle = await supervisor.start(execPath, [
+    "-e",
+    "process.stdout.write('finished fixture'); process.stderr.write('finished diagnostic'); process.exit(0);"
+  ]);
+  const result = await handle.waitForExit();
+
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(result.stdout, { observed: true, suppressed: false });
+  assert.deepEqual(result.stderr, { observed: true, suppressed: false });
 });
 
 test("launcher exit still drains descendants in the owned process group", async () => {

@@ -9,7 +9,6 @@ import {
   hashExternalId,
   REQUIRED_SCENARIO_IDS,
   scanKnownSecrets,
-  summarizeOutput,
   validateEvidence,
   validateEvidenceBundle,
   writeLiveEvidence
@@ -48,8 +47,7 @@ function validEvidence(overrides = {}) {
       startedAtUtc,
       finishedAtUtc,
       durationMs: 1,
-      errorCategory: "SCENARIO_DRIVER_UNAVAILABLE",
-      output: summarizeOutput("safe output")
+      errorCategory: "SCENARIO_DRIVER_UNAVAILABLE"
     }],
     artifacts: [],
     errors: [{ category: "SCENARIO_DRIVER_UNAVAILABLE" }],
@@ -61,10 +59,6 @@ function validEvidence(overrides = {}) {
 test("evidence retains only bounded hashes and rejects raw secrets or unknown fields", () => {
   const evidence = validEvidence();
   assert.equal(hashExternalId("realtime-session-123"), createHash("sha256").update("realtime-session-123").digest("hex"));
-  assert.deepEqual(summarizeOutput("safe output"), {
-    length: 11,
-    sha256: "561c03f56ace489bb56fec63df72ebb01e73641954fdceae941253b0c99b6c65"
-  });
   assert.equal(scanKnownSecrets(Buffer.from("secret-value"), ["secret-value"]), true);
   assert.doesNotThrow(() => validateEvidence(evidence));
   assert.equal(JSON.stringify(evidence).includes("api-key"), false);
@@ -76,7 +70,10 @@ test("evidence retains only bounded hashes and rejects raw secrets or unknown fi
   assert.throws(
     () => validateEvidence({
       ...evidence,
-      scenarios: [{ ...evidence.scenarios[0], output: "raw transcript" }]
+      scenarios: [{
+        ...evidence.scenarios[0],
+        output: { length: 11, sha256: "0".repeat(64) }
+      }]
     }),
     (error) => error.code === "INVALID_EVIDENCE"
   );
@@ -96,6 +93,31 @@ test("evidence retains only bounded hashes and rejects raw secrets or unknown fi
   );
 });
 
+test("generic scenario output is rejected at creation, validation, and writing seams", async () => {
+  const scenarioOutput = { observed: true, suppressed: false };
+  assert.throws(
+    () => createEvidence({
+      ...validEvidence(),
+      scenarios: [{ ...validEvidence().scenarios[0], output: scenarioOutput }]
+    }),
+    (error) => error.code === "INVALID_EVIDENCE"
+  );
+
+  const evidence = validEvidence();
+  const withOutput = {
+    ...evidence,
+    scenarios: [{ ...evidence.scenarios[0], output: scenarioOutput }]
+  };
+  assert.throws(
+    () => validateEvidence(withOutput),
+    (error) => error.code === "INVALID_EVIDENCE"
+  );
+  await assert.rejects(
+    () => writeLiveEvidence({ evidence: withOutput }),
+    (error) => error.code === "INVALID_EVIDENCE"
+  );
+});
+
 test("PASS evidence requires every approved A-J scenario and no errors", () => {
   assert.throws(
     () => validEvidence({ status: "PASS", scenarios: [], errors: [] }),
@@ -108,7 +130,63 @@ test("PASS evidence requires every approved A-J scenario and no errors", () => {
     finishedAtUtc,
     durationMs: 1
   }));
-  assert.doesNotThrow(() => validEvidence({ status: "PASS", scenarios, errors: [] }));
+  assert.doesNotThrow(() => validEvidence({
+    status: "PASS",
+    scenarios,
+    errors: [],
+    securityRemediation: { status: "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE" }
+  }));
+});
+
+test("PASS evidence requires an explicit resolved security conclusion", async () => {
+  const scenarios = REQUIRED_SCENARIO_IDS.map((id) => ({
+    id,
+    status: "PASS",
+    startedAtUtc,
+    finishedAtUtc,
+    durationMs: 1
+  }));
+  assert.doesNotThrow(() => validEvidence({
+    status: "PASS",
+    scenarios,
+    errors: [],
+    securityRemediation: { status: "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE" }
+  }));
+  for (const status of ["UNVERIFIED", "BLOCKED_SECURITY_REMEDIATION"]) {
+    assert.throws(
+      () => validEvidence({
+        status: "PASS",
+        scenarios,
+        errors: [],
+        securityRemediation: { status }
+      }),
+      (error) => error.code === "INVALID_EVIDENCE"
+    );
+  }
+  const missingSecurity = validEvidence({
+    status: "PASS",
+    scenarios,
+    errors: [],
+    securityRemediation: { status: "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE" }
+  });
+  delete missingSecurity.securityRemediation;
+  assert.throws(
+    () => validateEvidence(missingSecurity),
+    (error) => error.code === "INVALID_EVIDENCE"
+  );
+  assert.equal(validEvidence().securityRemediation.status, "UNVERIFIED");
+
+  const root = await mkdtemp(join(tmpdir(), "jarvis-phase9b-evidence-security-"));
+  try {
+    const writeInput = validEvidence();
+    delete writeInput.securityRemediation;
+    await assert.rejects(
+      () => writeLiveEvidence({ repositoryRoot: join(root, "repo"), evidence: writeInput }),
+      (error) => error.code === "INVALID_EVIDENCE"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("budget exhausted evidence requires the corresponding terminal error", () => {
@@ -124,6 +202,37 @@ test("budget exhausted evidence requires the corresponding terminal error", () =
     () => validEvidence({
       status: "LIVE_PARTIAL",
       errors: [{ category: "BUDGET_EXHAUSTED" }]
+    }),
+    (error) => error.code === "INVALID_EVIDENCE"
+  );
+});
+
+test("security remediation is explicit and unresolved security cannot be represented as PASS", () => {
+  assert.doesNotThrow(() => validEvidence({
+    status: "BLOCKED_SECURITY_REMEDIATION",
+    securityRemediation: { status: "BLOCKED_SECURITY_REMEDIATION" },
+    scenarios: [{
+      id: "security-remediation",
+      status: "BLOCKED",
+      startedAtUtc,
+      finishedAtUtc,
+      durationMs: 1,
+      errorCategory: "BLOCKED_SECURITY_REMEDIATION"
+    }],
+    errors: [{ category: "BLOCKED_SECURITY_REMEDIATION" }]
+  }));
+  assert.throws(
+    () => validEvidence({
+      status: "PASS",
+      securityRemediation: { status: "BLOCKED_SECURITY_REMEDIATION" },
+      scenarios: REQUIRED_SCENARIO_IDS.map((id) => ({
+        id,
+        status: "PASS",
+        startedAtUtc,
+        finishedAtUtc,
+        durationMs: 1
+      })),
+      errors: []
     }),
     (error) => error.code === "INVALID_EVIDENCE"
   );
