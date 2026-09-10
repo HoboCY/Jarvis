@@ -3,12 +3,28 @@ export type DesktopTask = {
   status: string;
   goal?: string;
   executionId?: string;
+  artifacts?: readonly DesktopArtifactManifestEntry[];
   progressSummary?: string | null;
   resultSummary?: string | null;
   entityVersion?: number;
   pendingUserInput?: DesktopPendingUserInput;
   [key: string]: unknown;
 };
+
+export type DesktopArtifactManifestEntry = Readonly<{
+  size: number;
+  sha256: string;
+  contentType: string;
+}>;
+
+export type DesktopTaskArtifactState = Readonly<{
+  taskId: string;
+  executionId?: string;
+  status: string;
+  artifacts: readonly DesktopArtifactManifestEntry[];
+}>;
+
+export type DesktopArtifactRestoreStatus = "complete" | "partial" | "unavailable";
 
 export type DesktopPendingUserInputOption = {
   label: string;
@@ -182,10 +198,12 @@ export function desktopTaskFrom(value: unknown): DesktopTask | undefined {
   const executionId = typeof execution?.id === "string" && execution.id.trim().length > 0 && execution.id.length <= 200
     ? execution.id.trim()
     : undefined;
+  const artifacts = mergeArtifactManifests(item.artifacts, execution?.artifacts);
   const task: DesktopTask = {
     id: item.id.trim(),
     status: item.status.trim(),
     ...(executionId === undefined ? {} : { executionId }),
+    ...(artifacts.length === 0 ? {} : { artifacts }),
     goal: typeof item.goal === "string" && item.goal.length <= 100_000 ? item.goal : undefined,
     progressSummary: item.progressSummary === null
       ? null
@@ -203,6 +221,66 @@ export function desktopTaskFrom(value: unknown): DesktopTask | undefined {
     task.pendingUserInput = pendingUserInput;
   }
   return task;
+}
+
+const artifactSha256Pattern = /^[a-f0-9]{64}$/i;
+const artifactContentTypePattern = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i;
+const maxArtifactEntriesPerTask = 100;
+const maxArtifactTaskScanPages = 8;
+const maxArtifactTasks = 256;
+
+export function artifactManifestFrom(value: unknown): readonly DesktopArtifactManifestEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const entries = new Map<string, DesktopArtifactManifestEntry>();
+  for (const candidate of value.slice(0, maxArtifactEntriesPerTask)) {
+    const item = record(candidate);
+    const sha256 = typeof item?.sha256 === "string" ? item.sha256.trim().toLowerCase() : undefined;
+    const contentType = typeof item?.contentType === "string" ? item.contentType.trim() : undefined;
+    const size = item?.size;
+    if (!sha256 || !artifactSha256Pattern.test(sha256)
+      || typeof size !== "number" || !Number.isSafeInteger(size) || size < 0
+      || size > Number.MAX_SAFE_INTEGER
+      || !contentType || contentType.length > 200 || !artifactContentTypePattern.test(contentType)
+      || hasControlCharacter(contentType)) {
+      continue;
+    }
+    const entry = { size, sha256, contentType };
+    entries.set(`${sha256}:${size}:${contentType}`, entry);
+  }
+  return [...entries.values()].sort((left, right) =>
+    left.sha256.localeCompare(right.sha256)
+      || left.size - right.size
+      || left.contentType.localeCompare(right.contentType));
+}
+
+function mergeArtifactManifests(...values: unknown[]): readonly DesktopArtifactManifestEntry[] {
+  const entries = values.flatMap(value => artifactManifestFrom(value));
+  return artifactManifestFrom(entries);
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function taskArtifactState(task: DesktopTask): DesktopTaskArtifactState | undefined {
+  if (!task.artifacts || task.artifacts.length === 0) {
+    return undefined;
+  }
+  return {
+    taskId: task.id,
+    ...(task.executionId === undefined ? {} : { executionId: task.executionId }),
+    status: task.status,
+    artifacts: task.artifacts
+  };
 }
 
 export const nonTerminalTaskStatuses = [
@@ -230,6 +308,10 @@ export type DesktopTaskFeedBackend = {
     conversationId?: string,
     cursor?: string,
     status?: NonTerminalTaskStatus
+  ) => Promise<DesktopTaskPageResult>;
+  getAllTasks?: (
+    conversationId?: string,
+    cursor?: string
   ) => Promise<DesktopTaskPageResult>;
   getUnreadNotifications: () => Promise<readonly DesktopNotification[]>;
   markDelivered: (notificationId: string, idempotencyKey: string) => Promise<unknown>;
@@ -302,7 +384,8 @@ export async function refreshFeedIfCurrent(
   currentFeed: () => DesktopTaskNotificationFeed | undefined,
   applySnapshot: (
     tasks: readonly DesktopTask[],
-    notifications: readonly DesktopNotification[]
+    notifications: readonly DesktopNotification[],
+    artifacts?: readonly DesktopTaskArtifactState[]
   ) => void,
   conversationId?: string
 ): Promise<void> {
@@ -320,7 +403,7 @@ export async function refreshFeedIfCurrent(
     return;
   }
 
-  applySnapshot(feed.tasks, feed.notifications);
+  applySnapshot(feed.tasks, feed.notifications, feed.artifacts);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -364,6 +447,7 @@ export function notificationActionIdempotencyKey(
 
 export class DesktopTaskNotificationFeed {
   private readonly taskById = new Map<string, DesktopTask>();
+  private readonly artifactByTaskId = new Map<string, DesktopTaskArtifactState>();
   private readonly notificationById = new Map<string, DesktopNotification>();
   private readonly deliveryInFlight = new Map<string, Promise<void>>();
   private readonly taskEventVersions = new Map<string, EventVersion>();
@@ -384,11 +468,21 @@ export class DesktopTaskNotificationFeed {
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private retryWaiter: (() => void) | undefined;
   private disposed = false;
+  private artifactRestoreStatusValue: DesktopArtifactRestoreStatus = "unavailable";
 
   public constructor(private readonly backend: DesktopTaskFeedBackend) {}
 
   public get tasks(): readonly DesktopTask[] {
     return [...this.taskById.values()];
+  }
+
+  public get artifacts(): readonly DesktopTaskArtifactState[] {
+    return [...this.artifactByTaskId.values()]
+      .sort((left, right) => left.taskId.localeCompare(right.taskId));
+  }
+
+  public get artifactRestoreStatus(): DesktopArtifactRestoreStatus {
+    return this.artifactRestoreStatusValue;
   }
 
   public get notifications(): readonly DesktopNotification[] {
@@ -435,6 +529,8 @@ export class DesktopTaskNotificationFeed {
     this.conversationGeneration++;
     this.lastConversationId = conversationId;
     this.taskById.clear();
+    this.artifactByTaskId.clear();
+    this.artifactRestoreStatusValue = "unavailable";
     this.taskEventVersions.clear();
     this.taskWatermarkRequiresRefresh = false;
     return this.captureConversationBinding();
@@ -479,10 +575,11 @@ export class DesktopTaskNotificationFeed {
     const conversationGeneration = this.conversationGeneration;
     const refreshGeneration = ++this.refreshGeneration;
     const refreshRevision = this.revision;
-    const [tasksByStatus, notifications] = await Promise.all([
+    const [tasksByStatus, notifications, artifactScan] = await Promise.all([
       Promise.all(nonTerminalTaskStatuses.map(status =>
         collectTaskPages(cursor => this.backend.getTasks(conversationId, cursor, status)))),
-      this.backend.getUnreadNotifications()
+      this.backend.getUnreadNotifications(),
+      this.scanArtifactTasks(conversationId)
     ]);
     if (this.disposed || conversationGeneration !== this.conversationGeneration) {
       return;
@@ -536,6 +633,13 @@ export class DesktopTaskNotificationFeed {
     this.trimTrackedVersions();
 
     this.taskById.clear();
+    if (artifactScan.status === "complete" || artifactScan.states.length > 0) {
+      this.artifactByTaskId.clear();
+    }
+    for (const state of artifactScan.states) {
+      this.artifactByTaskId.set(state.taskId, state);
+    }
+    this.artifactRestoreStatusValue = artifactScan.status;
     this.notificationById.clear();
     for (const task of tasks) {
       if (!task.id || !taskSnapshotVersions.has(task.id)) {
@@ -633,22 +737,32 @@ export class DesktopTaskNotificationFeed {
         return;
       }
       const status = stringValue(payload.status) ?? previous?.status ?? "queued";
+      const eventExecution = record(payload.execution);
+      const eventArtifacts = mergeArtifactManifests(payload.artifacts, eventExecution?.artifacts);
       const nextTask = desktopTaskFrom({
         id,
         status,
         execution: payload.executionId === undefined && previous?.executionId === undefined
           ? undefined
-          : { id: payload.executionId ?? previous?.executionId },
+          : {
+            id: payload.executionId ?? previous?.executionId,
+            artifacts: eventExecution?.artifacts
+          },
         goal: payload.goal ?? previous?.goal,
         progressSummary: payload.progressSummary ?? previous?.progressSummary,
         resultSummary: payload.resultSummary ?? previous?.resultSummary,
         entityVersion: readEntityVersion(payload) ?? previous?.entityVersion,
+        artifacts: eventArtifacts.length > 0 ? eventArtifacts : previous?.artifacts,
         pendingUserInput: Object.hasOwn(payload, "pendingUserInput")
           ? payload.pendingUserInput
           : previous?.pendingUserInput
       });
       if (nextTask) {
         this.taskById.set(id, nextTask);
+        const artifactState = taskArtifactState(nextTask);
+        if (artifactState) {
+          this.artifactByTaskId.set(id, artifactState);
+        }
       }
       return;
     }
@@ -740,6 +854,33 @@ export class DesktopTaskNotificationFeed {
       "acknowledge",
       notificationActionIdempotencyKey(notificationId, "acknowledge"));
     this.deleteNotification(notificationId);
+  }
+
+  private async scanArtifactTasks(
+    conversationId: string | undefined
+  ): Promise<{
+    status: DesktopArtifactRestoreStatus;
+    states: readonly DesktopTaskArtifactState[];
+  }> {
+    if (!this.backend.getAllTasks) {
+      return { status: "unavailable", states: [] };
+    }
+
+    try {
+      const tasks = await collectTaskPages(
+        cursor => this.backend.getAllTasks!(conversationId, cursor),
+        maxArtifactTaskScanPages);
+      const states = tasks
+        .slice(0, maxArtifactTasks)
+        .map(taskArtifactState)
+        .filter((state): state is DesktopTaskArtifactState => state !== undefined);
+      return {
+        status: tasks.length > maxArtifactTasks ? "partial" : "complete",
+        states
+      };
+    } catch {
+      return { status: "partial", states: [] };
+    }
   }
 
   private refreshAfterWatermarkFallback(conversationId: string | undefined): Promise<void> {

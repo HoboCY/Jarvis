@@ -40,8 +40,12 @@ const workspaceSourcePlugin = {
 
 const taskId = "0198b0a1-0000-7000-8000-000000000201";
 const executionId = "0198b0a1-0000-7000-8000-000000000202";
+const artifactTaskId = "0198b0a1-0000-7000-8000-000000000215";
+const artifactExecutionId = "0198b0a1-0000-7000-8000-000000000216";
+const artifactSha256 = "fb1019e653464e719e6484b1d245c025a1b2402f19f55346f2c55d9b89be40a2";
 const conversationId = "0198b0a1-0000-7000-8000-000000000203";
 const replacementConversationId = "0198b0a1-0000-7000-8000-000000000214";
+const partialConversationId = "0198b0a1-0000-7000-8000-000000000217";
 const approvalId = "0198b0a1-0000-7000-8000-000000000204";
 const notificationId = "0198b0a1-0000-7000-8000-000000000205";
 const inputTaskId = "0198b0a1-0000-7000-8000-000000000206";
@@ -322,9 +326,17 @@ const replacementConversation = {
   messageCount: 0
 };
 
+const partialConversation = {
+  id: partialConversationId,
+  title: "Renderer scenario partial artifacts",
+  messages: [],
+  messageCount: 0
+};
+
 const scenarioConversations = new Map([
   [conversation.id, conversation],
-  [replacementConversation.id, replacementConversation]
+  [replacementConversation.id, replacementConversation],
+  [partialConversation.id, partialConversation]
 ]);
 
 const tasks = [
@@ -347,9 +359,39 @@ const tasks = [
   }
 ];
 
-const tasksByConversation = new Map([
-  [conversationId, tasks],
-  [replacementConversationId, []]
+const artifactTask = {
+  id: artifactTaskId,
+  status: "succeeded",
+  goal: "恢复已完成产物",
+  execution: {
+    id: artifactExecutionId,
+    artifacts: [{
+      path: "/private/worker/phase9b-artifact-fixture.txt",
+      size: 26,
+      sha256: artifactSha256,
+      contentType: "text/plain"
+    }]
+  },
+  artifacts: [{
+    path: "/private/worker/phase9b-artifact-fixture.txt",
+    size: 26,
+    sha256: artifactSha256,
+    contentType: "text/plain"
+  }]
+};
+
+const allTasksByConversation = new Map([
+  [conversationId, [...tasks, artifactTask]],
+  [replacementConversationId, []],
+  [partialConversationId, Array.from({ length: 257 }, (_, index) => ({
+    id: `0198b0a1-0000-7000-8000-${String(300 + index).padStart(12, "0")}`,
+    status: "succeeded",
+    artifacts: [{
+      size: index,
+      sha256: index.toString(16).padStart(64, "0"),
+      contentType: "application/json"
+    }]
+  }))]
 ]);
 
 const approvals = [
@@ -501,10 +543,13 @@ function registerScenarioIpc() {
     selectedConversationId = undefined;
     return undefined;
   });
-  registerHandler("backend:getTasks", (_event, input) => ({
-    items: tasksByConversation.get(input?.conversationId) ?? [],
-    nextCursor: null
-  }));
+  registerHandler("backend:getTasks", (_event, input) => {
+    const allTasks = allTasksByConversation.get(input?.conversationId) ?? [];
+    const items = typeof input?.status === "string"
+      ? allTasks.filter(task => task.status === input.status)
+      : allTasks;
+    return { items, nextCursor: null };
+  });
   registerHandler("backend:getNotifications", () => ({ items: notifications }));
   registerHandler("backend:getApprovals", () => ({ items: approvals }));
   registerHandler("backend:getDiagnostics", () => {
@@ -704,12 +749,14 @@ async function waitForConversationProjection(window) {
     try {
       latest = await evaluate(window, `(() => ({
         title: document.querySelector(".workspace-context")?.textContent ?? "",
-        messagePresent: document.body.textContent?.includes("控制面板已连接") === true
+        messagePresent: document.body.textContent?.includes("控制面板已连接") === true,
+        artifactReady: document.querySelector('[data-testid="phase9b-artifact-count"]')?.textContent?.trim() === "1"
+          && document.querySelector('[data-testid="phase9b-artifact-section"]') !== null
       }))()`);
     } catch {
       latest = undefined;
     }
-    if (latest?.title === conversation.title && latest.messagePresent) {
+    if (latest?.title === conversation.title && latest.messagePresent && latest.artifactReady) {
       return latest;
     }
     await wait(40);
@@ -765,6 +812,8 @@ async function readPhase9bState(window) {
       realtimeStatus: read('[data-testid="phase9b-realtime-status"]'),
       conversationId: read('[data-testid="phase9b-conversation-id"]'),
       taskCount: readCount('[data-testid="phase9b-task-count"]'),
+      artifactCount: readCount('[data-testid="phase9b-artifact-count"]'),
+      artifactRestoreStatus: read('[data-testid="phase9b-artifact-restore-status"]'),
       notificationCount: readCount('[data-testid="phase9b-notification-count"]'),
       connectionIntent: connect ? "connect" : disconnect ? "disconnect" : null,
       connectionDisabled: activeConnection instanceof HTMLButtonElement
@@ -788,7 +837,9 @@ async function waitForPhase9bState(window, predicate, timeoutMessage) {
     }
     await wait(40);
   }
-  throw new Error(timeoutMessage);
+  const timeoutError = new Error(timeoutMessage);
+  Error.captureStackTrace(timeoutError, waitForPhase9bState);
+  throw timeoutError;
 }
 
 async function setConversationFromScenarioSurface(window, nextConversationId) {
@@ -1070,6 +1121,19 @@ async function runScenario() {
       realProjectionPresent: document.body.textContent?.includes("检查控制面板") === true
         && document.body.textContent?.includes("保存报告到工作区") === true
         && document.body.textContent?.includes("控制面板场景通知") === true,
+      artifactProjection: (() => {
+        const section = document.querySelector('[data-testid="phase9b-artifact-section"]');
+        const task = document.querySelector('[data-testid="phase9b-artifact-task"]');
+        return {
+          sectionPresent: Boolean(section),
+          taskPresent: Boolean(task),
+          activeTaskCount: document.querySelectorAll(".task-list .task-item").length,
+          sha256: document.querySelector('[data-testid="phase9b-artifact-sha256"]')?.textContent?.trim() ?? null,
+          size: document.querySelector('[data-testid="phase9b-artifact-size"]')?.textContent?.trim() ?? null,
+          contentType: document.querySelector('[data-testid="phase9b-artifact-content-type"]')?.textContent?.trim() ?? null,
+          pathFree: section !== null && !section.textContent?.includes("/private/worker")
+        };
+      })(),
       persistedConversationPresent: document.querySelector(".workspace-context")?.textContent === "Renderer scenario conversation"
         && document.body.textContent?.includes("控制面板已连接") === true,
       secretFree: !document.body.textContent?.includes("scenario-client-secret"),
@@ -1160,6 +1224,32 @@ async function runScenario() {
     window,
     state => state.conversationId === conversationId && state.taskCount === 2,
     "The renderer did not restore the original conversation task feed.");
+  await setConversationFromScenarioSurface(window, partialConversationId);
+  const partialConversationState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === partialConversationId
+      && state.taskCount === 0
+      && state.artifactRestoreStatus === "partial"
+      && state.artifactCount === 128,
+    "The renderer did not expose the bounded partial artifact recovery state.");
+  const partialArtifactProjection = await evaluate(window, `(() => {
+    const section = document.querySelector('[data-testid="phase9b-artifact-section"]');
+    const notice = section?.querySelector('[data-testid="phase9b-artifact-restore-notice"]');
+    return {
+      sectionPresent: Boolean(section),
+      noticePresent: Boolean(notice),
+      manifestPresent: section?.querySelector('[data-testid="phase9b-artifact-sha256"]') !== null,
+      activeTaskListEmpty: document.querySelectorAll('.task-list .task-item').length === 0,
+      pathFree: section !== null && !section.textContent?.includes('/private/worker')
+    };
+  })()`);
+  await setConversationFromScenarioSurface(window, conversationId);
+  await waitForPhase9bState(
+    window,
+    state => state.conversationId === conversationId
+      && state.taskCount === 2
+      && state.artifactRestoreStatus === "complete",
+    "The renderer did not restore the original conversation after the partial artifact check.");
   failNextConversationLoad = true;
   await setConversationFromScenarioSurface(window, replacementConversationId);
   await wait(100);
@@ -1176,6 +1266,10 @@ async function runScenario() {
     replacementConversation: replacementConversationState,
     staleConnect: staleConnectState,
     restoredConversation: restoredConversationState,
+    partialArtifacts: {
+      state: partialConversationState,
+      projection: partialArtifactProjection
+    },
     failedReplacement: {
       conversationId: failedReplacementState.conversationId,
       taskCount: failedReplacementState.taskCount,
@@ -1196,6 +1290,7 @@ async function runScenario() {
   }
   if (conversationInterleaving.replacementConversation.conversationId !== replacementConversationId
     || conversationInterleaving.replacementConversation.taskCount !== 0
+    || conversationInterleaving.replacementConversation.artifactCount !== 0
     || conversationInterleaving.replacementConversation.notificationCount !== 3) {
     throw new Error("The renderer interleaving did not isolate replacement conversation feed state.");
   }
@@ -1207,6 +1302,17 @@ async function runScenario() {
   }
   if (conversationInterleaving.restoredConversation.conversationId !== conversationId
     || conversationInterleaving.restoredConversation.taskCount !== 2
+    || conversationInterleaving.restoredConversation.artifactCount !== 1
+    || conversationInterleaving.restoredConversation.artifactRestoreStatus !== "complete"
+    || conversationInterleaving.partialArtifacts.state.conversationId !== partialConversationId
+    || conversationInterleaving.partialArtifacts.state.taskCount !== 0
+    || conversationInterleaving.partialArtifacts.state.artifactRestoreStatus !== "partial"
+    || conversationInterleaving.partialArtifacts.state.artifactCount !== 128
+    || !conversationInterleaving.partialArtifacts.projection.sectionPresent
+    || !conversationInterleaving.partialArtifacts.projection.noticePresent
+    || !conversationInterleaving.partialArtifacts.projection.manifestPresent
+    || !conversationInterleaving.partialArtifacts.projection.activeTaskListEmpty
+    || !conversationInterleaving.partialArtifacts.projection.pathFree
     || !conversationInterleaving.failedSwitchPreservedOriginal
     || !conversationInterleaving.sameConversationBindingPreserved) {
     throw new Error("The renderer interleaving did not preserve the original conversation binding.");
@@ -1864,6 +1970,13 @@ async function runScenario() {
   }
   if (!initial.mounted || !initial.requiredLabelsPresent || !initial.realProjectionPresent
     || !initial.persistedConversationPresent
+    || !initial.artifactProjection.sectionPresent
+    || !initial.artifactProjection.taskPresent
+    || initial.artifactProjection.activeTaskCount !== 2
+    || initial.artifactProjection.sha256 !== artifactSha256
+    || initial.artifactProjection.size !== "26"
+    || initial.artifactProjection.contentType !== "text/plain"
+    || !initial.artifactProjection.pathFree
     || !initial.secretFree
     || !initial.deviceStatus
     || !initial.localAudioAvailable
@@ -1881,6 +1994,7 @@ async function runScenario() {
     || conversationInterleaving.pendingConversation !== conversationId
     || conversationInterleaving.replacementConversation.conversationId !== replacementConversationId
     || conversationInterleaving.replacementConversation.taskCount !== 0
+    || conversationInterleaving.replacementConversation.artifactCount !== 0
     || conversationInterleaving.replacementConversation.notificationCount !== 3
     || conversationInterleaving.staleConnect.conversationId !== replacementConversationId
     || conversationInterleaving.staleConnect.realtimeStatus !== "disconnected"
@@ -1888,6 +2002,8 @@ async function runScenario() {
     || conversationInterleaving.staleConnect.connectionDisabled
     || conversationInterleaving.restoredConversation.conversationId !== conversationId
     || conversationInterleaving.restoredConversation.taskCount !== 2
+    || conversationInterleaving.restoredConversation.artifactCount !== 1
+    || conversationInterleaving.restoredConversation.artifactRestoreStatus !== "complete"
     || !conversationInterleaving.failedSwitchPreservedOriginal
     || !conversationInterleaving.sameConversationBindingPreserved
     || !["connected", "degraded"].includes(realtimeRecoveryPersistence.failure.status)

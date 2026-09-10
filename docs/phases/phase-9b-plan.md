@@ -56,7 +56,10 @@ Initial offline verification on the resumption baseline:
 - Added exact-name Git ignore rules for `appsettings.secrets.json` and
   `secrets.json`. Filename/index checks confirm they are ignored and neither is
   tracked or staged; the corresponding example templates remain trackable.
-  No credential content was read for this check.
+  The original checkout remains on its existing Phase 9A branch; shared local
+  Git exclude rules now protect both worktrees without changing that branch or
+  its source files. Both indexes contain zero matching secrets files, and
+  example templates remain trackable. No credential content was read.
 - The restricted-output checkpoint is local commit
   `40ec81c2894474c4783cfd62f5bae6080c5ea6b7`; it is not a frozen live candidate.
 - Desktop normal quit now waits for nonce-bound renderer acknowledgement and
@@ -77,6 +80,54 @@ Initial offline verification on the resumption baseline:
   proven cause. These checks do not prove authenticated backend, SignalR/WebRTC,
   or live acceptance behavior. Final independent Standards and Spec review found
   no remaining P1/P2, including the actual App surface verification gap.
+- The Stage 2 checkpoint is local commit
+  `90e500be047d43c78086de79ee0ae3d0f5e2af80`, not a frozen live candidate.
+- A later Live J scope check found a remaining artifact-restoration P1 in
+  that Stage 2 checkpoint: task projection drops manifests and startup loads
+  only nonterminal tasks, so completed-task artifacts are not restored in the
+  renderer. A bounded read-only manifest scan through the existing task API and
+  safe renderer projection are implemented in a supplement. Partial results
+  remain bounded across repeated scans and have a visible incomplete-state
+  notice. The initial full unit run was 227/228, with a shutdown timing assertion
+  failing under concurrent checks (its isolated 21-test suite passed). That test
+  now uses a controlled monotonic clock. Independent final verification passed
+  230/230 Desktop tests, typecheck, lint, build, and the actual built renderer;
+  the renderer waits for the complete restored-state predicate and all owned
+  processes/profile were removed. These are offline proofs only.
+- A separate Gap 3/Live J check confirmed that ordinary HTTP catch-up loses a
+  terminal task without artifacts while restoring its notification. There is
+  no alternate App task-restoration path. Reuse the existing bounded all-status
+  scan to restore read-only terminal identities/statuses separately from ongoing
+  tasks, with the same Conversation binding guards. This remains open before
+  native execution; the earlier lifecycle proofs retain their tested scope.
+- The initial Stage 3 probe checkpoint is RED: syntax passed, but independent
+  contract execution passed only 1/7. Preliminary review found incorrect pending
+  history classification, request-ID de-duplication across process generations,
+  insufficient authentication-directory isolation, and missing new-Turn proof.
+  Its actual CLI/transport cleanup, cancellation, output and budget boundaries
+  also require integration tests. These are unexecuted harness defects, not
+  evidence of credential exposure or a native Codex protocol limitation. The
+  probe remains blocked from authentication/execution until its fixes and
+  independent review pass; no native probe or new provider call has occurred.
+- The subsequent pure probe boundary checkpoint passed all 11 tests and lint
+  independently. Three later guard findings (duplicate continuation audit,
+  additional history Turns, and resolved-notification generation) are now
+  closed in a narrow independent review. The earlier complete-flow checkpoint
+  was RED at 13/14 tests, with three lint errors and an unfinished CLI. Its fake
+  completion and parser used an obsolete flat shape instead of the pinned
+  nested `turn/completed` shape; status loss caused the observed failure.
+- The typed-notification/history supplement passed all 14 tests and lint in an
+  independent frozen-source run. It uses the pinned nested completion shape,
+  handles normal notifications, and checks both strict history argument shapes
+  with controlled options and flags. Its lifecycle review remains open.
+  Separate real Node process fixtures reproduced two cleanup defects: signal
+  exit was reported as failure, and an exited leader with a surviving descendant
+  was falsely reported as a removed process group. The fixtures were cleaned up;
+  they used no Codex authentication or provider. CLI cancellation, bounded writes,
+  delayed reissue arbitration and complete process-group cleanup must pass before
+  native execution. Synthetic history does not prove native recovery support.
+  Login requires private capture and separate fresh environments for the probe,
+  targeted run, and final run.
 - Locked .NET restore, tool restore, frozen pnpm install, and the pinned Codex
   schema/canonical checks passed. Node `24.19.0` and Codex `0.146.0` were obtained
   in a new tool-only directory and checked against their published/pinned hashes.
@@ -201,8 +252,9 @@ commands and results in the acceptance report.
 - Limit paid provider requests to 12, Realtime connections to 4, delegation attempts to 2,
   and Codex tasks to 5. Enforce bounded scenario and whole-run timeouts. Stop on exhaustion.
 - Record bounded statuses, counts, durations, versions, code SHAs and Jarvis UUIDs. Hash
-  external provider/Codex identifiers; record output length and SHA only. Exclude raw
-  prompts, transcripts, provider responses, JSONL, DBs, audio and absolute user paths.
+  only validated external provider/Codex identifiers and controlled artifacts. For arbitrary
+  process output record only fixed observed/suppressed booleans, never its length or hash.
+  Exclude raw prompts, transcripts, provider responses, JSONL, DBs, audio and absolute user paths.
 - The optional Desktop observation entry point reads the public WebRTC receiver surface
   after connection. It records only the internal Realtime session UUID, connection state,
   and remote/live audio-track counts. Main validates the live profile and exact renderer
@@ -217,7 +269,8 @@ commands and results in the acceptance report.
 
 The acceptance report distinguishes verified, unsupported, blocked and unverified scenarios.
 Review the final diff independently for standards and specification fit. Push only scoped
-commits and open a PR against main with the `full-matrix` label; do not merge it automatically.
+commits to the existing branch and PR #8 with the `full-matrix` label; do not create another
+PR or merge PR #8.
 Remote CI success must refer to the final PR head SHA; live evidence remains bound to its
 installed candidate SHA. Phase 9C does not begin in this task.
 

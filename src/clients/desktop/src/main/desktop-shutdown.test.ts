@@ -374,7 +374,10 @@ test("a failed renderer terminal lets Main perform one fallback after the pendin
   assert.deepEqual(events, ["freeze", "stopWake", "stopSignalR", "closeWindows", "continueQuit"]);
 });
 
-test("a hanging normal terminal is taken over in the reserved shutdown slice with the same idempotency key", async () => {
+test("a hanging normal terminal is taken over in the reserved shutdown slice with the same idempotency key", async t => {
+  let virtualNow = 10_000;
+  t.mock.method(performance, "now", () => virtualNow);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const sender = {};
   const frame = {};
   const requestId = "0199f1b8-1236-7000-8000-0123456789ab";
@@ -428,8 +431,13 @@ test("a hanging normal terminal is taken over in the reserved shutdown slice wit
     timeoutMs: 80
   });
 
-  const startedAt = Date.now();
   coordinator.requestQuit({ preventDefault: () => {} });
+  virtualNow += 59;
+  t.mock.timers.tick(59);
+  await Promise.resolve();
+  assert.equal(terminalCalls, 0);
+  virtualNow += 1;
+  t.mock.timers.tick(1);
   const result = await coordinator.waitForCompletion();
   assert.equal(result.status, "fallback");
   assert.deepEqual(fallbackSessions, [{
@@ -441,7 +449,6 @@ test("a hanging normal terminal is taken over in the reserved shutdown slice wit
   }]);
   assert.equal(terminalCalls, 1);
   assert.equal(registry.activeSession, undefined);
-  assert.ok(Date.now() - startedAt < 250);
   assert.deepEqual(events, ["freeze", "stopWake", "stopSignalR", "closeWindows", "continueQuit"]);
 });
 

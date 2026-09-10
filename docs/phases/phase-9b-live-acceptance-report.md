@@ -17,6 +17,8 @@
   未据此认定发生凭据泄露，安全事件的 resolved 结论保持不变。
 - `appsettings.secrets.json` 和 `secrets.json` 已加入精确文件名 Git 忽略规则；
   元数据检查确认未跟踪、未暂存，example 模板仍可跟踪，未读取凭据内容。
+  原工作树仍保留既有 Phase 9A 分支及文件；共享 Git 本地排除规则已保护两个工作树，
+  两边对应文件的跟踪数和暂存数均为零，example 模板仍可跟踪。
 - 安全输出限制的本地提交为 `40ec81c2894474c4783cfd62f5bae6080c5ea6b7`，
   尚未作为最终候选或推送后的 CI 结论。
 - 用户已说明实际 Provider Key 位于 `appsettings.secrets.json`；其具体位置待确认。
@@ -31,6 +33,32 @@
   先前 missing-observation 失败保留，原因未确定；最终 Standards / Spec 追加复审完成，
   无剩余 P1/P2，实际 App surface 的离线验证缺口已关闭。
   这些结果不替代真实后端、SignalR/WebRTC 或 live 验收。
+- 第二步已保存为本地提交 `90e500be047d43c78086de79ee0ae3d0f5e2af80`，尚非最终候选。
+- 后续 Live J 范围复核发现第二步仍有 artifact 恢复 P1：启动只拉未完成任务，
+  任务转换又丢弃 manifest，因此完成任务的产物不能在 renderer 自动恢复。
+  使用现有 API 有界恢复只读 manifest 的补片已实现；部分扫描结果有可见提示，重复
+  扫描不累积超出窗口。初次完整 unit 为 227/228，退出时序断言在并行检查下失败，
+  该文件单独运行 21/21 通过；现已改用受控 monotonic 时钟。最终独立复跑为
+  230/230、typecheck、lint、build 和 built renderer 均通过；实际界面等待完整恢复
+  状态，所属进程和临时 profile 均已清理。这些仍是离线证明。
+- 另已确认 Gap 3 / Live J 的终态恢复缺口：正常 HTTP 补拉会丢失无 artifact 的终态
+  任务，只有通知恢复，App 无其它自动恢复路径。将复用同次有界全状态查询，以只读
+  identity/status 区域恢复终态任务，沿用会话绑定隔离。修复前不得开始 native probe。
+- 协议探针初稿检查点为 RED：语法通过，独立合同执行仅 1/7 通过。
+  预审发现历史 pending 项匹配、跨进程请求 ID 去重、认证目录隔离及新 Turn 证明缺口；
+  实际 CLI/transport 的清理、取消、输出及预算边界也尚待补齐回归。
+  这些是尚未执行的 harness 缺陷，不是凭据泄露证据或真实 Codex 协议限制结论。
+  修复与独立复核通过前不得启动认证或 native probe。
+- 后续纯边界检查点 11/11 测试及 lint 经独立运行通过；重复 continuation 审计、
+  额外历史 Turn、resolved generation 三项已通过窄范围追加复核。
+  早先完整流程检查点为 RED（13/14，3 处 lint 错误，CLI 未完成）：旧完成通知格式
+  与固定版本 schema 不符，且丢失 status。
+- typed notification/history 补片的冻结源码已独立通过 14/14 和 lint；完成通知已采用
+  固定版本的嵌套结构，正常通知不再引发解析失败，history 两种严格候选结构均检查
+  受控选项和输入标志。生命周期审查尚未关闭。这些离线判定不证明 native 恢复能力。
+- 无认证的真实 Node 子进程夹具复现了两处清理错误：信号退出被误判失败，主进程
+  退出后仍存活的子进程组被误判已清除；夹具已全部清理。CLI 取消、有界写入、延迟
+  reissue 判定和进程组退出验证仍须修复；这不是实际 Codex 执行或凭据暴露证据。
 - 当前准备固定 Codex 版本的重启协议探针。新的协议探针、targeted run、最终 A–J run
   均尚未执行，尚未冻结最终候选；历史 CI / live 结果不能证明本轮改动。
 - 新一轮运行须重建独立 CODEX_HOME、Desktop profile、数据库、bearer、设备身份、

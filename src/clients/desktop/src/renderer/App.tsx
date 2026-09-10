@@ -28,7 +28,10 @@ import {
   refreshOnBackendConnectionState,
   type DesktopNotification,
   type DesktopTask,
+  type DesktopTaskArtifactState,
+  type DesktopArtifactRestoreStatus,
   desktopTaskFrom,
+  nonTerminalTaskStatuses,
   notificationDeliveredActionKey,
   notificationActionsFrom
 } from "./task-feed.js";
@@ -485,18 +488,24 @@ function listItems(value: unknown): unknown[] {
 }
 
 function createTaskFeed(runAction: RunDesktopAction): DesktopTaskNotificationFeed {
+  const getTaskPage = async (
+    conversationId?: string,
+    cursor?: string,
+    status?: typeof nonTerminalTaskStatuses[number]
+  ) => {
+    const page = asRecord(await window.jarvis.getTasks({ conversationId, cursor, status }));
+    const nextCursor = page.nextCursor;
+    if (nextCursor !== undefined && nextCursor !== null && typeof nextCursor !== "string") {
+      throw new Error("Backend returned an invalid task cursor.");
+    }
+    return {
+      items: listItems(page).map(taskFrom),
+      nextCursor: typeof nextCursor === "string" ? nextCursor : null
+    };
+  };
   return new DesktopTaskNotificationFeed({
-    getTasks: async (conversationId, cursor, status) => {
-      const page = asRecord(await window.jarvis.getTasks({ conversationId, cursor, status }));
-      const nextCursor = page.nextCursor;
-      if (nextCursor !== undefined && nextCursor !== null && typeof nextCursor !== "string") {
-        throw new Error("Backend returned an invalid task cursor.");
-      }
-      return {
-        items: listItems(page).map(taskFrom),
-        nextCursor: typeof nextCursor === "string" ? nextCursor : null
-      };
-    },
+    getTasks: getTaskPage,
+    getAllTasks: (conversationId, cursor) => getTaskPage(conversationId, cursor),
     getUnreadNotifications: async () =>
       listItems(await window.jarvis.getNotifications()).map(notificationFrom),
     markDelivered: (notificationId, idempotencyKey) => window.jarvis.markNotificationDelivered({
@@ -652,6 +661,8 @@ export function App() {
   const [wakeState, setWakeState] = useState<DesktopRealtimeWakeState>("standby");
   const [conversationIdInput, setConversationIdInput] = useState("");
   const [tasks, setTasks] = useState<readonly DesktopTask[]>([]);
+  const [artifacts, setArtifacts] = useState<readonly DesktopTaskArtifactState[]>([]);
+  const [artifactRestoreStatus, setArtifactRestoreStatus] = useState<DesktopArtifactRestoreStatus>("unavailable");
   const [notifications, setNotifications] = useState<readonly DesktopNotification[]>([]);
   const [approvals, setApprovals] = useState<readonly DesktopApproval[]>([]);
   const [resolvingApprovalIds, setResolvingApprovalIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -736,6 +747,8 @@ export function App() {
           return;
         }
         setTasks(nextTasks);
+        setArtifacts(currentFeed.artifacts);
+        setArtifactRestoreStatus(currentFeed.artifactRestoreStatus);
         setNotifications(nextNotifications);
       },
       conversationId);
@@ -825,6 +838,8 @@ export function App() {
             }
             if (currentFeed.isCurrentConversationBinding(feedBinding)) {
               setTasks(currentFeed.tasks);
+              setArtifacts(currentFeed.artifacts);
+              setArtifactRestoreStatus(currentFeed.artifactRestoreStatus);
             }
             setNotifications(currentFeed.notifications);
             setApprovals(approvalFeed.current?.approvals ?? []);
@@ -966,6 +981,8 @@ export function App() {
     if (currentFeed) {
       currentFeed.selectConversation(next.id);
       setTasks(currentFeed.tasks);
+      setArtifacts(currentFeed.artifacts);
+      setArtifactRestoreStatus(currentFeed.artifactRestoreStatus);
     }
     conversationRef.current = next;
     activeConversationId.current = next.id;
@@ -1087,6 +1104,8 @@ export function App() {
         activeConversationId.current = undefined;
         feed.current?.selectConversation(undefined);
         setTasks([]);
+        setArtifacts([]);
+        setArtifactRestoreStatus("unavailable");
         setConversation(undefined);
         setConversationIdInput("");
       }
@@ -1762,6 +1781,8 @@ export function App() {
         {conversation ? <span data-testid="phase9b-conversation-id">{conversation.id}</span> : null}
         <span data-testid="phase9b-message-count">{boundedPhase9bCount(conversation?.messageCount ?? 0)}</span>
         <span data-testid="phase9b-task-count">{boundedPhase9bCount(tasks.length)}</span>
+        <span data-testid="phase9b-artifact-count">{boundedPhase9bCount(artifacts.reduce((count, task) => count + task.artifacts.length, 0))}</span>
+        <span data-testid="phase9b-artifact-restore-status">{artifactRestoreStatus}</span>
         <span data-testid="phase9b-notification-count">{boundedPhase9bCount(notifications.length)}</span>
         <span data-testid="phase9b-approval-count">{boundedPhase9bCount(approvals.length)}</span>
         <span data-testid="phase9b-device-status">{phase9bDeviceState(device)}</span>
@@ -2040,6 +2061,39 @@ export function App() {
               </div>
             ) : <p className="empty-state">没有正在执行的任务</p>}
           </section>
+
+          {artifacts.length > 0 || artifactRestoreStatus === "partial" ? (
+              <section className="action-section artifact-section" aria-label="Task Artifacts" data-testid="phase9b-artifact-section">
+              <div className="action-section-title">
+                <h3>任务产物</h3>
+                <span>{boundedPhase9bCount(artifacts.reduce((count, task) => count + task.artifacts.length, 0))}</span>
+              </div>
+              {artifactRestoreStatus === "partial" ? (
+                <p className="artifact-restore-note" data-testid="phase9b-artifact-restore-notice">恢复尚不完整，请稍后重试。</p>
+              ) : null}
+              <div className="artifact-list">
+                {artifacts.map(task => (
+                  <article className="artifact-task" key={task.taskId} data-testid="phase9b-artifact-task">
+                    <div className="task-heading">
+                      <span className="task-icon"><Icon name="tasks" size={18} /></span>
+                      <div>
+                        <strong>{task.taskId}</strong>
+                        <small>{task.status}</small>
+                      </div>
+                    </div>
+                    <ul className="artifact-manifest">
+                      {task.artifacts.map(artifact => (
+                        <li key={`${artifact.sha256}:${artifact.size}:${artifact.contentType}`}>
+                          <span data-testid="phase9b-artifact-sha256">{artifact.sha256}</span>
+                          <small><span data-testid="phase9b-artifact-size">{artifact.size}</span> bytes · <span data-testid="phase9b-artifact-content-type">{artifact.contentType}</span></small>
+                        </li>
+                      ))}
+                    </ul>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           <section className="action-section approvals-section" id="approval-panel" aria-label="Approval Requests">
             <div className="action-section-title">

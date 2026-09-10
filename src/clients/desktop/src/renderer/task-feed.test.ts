@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   DesktopTaskNotificationFeed,
+  artifactManifestFrom,
   collectTaskPages,
   desktopTaskFrom,
   ensureActiveDesktopTaskNotificationFeed,
@@ -77,6 +78,286 @@ test("projects bounded user-input questions without accepting secret or provider
     resultSummary: undefined,
     pendingUserInput: projection
   });
+});
+
+test("projects validated task and execution artifact manifests without paths", () => {
+  const task = desktopTaskFrom({
+    id: "task-artifact",
+    status: "succeeded",
+    artifacts: [{
+      path: "/private/worker/secret/report.json",
+      size: 42,
+      sha256: "a".repeat(64),
+      contentType: "application/json"
+    }],
+    execution: {
+      id: "execution-artifact",
+      artifacts: [{
+        path: "/private/worker/secret/trace.txt",
+        size: 7,
+        sha256: "b".repeat(64),
+        contentType: "text/plain"
+      }]
+    }
+  });
+
+  assert.deepEqual(task?.artifacts, [
+    { size: 42, sha256: "a".repeat(64), contentType: "application/json" },
+    { size: 7, sha256: "b".repeat(64), contentType: "text/plain" }
+  ]);
+  assert.equal(JSON.stringify(task).includes("/private/worker"), false);
+});
+
+test("rejects unsafe artifact metadata while retaining only validated fields", () => {
+  assert.deepEqual(artifactManifestFrom([
+    {
+      path: "/private/worker/secret.json",
+      size: 12,
+      sha256: "C".repeat(64),
+      contentType: "application/json",
+      secret: "must not project"
+    },
+    { path: "/private/worker/negative", size: -1, sha256: "d".repeat(64), contentType: "text/plain" },
+    { path: "/private/worker/short", size: 2, sha256: "not-a-sha", contentType: "text/plain" },
+    { path: "/private/worker/control", size: 2, sha256: "e".repeat(64), contentType: "text/\nplain" },
+    { path: "/private/worker/private-text", size: 2, sha256: "1".repeat(64), contentType: "private secret text" },
+    { path: "/private/worker/overflow", size: Number.MAX_SAFE_INTEGER + 1, sha256: "f".repeat(64), contentType: "text/plain" }
+  ]), [
+    { size: 12, sha256: "c".repeat(64), contentType: "application/json" }
+  ]);
+});
+
+test("restores terminal artifact manifests through a bounded no-status scan without adding terminal tasks", async () => {
+  const statusCalls: (string | undefined)[] = [];
+  const scanCalls: Array<{ conversationId?: string; cursor?: string }> = [];
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async (_conversationId, _cursor, status) => {
+      statusCalls.push(status);
+      return status === "running" ? [{ id: "active-task", status: "running" }] : [];
+    },
+    getAllTasks: async (conversationId, cursor) => {
+      scanCalls.push({ conversationId, cursor });
+      return cursor === undefined
+        ? {
+          items: [{
+            id: "terminal-task",
+            status: "succeeded",
+            execution: {
+              id: "terminal-execution",
+              artifacts: [{
+                path: "/private/worker/secret/report.json",
+                size: 42,
+                sha256: "a".repeat(64),
+                contentType: "application/json"
+              }]
+            }
+          }],
+          nextCursor: null
+        }
+        : [];
+    },
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-artifacts");
+
+  assert.deepEqual(statusCalls.sort(), [...nonTerminalTaskStatuses].sort());
+  assert.deepEqual(scanCalls, [{ conversationId: "conversation-artifacts", cursor: undefined }]);
+  assert.deepEqual(feed.tasks.map(task => task.id), ["active-task"]);
+  assert.deepEqual(feed.artifacts, [{
+    taskId: "terminal-task",
+    executionId: "terminal-execution",
+    status: "succeeded",
+    artifacts: [{ size: 42, sha256: "a".repeat(64), contentType: "application/json" }]
+  }]);
+  assert.equal(feed.artifactRestoreStatus, "complete");
+  assert.equal(JSON.stringify(feed.artifacts).includes("/private/worker"), false);
+});
+
+test("reports partial artifact recovery after a bounded scan failure", async () => {
+  let scanCalls = 0;
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => {
+      scanCalls++;
+      throw new Error("artifact scan unavailable");
+    },
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-artifacts");
+
+  assert.equal(scanCalls, 1);
+  assert.equal(feed.artifactRestoreStatus, "partial");
+  assert.deepEqual(feed.artifacts, []);
+});
+
+test("shows the safely recovered subset after a bounded partial artifact scan", async () => {
+  const scannedTasks = Array.from({ length: 257 }, (_, index) => ({
+    id: `terminal-task-${index}`,
+    status: "succeeded",
+    artifacts: [{
+      size: index,
+      sha256: index.toString(16).padStart(64, "0"),
+      contentType: "application/json"
+    }]
+  }));
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => scannedTasks,
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-artifacts");
+
+  assert.equal(feed.artifactRestoreStatus, "partial");
+  assert.equal(feed.artifacts.length, 256);
+  assert.equal(feed.artifacts.every(state => state.status === "succeeded"
+    && state.artifacts.length === 1), true);
+});
+
+test("replaces the artifact window across repeated partial scans without accumulating stale entries", async () => {
+  const makePartialTasks = (prefix: string) => Array.from({ length: 257 }, (_, index) => ({
+    id: `${prefix}-${index}`,
+    status: "succeeded",
+    artifacts: [{
+      size: index,
+      sha256: index.toString(16).padStart(64, "0"),
+      contentType: "application/json"
+    }]
+  }));
+  let scanTasks: Array<{
+    id: string;
+    status: string;
+    artifacts: Array<{ size: number; sha256: string; contentType: string }>;
+  }> = [{
+    id: "complete-task",
+    status: "succeeded",
+    artifacts: [{ size: 1, sha256: "c".repeat(64), contentType: "application/json" }]
+  }];
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => scanTasks,
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-artifacts");
+  assert.equal(feed.artifacts.length, 1);
+  scanTasks = makePartialTasks("first-partial");
+  await feed.refresh("conversation-artifacts");
+  assert.equal(feed.artifactRestoreStatus, "partial");
+  assert.equal(feed.artifacts.length, 256);
+  assert.equal(feed.artifacts.some(state => state.taskId === "complete-task"), false);
+
+  scanTasks = makePartialTasks("second-partial");
+  await feed.refresh("conversation-artifacts");
+  assert.equal(feed.artifacts.length, 256);
+  assert.equal(feed.artifacts.some(state => state.taskId === "first-partial-0"), false);
+  assert.equal(feed.artifacts.every(state => state.taskId.startsWith("second-partial-")), true);
+});
+
+test("preserves known artifacts when a task event omits its manifest", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+  feed.selectConversation("conversation-artifacts");
+
+  await feed.applyEvent({
+    eventId: "artifact-created",
+    occurredAt: 1,
+    type: "task.updated",
+    payload: {
+      taskId: "terminal-task",
+      conversationId: "conversation-artifacts",
+      status: "succeeded",
+      entityVersion: 1,
+      artifacts: [{
+        path: "/private/worker/report.json",
+        size: 42,
+        sha256: "a".repeat(64),
+        contentType: "application/json"
+      }]
+    }
+  });
+  await feed.applyEvent({
+    eventId: "artifact-status-only",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "terminal-task",
+      conversationId: "conversation-artifacts",
+      status: "succeeded",
+      entityVersion: 2
+    }
+  });
+
+  assert.deepEqual(feed.artifacts, [{
+    taskId: "terminal-task",
+    status: "succeeded",
+    artifacts: [{ size: 42, sha256: "a".repeat(64), contentType: "application/json" }]
+  }]);
+  assert.equal(JSON.stringify(feed.artifacts).includes("/private/worker"), false);
+});
+
+test("does not publish a stale artifact scan across conversation binding epochs", async () => {
+  let releaseOldScan!: () => void;
+  let artifactScanCount = 0;
+  const oldScanReady = new Promise<void>(resolve => { releaseOldScan = resolve; });
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async conversationId => {
+      if (conversationId === "conversation-a" && artifactScanCount++ === 0) {
+        await oldScanReady;
+        return [{
+          id: "old-terminal-task",
+          status: "succeeded",
+          artifacts: [{ size: 1, sha256: "a".repeat(64), contentType: "text/plain" }]
+        }];
+      }
+      return conversationId === "conversation-a"
+        ? [{
+          id: "new-terminal-task",
+          status: "succeeded",
+          artifacts: [{ size: 2, sha256: "b".repeat(64), contentType: "text/plain" }]
+        }]
+        : [];
+    },
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  const oldRefresh = feed.refresh("conversation-a");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  feed.selectConversation("conversation-b");
+  await feed.refresh("conversation-b");
+  feed.selectConversation("conversation-a");
+  await feed.refresh("conversation-a");
+  releaseOldScan();
+  await oldRefresh;
+
+  assert.deepEqual(feed.artifacts, [{
+    taskId: "new-terminal-task",
+    status: "succeeded",
+    artifacts: [{ size: 2, sha256: "b".repeat(64), contentType: "text/plain" }]
+  }]);
 });
 
 test("task events update only the fixed task projection and clear completed user input", async () => {
