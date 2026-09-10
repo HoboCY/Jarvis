@@ -25,6 +25,16 @@ Execution order:
 5. Only after the offline gates pass, execute a new isolated targeted gap run,
    freeze the candidate, and run the complete A–J acceptance from that exact SHA.
 
+The current checkpoint is blocked on fresh browser authentication. The first
+isolated attempt reached its 15-minute bound and returned `AUTH_TIMEOUT` and
+`AUTH_RUNTIME_REMOVED` at 2026-09-10 15:00:46 UTC. A subsequent metadata-only
+directory check found zero remaining authentication runtimes owned by that helper.
+No authentication file contents were read. Probe source commit
+`e873c9e39e4fa43a6a1db1720e9f1c310c5bed85` is accepted offline, but no native task
+started and there is no A/B/C result. No Provider or targeted/final run started.
+This does not reopen the resolved security incident. A later authentication
+attempt requires a new isolated environment before native probing can proceed.
+
 Every new live run requires a fresh CODEX_HOME, Desktop profile, database, bearer,
 device identity, allowed root, owner marker, launchd labels, and run ID. Prior
 runtime resources and logins must not be reused. Automation output remains limited
@@ -209,9 +219,10 @@ Initial offline verification on the resumption baseline:
   Review also found lost terminal facts during first-process stop, ignored late
   reissues before continuation, resolved requests incorrectly classified as C,
   inaccurate continuation completion/count evidence, and a mismatch between the
-  fixed task instruction and its validator. The CLI signal test covers SIGTERM
-  through an injected cleanup function, but does not establish the actual probe
-  finally/owned-lifecycle chain; SIGINT has code wiring evidence only. These
+  fixed task instruction and its validator. At that earlier checkpoint, the CLI
+  signal test covered SIGTERM through an injected cleanup function and did not
+  establish the actual probe finally/owned-lifecycle chain; SIGINT had code
+  wiring evidence only. These
   findings were closed by the final offline contracts and review. Native
   protocol support remains unverified until the controlled real probe runs.
   Login requires private capture and separate fresh environments for the probe,

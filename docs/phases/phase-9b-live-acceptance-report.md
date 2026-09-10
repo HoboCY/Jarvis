@@ -9,6 +9,12 @@
   已重新核对一致。Base 为 `5df7533141107585cfbaa90a9c40d78a7b0b959a`。
 - 执行范围：现有 PR #8 / `codex/phase9b-desktop-golden-path`，仍为 Draft；
   不新建 PR、不合并、不进入 Phase 9C。
+- 当前阻塞：新环境的官方浏览器登录未在 15 分钟内完成。2026-09-10
+  15:00:46 UTC 收到固定状态 `AUTH_TIMEOUT` / `AUTH_RUNTIME_REMOVED`；随后仅检查
+  目录元数据，确认该助手所属的临时认证运行目录剩余数为零，未读取认证文件内容。
+  本次协议源码提交为 `e873c9e39e4fa43a6a1db1720e9f1c310c5bed85`，但原生协议任务
+  没有启动，无 A/B/C 结论，也没有 Provider 请求或 targeted / A–J run。
+  这属于认证前置条件未完成，安全门禁保持 resolved；下一次必须重新创建独立环境。
 - 安全输出限制的离线合同 85/85 通过，lint 通过；独立 Standards / Spec 复核无剩余
   P1/P2。后续输出边界检查发现旧进程摘要仍有无来源的 length / digest 通道，
   supervisor 已改为 observed / suppressed 布尔状态；直接 writer 和 bundle validator
@@ -113,10 +119,10 @@
   两个真实 Node CLI 信号合同均先等待动态 spawn 握手，再外侧确认对应自有进程组消失。
   早期复核还发现停止首进程期间终态丢失、迟到 reissue 被忽略、真实 resolved 被误归为 C、
   continuation 完成与计数投影不准确，以及固定指令与 validator 不一致。
-  CLI 测试仅证明 SIGTERM 到注入清理函数，尚未覆盖实际 probe finally 与自有进程组
+  当时 CLI 测试仅证明 SIGTERM 到注入清理函数，尚未覆盖实际 probe finally 与自有进程组
   生命周期完整链路；当时 SIGINT 只有代码接线证据。这些早期缺口均已由后续离线
   合同与独立审查关闭。真实 native 恢复能力仍待新的受控协议探针证明。
-- 当前准备固定 Codex 版本的重启协议探针。新的协议探针、targeted run、最终 A–J run
+- 当前等待完成新环境认证后运行固定 Codex 版本的重启协议探针。新的协议探针、targeted run、最终 A–J run
   均尚未执行，尚未冻结最终候选；历史 CI / live 结果不能证明本轮改动。
 - 文件规则审计发现服务 publish 暂存未显式排除本地 secrets 与生成的 Production
   配置，须在发布前补齐排除和最终文件清单门禁。未读取实际配置内容，也没有新的
