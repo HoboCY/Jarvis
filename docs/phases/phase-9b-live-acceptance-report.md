@@ -75,8 +75,52 @@
   未被接住的响应拒绝。原生 `serverRequest/resolved` 尚未接入当前进程的类型化
   registry；纯 registry 测试不证明 transport 已处理该通知。完成项的副作用分类和
   非成功完成的证据投影也仍属待关闭的生命周期门禁。
+- 写入/清理补片的 20/20 合同及 lint 独立通过，但验收仍未通过：复核发现假夹具
+  使用固定 PID，清理路径可能据此向非自有进程组发信号，已停止重复运行该版本。
+  没有误杀或认证材料暴露的证据；须先隔离假夹具的生命周期控制与真实进程组控制。
+  独立的真实 Node 管道检查还确认成功写入回调返回 null，原探针只接受 undefined，
+  会把真实成功写入误判为错误。该检查的自有子进程与新临时目录已清理；修复须通过
+  真实自有 Node JSONL 往返合同，不能只用无参数假回调证明。
+  首次 stalled-write RED 在 wrapper 的 120 秒观察窗口内未返回统计，pass/fail 数为
+  unknown。后续修正版本独立通过 22/22、lint 与前后源码一致性检查；假 spawn 默认
+  无权访问宿主进程组，真实管道和清理测试使用本次自有 Node 子进程。追加独立审查
+  已关闭这两项 P1 和 POSIX 测试的 Windows 边界 P2。
+- typed item / resolved 通知补片初次 RED 为 25 项中 22 通过、3 失败；修后独立
+  29/29 和 lint 通过，前后源码 hash 一致。复核发现同批次 input 后紧接的 fatal
+  可能越过重启边界，item 外层也未校验当前请求的 Thread/Turn。
+  另以公开接口复现显式不完整的 history 被批准用于 continuation；该边界须拒绝，
+  正常原生 completion 的摘要格式仍应保留，两者不能混淆。
+  三项修正后的冻结源码已独立通过 31/31（1.17 秒）、lint、ownership 与前后 hash
+  检查，独立审查关闭全部三项发现。fatal-flow 直接断言零 restart、零 answer；
+  continuation 的排除来自在第二进程前退出的控制流，并非独立计数断言。
+  CLI/decision 补片在 worker 直接 Node 入口通过 40/40（21.02 秒），初始 RED 统计
+  unknown；随后独立执行完整 `pnpm test:phase9b-live-contract` 得到 105/130 通过、
+  25 失败（5.54 秒），报告的失败堆栈位置均在 probe 测试中。Eng live lint 通过
+  （1.96 秒），5 个冻结文件前后 hash 全部一致。
+  后续修正版由 worker 直接通过 47/47，并在 `pnpm exec` 串行入口通过 137/137；
+  正常 package script 入口仍为 104 通过、32 失败、1 cancelled。两种入口并非只改变
+  并发度，不能据此归因于并发。root 在测试执行前退出的纯元数据检查确认：`pnpm run`
+  扩展后的 PATH 超出探针的 1024 字符限制，产生 INVALID_ENVIRONMENT，直接 Node
+  入口则未触发。须显式收紧测试进程环境并保留生产限制；未输出 PATH 内容，也未
+  在检查中开启认证或 native 门禁。
+  测试环境窄修后，worker 的正常 package 入口已通过 137/137；独立整套调用未取得
+  可恢复的结束统计，保持 UNVERIFIED。独立的 5 文件 hash、Eng lint 与两个语法
+  检查均通过。审查剩余三项：确认 continuation 后遇到同批 reissue 的计数保真、
+  B 的 completed-with-error 判定，以及 CLI 的真实 child-spawn/group-absence
+  握手证明。最终修正先得到 RED 0/2，再 GREEN 2/2；root 独立执行正常 package
+  入口已通过 139/139（70.56 秒），零失败、取消或跳过。Eng lint 通过（2.35 秒），
+  两个语法检查通过，执行后 5 个冻结文件全部匹配。独立审查关闭最后三项发现；
+  两个真实 Node CLI 信号合同均先等待动态 spawn 握手，再外侧确认对应自有进程组消失。
+  早期复核还发现停止首进程期间终态丢失、迟到 reissue 被忽略、真实 resolved 被误归为 C、
+  continuation 完成与计数投影不准确，以及固定指令与 validator 不一致。
+  CLI 测试仅证明 SIGTERM 到注入清理函数，尚未覆盖实际 probe finally 与自有进程组
+  生命周期完整链路；当时 SIGINT 只有代码接线证据。这些早期缺口均已由后续离线
+  合同与独立审查关闭。真实 native 恢复能力仍待新的受控协议探针证明。
 - 当前准备固定 Codex 版本的重启协议探针。新的协议探针、targeted run、最终 A–J run
   均尚未执行，尚未冻结最终候选；历史 CI / live 结果不能证明本轮改动。
+- 文件规则审计发现服务 publish 暂存未显式排除本地 secrets 与生成的 Production
+  配置，须在发布前补齐排除和最终文件清单门禁。未读取实际配置内容，也没有新的
+  暴露证据。Desktop ASAR 已有严格正向文件清单，实际打包时继续验证该门禁。
 - 新一轮运行须重建独立 CODEX_HOME、Desktop profile、数据库、bearer、设备身份、
   allowed root、运行目录、owner marker 和 launchd labels；旧资源及登录不得复用。
 

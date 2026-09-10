@@ -153,6 +153,67 @@ Initial offline verification on the resumption baseline:
   process registry; pure registry tests alone do not establish that transport
   behavior. Completion item classification and completion-failure evidence remain
   part of this lifecycle gate.
+  The write/cleanup supplement passed 20/20 contracts and lint independently,
+  but remains unaccepted: fake children used static PIDs which could direct
+  cleanup signals at an unowned host group. That version is not being rerun;
+  there is no evidence of an actual unrelated termination or credential exposure.
+  Fake lifecycle control must be isolated from production owned-group control.
+  A separate real Node pipe check also confirmed successful write callbacks use
+  null, which the probe incorrectly rejected. That owned child and fresh temporary
+  directory were removed. A real owned Node JSONL round trip must validate the fix.
+  The first stalled-write RED produced no statistics within the wrapper's
+  120-second observation window, so its pass/fail counts are unknown. The next
+  frozen correction independently passed 22/22, lint and source-hash checks.
+  Injected spawn has no ambient group authority by default; real pipe/cleanup
+  tests use owned Node children. Supplemental independent review closed both P1s
+  and the Windows boundary P2.
+  The next typed-item/resolved-notification slice first produced RED at 22/25,
+  then passed 29/29 and lint independently with unchanged source hashes.
+  Review found that an input followed by a fatal message in one stdout batch
+  could cross the restart boundary, and that item envelopes were not checked
+  against the current request's thread/turn. A separate public history check
+  also reproduced safe-continuation approval for an explicitly incomplete
+  items view. The corrected frozen slice passed 31/31 independently (1.17 s),
+  lint, ownership checks and matching pre/post source hashes. Independent review
+  closed all three findings. Normal native completion summaries remain legal
+  and are distinct from incomplete recovery history. The fatal-flow regression
+  directly asserts zero restarts and answers; continuation exclusion follows
+  from exiting before the second process, not a separate count assertion.
+  The CLI/decision supplement passed 40/40 in the worker's direct Node test
+  invocation (21.02 s); its initial RED statistics are unknown. The complete
+  `pnpm test:phase9b-live-contract` invocation then failed independently at
+  105/130 (25 failures, 5.54 s), with all reported failure stack locations in
+  the probe tests. Eng live lint passed (1.96 s), and all five frozen source
+  hashes matched before and after. A later worker correction passed 47/47
+  directly and 137/137 through `pnpm exec` with serial execution; the normal
+  package-script entry still produced 104 passes, 32 failures and one cancellation.
+  Those two entry points do not isolate concurrency. A metadata-only root check,
+  exiting before test execution, confirmed that `pnpm run` expands PATH beyond
+  the probe's 1024-character environment limit and produces INVALID_ENVIRONMENT;
+  direct Node does not. The test process must explicitly bound its environment
+  while preserving the production restriction. No PATH contents were emitted,
+  and no authentication/native gate was enabled by the check.
+  The test-only correction then passed 137/137 through the normal package entry
+  in the worker run. Its independent full-suite result remains UNVERIFIED because
+  the invocation did not return recoverable completion metadata; the independent
+  five-file hashes, Eng lint and both syntax checks passed. Review narrowed the
+  remaining work to confirmed continuation counts after a same-batch reissue,
+  completed-with-error handling in B, and a real child-spawn/group-absence
+  handshake for CLI signal tests. The final correction produced RED at 0/2 and
+  then GREEN at 2/2. Root independently ran the normal package entry: 139/139
+  passed in 70.56 s, with zero failures, cancellations or skips. Eng lint passed
+  in 2.35 s, both syntax checks passed, and all five frozen files matched after
+  execution. Independent review closed the three remaining findings. Both real
+  Node CLI signal tests wait for a dynamic spawn handshake and independently
+  verify that the captured owned process group is gone.
+  Review also found lost terminal facts during first-process stop, ignored late
+  reissues before continuation, resolved requests incorrectly classified as C,
+  inaccurate continuation completion/count evidence, and a mismatch between the
+  fixed task instruction and its validator. The CLI signal test covers SIGTERM
+  through an injected cleanup function, but does not establish the actual probe
+  finally/owned-lifecycle chain; SIGINT has code wiring evidence only. These
+  findings were closed by the final offline contracts and review. Native
+  protocol support remains unverified until the controlled real probe runs.
   Login requires private capture and separate fresh environments for the probe,
   targeted run, and final run.
 - Locked .NET restore, tool restore, frozen pnpm install, and the pinned Codex
@@ -160,6 +221,11 @@ Initial offline verification on the resumption baseline:
   in a new tool-only directory and checked against their published/pinned hashes.
 - The npm audit found current high-severity advisories in `extract-zip` and
   `js-yaml`; this gate has not passed. Fixes must not add audit suppressions.
+- A filename-rule audit found service publish staging does not explicitly exclude
+  local secrets or generated Production configuration. Exclusion and final
+  output-inventory checks must pass before publishing. No actual secret/config
+  contents were read and no exposure is established. Desktop ASAR packaging
+  already enforces an exact positive entry list; retain and exercise that gate.
 - The initial NuGet CLI vulnerability command timed out, including bounded
   retries. Diagnostic request metadata showed historical package-registration
   enumeration. Re-running `dotnet list Jarvis.sln package --vulnerable

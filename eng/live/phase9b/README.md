@@ -129,7 +129,33 @@ strict allowlist; raw credentials, headers, provider bodies, prompts,
 transcripts, audio, environment dumps, and arbitrary caller objects are not
 accepted.
 
+## Codex restart protocol probe
+
+`codex-restart-probe.mjs` is a separate, bounded protocol experiment for pinned
+Codex `0.146.0`. Its offline contracts run through
+`pnpm test:phase9b-live-contract`; they do not authenticate or invoke Codex.
+The real entry requires the resolved security status, passed Desktop/probe
+offline gates, the pinned binary, and newly created owner-only authentication
+metadata supplied as `PHASE9B_CODEX_AUTH_METADATA`. The metadata is claimed
+once and must never refer to an earlier login or runtime.
+
+Use the reviewed private-capture login and execution controller. It suppresses
+all raw login/App Server output and validates the probe's bounded projection
+before retaining evidence. Do not run or inspect authentication through generic
+UI/DOM/accessibility capture. The experiment allows one task, one App Server
+restart, one answer and at most one continuation. Recovery classification has a
+ten-second bound; observed runtime errors remain failures. Only a real completed
+reissue or verified continuation establishes recovery support. Offline fixtures
+and generated protocol schemas do not establish that support.
+
 ## Configuration and isolation
+
+For Phase 9B-R, the user-designated `appsettings.secrets.json` is the approved
+Provider configuration source. Its exact path must be supplied through the
+private controller. The legacy Secret Manager selection described below is
+not a fallback for this run; targeted and final live execution must wait for
+the explicit-file selection and all offline gates. The standalone Codex probe
+uses separate fresh Codex authentication and does not read Provider keys.
 
 The credential loader reads `UserSecretsId` from
 `src/backend/Jarvis.Api/Jarvis.Api.csproj`, then reads the BOM-safe Secret
@@ -152,62 +178,37 @@ atomically adopted after owner and pinned-helper validation; the normal global
 Codex home is never copied. Version probing also uses a disposable isolated
 `CODEX_HOME` so `codex --version` cannot touch the daily profile.
 
-To prepare a normal independent Codex login, create a new task-owned home in
-the canonical OS temporary directory. The directory is created atomically by
-`mkdtemp`; the owner marker is written to a 0600 temporary file, fsynced, and
-atomically renamed to the exact marker name:
+For Phase 9B-R, prepare authentication with a separately reviewed launcher that
+captures login stdout and stderr privately. It must create a new owner-only
+runtime root containing distinct `HOME`, `CODEX_HOME`, `TMPDIR`, and allowed
+root directories, verify the pinned executable, and explicitly select
+`cli_auth_credentials_store=file`. Use a minimal child environment. Do not run
+an uncaptured `codex login` command in an automation terminal, inspect the
+login UI, print an OAuth URL or callback, or copy an existing authentication
+cache. The launcher may open the validated official login URL privately in
+the browser for the user's normal login interaction.
 
-```sh
-PHASE9B_NODE=/absolute/path/to/pinned/node
-export PHASE9B_CODEX_HOME="$($PHASE9B_NODE --input-type=module <<'NODE'
-import { chmod, mkdtemp, open, realpath, rename, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+Authentication readiness consists only of successful process status and
+metadata checks on the new file store: a regular `auth.json` owned by the
+current user with mode 0600. Never read or hash its contents. Login failure
+must stop owned processes and remove the newly created runtime. These launcher
+requirements are outside the interactive CLI; the CLI is not a safe collector
+for arbitrary login output.
 
-const base = await realpath(tmpdir());
-const home = await mkdtemp(join(base, "jarvis-phase9b-codex-login-"));
-await chmod(home, 0o700);
-const marker = join(home, ".phase9b-owned");
-const temporary = join(home, `.${process.pid}.phase9b-owned.tmp`);
-let handle;
-try {
-  handle = await open(temporary, "wx", 0o600);
-  await handle.writeFile(
-    '{"purpose":"isolated-normal-codex-login","dailyHomeCopied":false}\n',
-    "utf8"
-  );
-  await handle.sync();
-  await handle.close();
-  handle = undefined;
-  await chmod(temporary, 0o600);
-  await rename(temporary, marker);
-  process.stdout.write(home);
-} catch (error) {
-  await handle?.close().catch(() => {});
-  await rm(temporary, { force: true }).catch(() => {});
-  await rm(home, { recursive: true, force: true }).catch(() => {});
-  throw error;
-}
-NODE
-)"
-```
+The restart protocol probe consumes its own fresh login environment once.
+Targeted and final A-J runs each require a different new login environment,
+Desktop profile, database, device identity, bearer, allowed root, and runtime
+root. Only the two App Server processes within the one bounded restart probe
+may share that probe's home. A consumed probe or previous live runtime must
+never be adopted by a later run.
 
-Run the pinned Codex executable through the normal independent login flow with
-that home, then pass the same path to the live CLI:
-
-```sh
-CODEX_HOME="$PHASE9B_CODEX_HOME" /absolute/path/to/pinned/codex login
-PHASE9B_CODEX_PATH=/absolute/path/to/pinned/codex \
-PHASE9B_CODEX_HOME="$PHASE9B_CODEX_HOME" \
-pnpm phase9b:live
-```
-
-Use only this fresh task-owned home. Do not point `CODEX_HOME` at the daily
-home, copy or link `~/.codex`, or copy `auth.json`; the harness rejects an
-unmarked source and never adopts a normal profile implicitly. The marker must
-remain a regular file owned by the current user with mode 0600 and exactly
+The interactive harness's external-home adoption also requires the regular
+owner-only `.phase9b-owned` marker with exactly
 `{"purpose":"isolated-normal-codex-login","dailyHomeCopied":false}` as its
-JSON fields.
+JSON fields. This marker is an ownership check, not proof that old credentials
+are safe to reuse. The caller must prepare it only for the newly authenticated
+home intended for that one live run; the normal daily profile is never an
+eligible source.
 
 ## Budgets and current acceptance boundary
 
