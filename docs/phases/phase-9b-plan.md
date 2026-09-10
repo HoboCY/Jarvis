@@ -98,8 +98,29 @@ Initial offline verification on the resumption baseline:
   terminal task without artifacts while restoring its notification. There is
   no alternate App task-restoration path. Reuse the existing bounded all-status
   scan to restore read-only terminal identities/statuses separately from ongoing
-  tasks, with the same Conversation binding guards. This remains open before
-  native execution; the earlier lifecycle proofs retain their tested scope.
+  tasks, with the same Conversation binding guards. The supplement is now
+  accepted offline; the earlier lifecycle proofs retain their tested scope.
+- The first terminal-restoration supplement passed 233/233 unit tests, but
+  independent public-seam checks found stale all-status snapshots could remove
+  terminal events and mixed snapshots could put one task in both sections.
+  Initial fixes passed those two cases; another controlled check still lost a
+  terminal event that arrived before refresh started. The snapshot/event merge
+  now preserves entity versions across both projections. Review also found an
+  initial connected event could scan tasks without a Conversation while stored
+  selection was loading. Unbound task queries and event projections are now
+  guarded. Complete empty snapshots clear stale event-origin tasks, while partial
+  scans preserve bounded known results. All 52 feed contracts and five public-seam
+  snapshot/event orderings pass.
+- The final actual App scenario proves automatic selection restoration without
+  manual Load and HTTP-only catch-up after an offline task completion, including
+  notifications and a terminal task without artifacts. Other waiting/artifact
+  tasks remain; equal connection revisions do not trigger another refresh.
+  Independent verification of the seven frozen Desktop files passed 241/241
+  unit tests, typecheck, lint, build and the built renderer scenario (9.49 s).
+  Stderr was clean; owned process groups and temporary profile were removed;
+  source hashes matched before and after. Independent Standards / Spec review
+  found no remaining P1/P2. This closes the Desktop offline gate only, not native
+  protocol, real backend or live acceptance.
 - The initial Stage 3 probe checkpoint is RED: syntax passed, but independent
   contract execution passed only 1/7. Preliminary review found incorrect pending
   history classification, request-ID de-duplication across process generations,
@@ -126,6 +147,12 @@ Initial offline verification on the resumption baseline:
   they used no Codex authentication or provider. CLI cancellation, bounded writes,
   delayed reissue arbitration and complete process-group cleanup must pass before
   native execution. Synthetic history does not prove native recovery support.
+  A callback-stalled fake transport also reproduced unbounded writes and
+  unhandled response rejection on abort, fatal input, or close. The native
+  `serverRequest/resolved` notification must be connected to the typed current
+  process registry; pure registry tests alone do not establish that transport
+  behavior. Completion item classification and completion-failure evidence remain
+  part of this lifecycle gate.
   Login requires private capture and separate fresh environments for the probe,
   targeted run, and final run.
 - Locked .NET restore, tool restore, frozen pnpm install, and the pinned Codex

@@ -24,6 +24,13 @@ export type DesktopTaskArtifactState = Readonly<{
   artifacts: readonly DesktopArtifactManifestEntry[];
 }>;
 
+export type DesktopTerminalTaskStatus = "succeeded" | "failed" | "cancelled";
+
+export type DesktopTerminalTaskState = Readonly<{
+  taskId: string;
+  status: DesktopTerminalTaskStatus;
+}>;
+
 export type DesktopArtifactRestoreStatus = "complete" | "partial" | "unavailable";
 
 export type DesktopPendingUserInputOption = {
@@ -283,6 +290,16 @@ function taskArtifactState(task: DesktopTask): DesktopTaskArtifactState | undefi
   };
 }
 
+function terminalTaskState(task: DesktopTask): DesktopTerminalTaskState | undefined {
+  if (!isTerminalTaskStatus(task.status)) {
+    return undefined;
+  }
+  return {
+    taskId: task.id,
+    status: task.status
+  };
+}
+
 export const nonTerminalTaskStatuses = [
   "queued",
   "assigned",
@@ -366,6 +383,12 @@ type EventVersion = {
   revision: number;
 };
 
+type TaskSnapshotCandidate = Readonly<{
+  task: DesktopTask;
+  source: "status" | "all";
+  version: EventVersion;
+}>;
+
 export async function refreshOnBackendConnectionState(
   state: unknown,
   refreshFeed: (conversationId?: string) => Promise<void>,
@@ -385,7 +408,8 @@ export async function refreshFeedIfCurrent(
   applySnapshot: (
     tasks: readonly DesktopTask[],
     notifications: readonly DesktopNotification[],
-    artifacts?: readonly DesktopTaskArtifactState[]
+    artifacts?: readonly DesktopTaskArtifactState[],
+    terminalTasks?: readonly DesktopTerminalTaskState[]
   ) => void,
   conversationId?: string
 ): Promise<void> {
@@ -403,7 +427,7 @@ export async function refreshFeedIfCurrent(
     return;
   }
 
-  applySnapshot(feed.tasks, feed.notifications, feed.artifacts);
+  applySnapshot(feed.tasks, feed.notifications, feed.artifacts, feed.terminalTasks);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -448,9 +472,11 @@ export function notificationActionIdempotencyKey(
 export class DesktopTaskNotificationFeed {
   private readonly taskById = new Map<string, DesktopTask>();
   private readonly artifactByTaskId = new Map<string, DesktopTaskArtifactState>();
+  private readonly terminalTaskById = new Map<string, DesktopTerminalTaskState>();
   private readonly notificationById = new Map<string, DesktopNotification>();
   private readonly deliveryInFlight = new Map<string, Promise<void>>();
   private readonly taskEventVersions = new Map<string, EventVersion>();
+  private readonly taskEventRevisions = new Map<string, number>();
   private readonly notificationEventVersions = new Map<string, EventVersion>();
   private readonly notificationTombstones = new Map<string, EventVersion>();
   private taskWatermarkRequiresRefresh = false;
@@ -478,6 +504,11 @@ export class DesktopTaskNotificationFeed {
 
   public get artifacts(): readonly DesktopTaskArtifactState[] {
     return [...this.artifactByTaskId.values()]
+      .sort((left, right) => left.taskId.localeCompare(right.taskId));
+  }
+
+  public get terminalTasks(): readonly DesktopTerminalTaskState[] {
+    return [...this.terminalTaskById.values()]
       .sort((left, right) => left.taskId.localeCompare(right.taskId));
   }
 
@@ -530,8 +561,10 @@ export class DesktopTaskNotificationFeed {
     this.lastConversationId = conversationId;
     this.taskById.clear();
     this.artifactByTaskId.clear();
+    this.terminalTaskById.clear();
     this.artifactRestoreStatusValue = "unavailable";
     this.taskEventVersions.clear();
+    this.taskEventRevisions.clear();
     this.taskWatermarkRequiresRefresh = false;
     return this.captureConversationBinding();
   }
@@ -584,31 +617,36 @@ export class DesktopTaskNotificationFeed {
     if (this.disposed || conversationGeneration !== this.conversationGeneration) {
       return;
     }
-    const tasks = [...new Map(
-      tasksByStatus.flat().filter(task => task.id).map(task => [task.id, task])
-    ).values()];
+    const statusTasks = tasksByStatus.flat().filter(task => task.id);
+    const statusTaskIds = new Set(statusTasks.map(task => task.id));
+    const taskSnapshotCandidates = mergeTaskSnapshotCandidates(
+      statusTasks,
+      artifactScan.tasks,
+      refreshRevision);
+    const terminalTaskSnapshots = [...taskSnapshotCandidates.values()]
+      .map(candidate => terminalTaskState(candidate.task))
+      .filter((state): state is DesktopTerminalTaskState => state !== undefined);
+    const activeTasks = [...taskSnapshotCandidates.values()]
+      .filter(candidate => statusTaskIds.has(candidate.task.id)
+        && !isTerminalTaskStatus(candidate.task.status))
+      .map(candidate => candidate.task);
 
     if (refreshGeneration < this.appliedRefreshGeneration) {
       return;
     }
 
     this.appliedRefreshGeneration = refreshGeneration;
-    const taskOverlays = new Map(this.collectOverlays(this.taskById, this.taskEventVersions, refreshRevision));
     const notificationOverlays = new Map(this.collectOverlays(
       this.notificationById,
       this.notificationEventVersions,
       refreshRevision));
     const taskBaseline = new Map(this.taskById);
+    const terminalTaskBaseline = new Map(this.terminalTaskById);
     const notificationBaseline = new Map(this.notificationById);
     const taskSnapshotVersions = new Map<string, EventVersion>();
-    for (const task of tasks) {
-      if (!task.id) {
-        continue;
-      }
-
-      const snapshotVersion = this.snapshotVersion(task, refreshRevision);
-      taskSnapshotVersions.set(task.id, snapshotVersion);
-      this.seedSnapshot(this.taskEventVersions, task.id, snapshotVersion);
+    for (const [id, candidate] of taskSnapshotCandidates) {
+      taskSnapshotVersions.set(id, candidate.version);
+      this.seedSnapshot(this.taskEventVersions, id, candidate.version);
     }
 
     const notificationSnapshotVersions = new Map<string, EventVersion>();
@@ -633,38 +671,50 @@ export class DesktopTaskNotificationFeed {
     this.trimTrackedVersions();
 
     this.taskById.clear();
-    if (artifactScan.status === "complete" || artifactScan.states.length > 0) {
+    if (artifactScan.status === "complete" || artifactScan.hasSnapshot) {
       this.artifactByTaskId.clear();
-    }
-    for (const state of artifactScan.states) {
-      this.artifactByTaskId.set(state.taskId, state);
+      this.terminalTaskById.clear();
     }
     this.artifactRestoreStatusValue = artifactScan.status;
+    for (const state of artifactScan.states) {
+      this.setArtifactState(state);
+    }
+    for (const state of artifactScan.terminalTasks) {
+      this.setTerminalTaskState(state);
+    }
+    for (const state of terminalTaskSnapshots) {
+      this.setTerminalTaskState(state);
+    }
     this.notificationById.clear();
-    for (const task of tasks) {
+    for (const task of activeTasks) {
       if (!task.id || !taskSnapshotVersions.has(task.id)) {
         continue;
       }
 
-      const overlay = taskOverlays.get(task.id);
-      const overlayVersion = overlay ? this.taskEventVersions.get(task.id) : undefined;
       const snapshotVersion = taskSnapshotVersions.get(task.id);
-      if (overlay && overlayVersion && overlayVersion.revision > refreshRevision
-        && (!snapshotVersion || compareEventVersion(overlayVersion, snapshotVersion) > 0)) {
-        this.taskById.set(task.id, overlay);
-      } else if (taskBaseline.has(task.id)
-        && this.taskEventVersions.get(task.id) !== undefined
-        && compareEventVersion(this.taskEventVersions.get(task.id)!, snapshotVersion!) > 0) {
-        this.taskById.set(task.id, taskBaseline.get(task.id)!);
-      } else {
+      if (snapshotVersion !== undefined) {
         this.taskById.set(task.id, task);
       }
     }
-    for (const [id, task] of taskOverlays) {
-      if (!this.taskById.has(id)) {
-        this.taskById.set(id, task);
+    for (const [id, candidate] of taskSnapshotCandidates) {
+      if (isTerminalTaskStatus(candidate.task.status)) {
+        this.setTerminalTaskState({ taskId: id, status: candidate.task.status });
       }
     }
+    this.reapplyNewerTaskStates(
+      taskBaseline,
+      false,
+      taskSnapshotVersions,
+      refreshRevision,
+      artifactScan.status,
+      artifactScan.hasSnapshot);
+    this.reapplyNewerTaskStates(
+      terminalTaskBaseline,
+      true,
+      taskSnapshotVersions,
+      refreshRevision,
+      artifactScan.status,
+      artifactScan.hasSnapshot);
     for (const notification of notifications) {
       if (notification.id && notificationSnapshotVersions.has(notification.id)) {
         const snapshotVersion = notificationSnapshotVersions.get(notification.id)!;
@@ -715,9 +765,10 @@ export class DesktopTaskNotificationFeed {
       if (eventConversationId !== undefined && eventConversationId !== this.lastConversationId) {
         return;
       }
+      const hasKnownTask = this.taskById.has(id) || this.terminalTaskById.has(id);
       if (eventConversationId === undefined
         && this.lastConversationId !== undefined
-        && !this.taskById.has(id)) {
+        && !hasKnownTask) {
         await this.refreshAfterWatermarkFallback(this.lastConversationId);
         return;
       }
@@ -726,16 +777,18 @@ export class DesktopTaskNotificationFeed {
         return;
       }
       const previous = this.taskById.get(id);
+      const previousTerminal = this.terminalTaskById.get(id);
       const accepted = this.recordEvent(
         this.taskEventVersions,
         id,
         event.occurredAt,
         readEntityVersion(payload),
-        previous?.status,
+        previous?.status ?? previousTerminal?.status,
         stringValue(payload.status));
       if (!accepted) {
         return;
       }
+      this.taskEventRevisions.set(id, accepted.revision);
       const status = stringValue(payload.status) ?? previous?.status ?? "queued";
       const eventExecution = record(payload.execution);
       const eventArtifacts = mergeArtifactManifests(payload.artifacts, eventExecution?.artifacts);
@@ -758,10 +811,16 @@ export class DesktopTaskNotificationFeed {
           : previous?.pendingUserInput
       });
       if (nextTask) {
-        this.taskById.set(id, nextTask);
+        if (isTerminalTaskStatus(nextTask.status)) {
+          this.taskById.delete(id);
+          this.setTerminalTaskState({ taskId: id, status: nextTask.status });
+        } else {
+          this.terminalTaskById.delete(id);
+          this.taskById.set(id, nextTask);
+        }
         const artifactState = taskArtifactState(nextTask);
         if (artifactState) {
-          this.artifactByTaskId.set(id, artifactState);
+          this.setArtifactState(artifactState);
         }
       }
       return;
@@ -860,26 +919,93 @@ export class DesktopTaskNotificationFeed {
     conversationId: string | undefined
   ): Promise<{
     status: DesktopArtifactRestoreStatus;
+    tasks: readonly DesktopTask[];
     states: readonly DesktopTaskArtifactState[];
+    terminalTasks: readonly DesktopTerminalTaskState[];
+    hasSnapshot: boolean;
   }> {
     if (!this.backend.getAllTasks) {
-      return { status: "unavailable", states: [] };
+      return { status: "unavailable", tasks: [], states: [], terminalTasks: [], hasSnapshot: false };
     }
 
     try {
       const tasks = await collectTaskPages(
         cursor => this.backend.getAllTasks!(conversationId, cursor),
         maxArtifactTaskScanPages);
-      const states = tasks
-        .slice(0, maxArtifactTasks)
+      const boundedTasks = tasks.slice(0, maxArtifactTasks);
+      const states = boundedTasks
         .map(taskArtifactState)
         .filter((state): state is DesktopTaskArtifactState => state !== undefined);
+      const terminalTasks = boundedTasks
+        .map(terminalTaskState)
+        .filter((state): state is DesktopTerminalTaskState => state !== undefined);
       return {
         status: tasks.length > maxArtifactTasks ? "partial" : "complete",
-        states
+        tasks: boundedTasks,
+        states,
+        terminalTasks,
+        hasSnapshot: true
       };
     } catch {
-      return { status: "partial", states: [] };
+      return { status: "partial", tasks: [], states: [], terminalTasks: [], hasSnapshot: false };
+    }
+  }
+
+  private setArtifactState(state: DesktopTaskArtifactState): boolean {
+    if (!this.artifactByTaskId.has(state.taskId)
+      && this.artifactByTaskId.size >= maxArtifactTasks) {
+      this.artifactRestoreStatusValue = "partial";
+      return false;
+    }
+    this.artifactByTaskId.set(state.taskId, state);
+    return true;
+  }
+
+  private setTerminalTaskState(state: DesktopTerminalTaskState): boolean {
+    if (!this.terminalTaskById.has(state.taskId)
+      && this.terminalTaskById.size >= maxArtifactTasks) {
+      this.artifactRestoreStatusValue = "partial";
+      return false;
+    }
+    this.terminalTaskById.set(state.taskId, state);
+    return true;
+  }
+
+  private reapplyNewerTaskStates(
+    states: ReadonlyMap<string, DesktopTask | DesktopTerminalTaskState>,
+    terminal: boolean,
+    taskSnapshotVersions: ReadonlyMap<string, EventVersion>,
+    refreshRevision: number,
+    artifactScanStatus: DesktopArtifactRestoreStatus,
+    artifactScanHasSnapshot: boolean
+  ): void {
+    const hasCompleteTaskSnapshot = artifactScanStatus === "complete"
+      && artifactScanHasSnapshot;
+    for (const [id, state] of states) {
+      const currentVersion = this.taskEventVersions.get(id);
+      if (currentVersion === undefined) {
+        continue;
+      }
+
+      const snapshotVersion = taskSnapshotVersions.get(id);
+      const isNewerThanSnapshot = snapshotVersion !== undefined
+        && compareEventVersion(currentVersion, snapshotVersion) > 0;
+      const changedDuringRefresh = currentVersion.revision > refreshRevision;
+      const eventBackedMissingSnapshot = snapshotVersion === undefined
+        && this.taskEventRevisions.has(id);
+      const preserveEventBackedState = eventBackedMissingSnapshot
+        && !hasCompleteTaskSnapshot;
+      if (!isNewerThanSnapshot && !changedDuringRefresh && !preserveEventBackedState) {
+        continue;
+      }
+
+      if (terminal) {
+        this.taskById.delete(id);
+        this.setTerminalTaskState(state as DesktopTerminalTaskState);
+      } else {
+        this.terminalTaskById.delete(id);
+        this.taskById.set(id, state as DesktopTask);
+      }
     }
   }
 
@@ -1043,6 +1169,7 @@ export class DesktopTaskNotificationFeed {
       }
 
       this.taskEventVersions.delete(oldest[0]);
+      this.taskEventRevisions.delete(oldest[0]);
       this.taskWatermarkRequiresRefresh = true;
     }
 
@@ -1174,7 +1301,53 @@ function compareEventVersion(left: EventVersion, right: EventVersion): number {
   return left.occurredAt - right.occurredAt;
 }
 
-function isTerminalTaskStatus(status: string): boolean {
+function mergeTaskSnapshotCandidates(
+  statusTasks: readonly DesktopTask[],
+  allTasks: readonly DesktopTask[],
+  revision: number
+): ReadonlyMap<string, TaskSnapshotCandidate> {
+  const candidates = new Map<string, TaskSnapshotCandidate>();
+  const consider = (task: DesktopTask, source: TaskSnapshotCandidate["source"]): void => {
+    if (!task.id) {
+      return;
+    }
+
+    const candidate: TaskSnapshotCandidate = {
+      task,
+      source,
+      version: {
+        occurredAt: readSnapshotOccurredAt(task),
+        entityVersion: task.entityVersion,
+        revision
+      }
+    };
+    const current = candidates.get(task.id);
+    if (!current) {
+      candidates.set(task.id, candidate);
+      return;
+    }
+
+    const comparison = compareEventVersion(candidate.version, current.version);
+    if (comparison > 0
+      || comparison === 0
+      && (source === current.source
+        || source === "all"
+        && isTerminalTaskStatus(task.status)
+        && !isTerminalTaskStatus(current.task.status))) {
+      candidates.set(task.id, candidate);
+    }
+  };
+
+  for (const task of statusTasks) {
+    consider(task, "status");
+  }
+  for (const task of allTasks) {
+    consider(task, "all");
+  }
+  return candidates;
+}
+
+function isTerminalTaskStatus(status: string): status is DesktopTerminalTaskStatus {
   return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 

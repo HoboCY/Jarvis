@@ -29,6 +29,7 @@ import {
   type DesktopNotification,
   type DesktopTask,
   type DesktopTaskArtifactState,
+  type DesktopTerminalTaskState,
   type DesktopArtifactRestoreStatus,
   desktopTaskFrom,
   nonTerminalTaskStatuses,
@@ -661,6 +662,7 @@ export function App() {
   const [wakeState, setWakeState] = useState<DesktopRealtimeWakeState>("standby");
   const [conversationIdInput, setConversationIdInput] = useState("");
   const [tasks, setTasks] = useState<readonly DesktopTask[]>([]);
+  const [terminalTasks, setTerminalTasks] = useState<readonly DesktopTerminalTaskState[]>([]);
   const [artifacts, setArtifacts] = useState<readonly DesktopTaskArtifactState[]>([]);
   const [artifactRestoreStatus, setArtifactRestoreStatus] = useState<DesktopArtifactRestoreStatus>("unavailable");
   const [notifications, setNotifications] = useState<readonly DesktopNotification[]>([]);
@@ -731,6 +733,9 @@ export function App() {
     conversationId?: string,
     conversationGeneration?: number
   ): Promise<void> {
+    if (conversationId === undefined) {
+      return;
+    }
     const currentFeed = feed.current;
     if (!currentFeed
       || conversationGeneration !== undefined
@@ -741,12 +746,13 @@ export function App() {
     await refreshFeedIfCurrent(
       currentFeed,
       () => feed.current,
-      (nextTasks, nextNotifications) => {
+      (nextTasks, nextNotifications, _nextArtifacts, nextTerminalTasks) => {
         if (conversationGeneration !== undefined
           && !isCurrentConversationOperation(conversationGeneration)) {
           return;
         }
         setTasks(nextTasks);
+        setTerminalTasks(nextTerminalTasks ?? currentFeed.terminalTasks);
         setArtifacts(currentFeed.artifacts);
         setArtifactRestoreStatus(currentFeed.artifactRestoreStatus);
         setNotifications(nextNotifications);
@@ -825,8 +831,12 @@ export function App() {
 
         const decoded = decodeSignalREventEnvelope(value);
         const feedBinding = currentFeed.captureConversationBinding();
+        const taskEventBeforeConversationSelection = feedBinding.conversationId === undefined
+          && (decoded.type === "task.updated" || decoded.type === "task.eventAdded");
         void Promise.all([
-          currentFeed.applyEvent(decoded, feedBinding),
+          taskEventBeforeConversationSelection
+            ? Promise.resolve()
+            : currentFeed.applyEvent(decoded, feedBinding),
           approvalFeed.current?.applyEvent({ eventId: decoded.eventId, type: decoded.type })
         ])
           .then(() => {
@@ -838,6 +848,7 @@ export function App() {
             }
             if (currentFeed.isCurrentConversationBinding(feedBinding)) {
               setTasks(currentFeed.tasks);
+              setTerminalTasks(currentFeed.terminalTasks);
               setArtifacts(currentFeed.artifacts);
               setArtifactRestoreStatus(currentFeed.artifactRestoreStatus);
             }
@@ -981,6 +992,7 @@ export function App() {
     if (currentFeed) {
       currentFeed.selectConversation(next.id);
       setTasks(currentFeed.tasks);
+      setTerminalTasks(currentFeed.terminalTasks);
       setArtifacts(currentFeed.artifacts);
       setArtifactRestoreStatus(currentFeed.artifactRestoreStatus);
     }
@@ -1104,6 +1116,7 @@ export function App() {
         activeConversationId.current = undefined;
         feed.current?.selectConversation(undefined);
         setTasks([]);
+        setTerminalTasks([]);
         setArtifacts([]);
         setArtifactRestoreStatus("unavailable");
         setConversation(undefined);
@@ -1781,6 +1794,9 @@ export function App() {
         {conversation ? <span data-testid="phase9b-conversation-id">{conversation.id}</span> : null}
         <span data-testid="phase9b-message-count">{boundedPhase9bCount(conversation?.messageCount ?? 0)}</span>
         <span data-testid="phase9b-task-count">{boundedPhase9bCount(tasks.length)}</span>
+        <span data-testid="phase9b-terminal-task-count">{boundedPhase9bCount(terminalTasks.length)}</span>
+        <span data-testid="phase9b-terminal-task-id">{terminalTasks[0]?.taskId ?? ""}</span>
+        <span data-testid="phase9b-terminal-task-status">{terminalTasks[0]?.status ?? ""}</span>
         <span data-testid="phase9b-artifact-count">{boundedPhase9bCount(artifacts.reduce((count, task) => count + task.artifacts.length, 0))}</span>
         <span data-testid="phase9b-artifact-restore-status">{artifactRestoreStatus}</span>
         <span data-testid="phase9b-notification-count">{boundedPhase9bCount(notifications.length)}</span>
@@ -2061,6 +2077,28 @@ export function App() {
               </div>
             ) : <p className="empty-state">没有正在执行的任务</p>}
           </section>
+
+          {terminalTasks.length > 0 ? (
+            <section className="action-section terminal-task-section" aria-label="Completed Tasks" data-testid="phase9b-terminal-task-section">
+              <div className="action-section-title">
+                <h3>已结束的任务</h3>
+                <span data-testid="phase9b-terminal-task-count">{boundedPhase9bCount(terminalTasks.length)}</span>
+              </div>
+              <div className="terminal-task-list" data-testid="phase9b-terminal-task-list">
+                {terminalTasks.map(task => (
+                  <article className={`terminal-task-item is-${task.status}`} key={task.taskId} data-testid="phase9b-terminal-task">
+                    <div className="task-heading">
+                      <span className="task-icon"><Icon name="tasks" size={18} /></span>
+                      <div>
+                        <strong data-testid="phase9b-terminal-task-id">{task.taskId}</strong>
+                        <small data-testid="phase9b-terminal-task-status">{task.status}</small>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {artifacts.length > 0 || artifactRestoreStatus === "partial" ? (
               <section className="action-section artifact-section" aria-label="Task Artifacts" data-testid="phase9b-artifact-section">

@@ -41,9 +41,21 @@
   该文件单独运行 21/21 通过；现已改用受控 monotonic 时钟。最终独立复跑为
   230/230、typecheck、lint、build 和 built renderer 均通过；实际界面等待完整恢复
   状态，所属进程和临时 profile 均已清理。这些仍是离线证明。
-- 另已确认 Gap 3 / Live J 的终态恢复缺口：正常 HTTP 补拉会丢失无 artifact 的终态
-  任务，只有通知恢复，App 无其它自动恢复路径。将复用同次有界全状态查询，以只读
-  identity/status 区域恢复终态任务，沿用会话绑定隔离。修复前不得开始 native probe。
+- Gap 3 / Live J 的终态恢复补片复用同次有界全状态查询，以只读 identity/status
+  区域恢复无 artifact 的终态任务，并沿用会话绑定隔离。
+- 终态恢复首个补片通过 233/233 unit，但独立 public-seam 检查复现了旧全状态快照
+  覆盖新终态事件、不同 HTTP 快照导致同一任务跨区域重复。首轮修复关闭这两例后，
+  又复现刷新开始前已到达的终态被旧快照丢弃；现已统一两个投影的实体版本合并。
+  复审还发现初始 connected 可先于会话选择恢复，触发不带 Conversation 过滤的查询。
+  完整空快照清除旧事件来源的任务，部分扫描保留有界结果；52 项 feed 合同及五种
+  公共接口快照/事件交错检查通过。启动时未绑定会话的 task 查询与事件投影已阻断。
+- 最终 actual App 离线场景移除了人工 Load 和断线期间的通知事件注入，验证自动
+  选择恢复、断线期间后台完成的无 artifact 任务及通知在 connected 后通过 HTTP
+  恢复；无关 waiting/artifact 任务保留。相同连接 revision 的回放不再触发重复补拉。
+  对 7 个冻结 Desktop 文件的独立验证为 241/241 unit、typecheck、lint、build、
+  built renderer 全部通过；renderer 9.49 秒，stderr 干净，所属进程组和临时 profile
+  已清理，验证前后源码 hash 一致。独立 Standards / Spec 审查无剩余 P1/P2。
+  此结论仅关闭 Desktop 离线门禁，协议探针及真实后端/live 验收仍未执行。
 - 协议探针初稿检查点为 RED：语法通过，独立合同执行仅 1/7 通过。
   预审发现历史 pending 项匹配、跨进程请求 ID 去重、认证目录隔离及新 Turn 证明缺口；
   实际 CLI/transport 的清理、取消、输出及预算边界也尚待补齐回归。
@@ -59,6 +71,10 @@
 - 无认证的真实 Node 子进程夹具复现了两处清理错误：信号退出被误判失败，主进程
   退出后仍存活的子进程组被误判已清除；夹具已全部清理。CLI 取消、有界写入、延迟
   reissue 判定和进程组退出验证仍须修复；这不是实际 Codex 执行或凭据暴露证据。
+- 无回调的受控 transport 还复现了写入无界等待，以及 abort、fatal input、close 时
+  未被接住的响应拒绝。原生 `serverRequest/resolved` 尚未接入当前进程的类型化
+  registry；纯 registry 测试不证明 transport 已处理该通知。完成项的副作用分类和
+  非成功完成的证据投影也仍属待关闭的生命周期门禁。
 - 当前准备固定 Codex 版本的重启协议探针。新的协议探针、targeted run、最终 A–J run
   均尚未执行，尚未冻结最终候选；历史 CI / live 结果不能证明本轮改动。
 - 新一轮运行须重建独立 CODEX_HOME、Desktop profile、数据库、bearer、设备身份、

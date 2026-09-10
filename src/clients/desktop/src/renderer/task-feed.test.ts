@@ -177,6 +177,263 @@ test("restores terminal artifact manifests through a bounded no-status scan with
   assert.equal(JSON.stringify(feed.artifacts).includes("/private/worker"), false);
 });
 
+test("restores terminal task identity separately from active tasks during the no-status scan", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async (_conversationId, _cursor, status) =>
+      status === "running" ? [{ id: "active-task", status: "running" }] : [],
+    getAllTasks: async () => [
+      { id: "active-task", status: "running" },
+      { id: "terminal-no-artifact", status: "succeeded" },
+      { id: "terminal-failed", status: "failed" }
+    ],
+    getUnreadNotifications: async () => [
+      { id: "notification-independent", status: "delivered", title: "完成", body: "已补拉" }
+    ],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-terminal");
+
+  assert.deepEqual(feed.tasks.map(task => task.id), ["active-task"]);
+  assert.deepEqual(feed.terminalTasks, [
+    { taskId: "terminal-failed", status: "failed" },
+    { taskId: "terminal-no-artifact", status: "succeeded" }
+  ]);
+  assert.deepEqual(feed.notifications.map(notification => notification.id), ["notification-independent"]);
+});
+
+test("retains a newer terminal event when the in-flight no-status scan is stale", async () => {
+  let releaseScan!: (tasks: readonly DesktopTask[]) => void;
+  const scan = new Promise<readonly DesktopTask[]>(resolve => { releaseScan = resolve; });
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async (_conversationId, _cursor, status) =>
+      status === "running"
+        ? [{ id: "race-task", status: "running", entityVersion: 1 }]
+        : [],
+    getAllTasks: async () => scan,
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  const refresh = feed.refresh("conversation-race");
+  await feed.applyEvent({
+    eventId: "race-task-finished",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "race-task",
+      conversationId: "conversation-race",
+      status: "succeeded",
+      entityVersion: 2
+    }
+  });
+  releaseScan([{ id: "race-task", status: "running", entityVersion: 1 }]);
+  await refresh;
+
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "race-task", status: "succeeded" }]);
+});
+
+test("does not show a task in both active and terminal sections when snapshots disagree", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async (_conversationId, _cursor, status) =>
+      status === "running"
+        ? [{ id: "mixed-task", status: "running", entityVersion: 1 }]
+        : [],
+    getAllTasks: async () => [{ id: "mixed-task", status: "succeeded", entityVersion: 2 }],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-mixed");
+
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "mixed-task", status: "succeeded" }]);
+  assert.equal(feed.tasks.some((task: DesktopTask) =>
+    feed.terminalTasks.some(state => state.taskId === task.id)), false);
+});
+
+test("does not re-add an active overlay after a newer terminal scan", async () => {
+  let releaseScan!: (tasks: readonly DesktopTask[]) => void;
+  const scan = new Promise<readonly DesktopTask[]>(resolve => { releaseScan = resolve; });
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => scan,
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+  feed.selectConversation("conversation-overlay");
+
+  const refresh = feed.refresh("conversation-overlay");
+  await feed.applyEvent({
+    eventId: "overlay-running",
+    occurredAt: 1,
+    type: "task.updated",
+    payload: {
+      taskId: "overlay-task",
+      conversationId: "conversation-overlay",
+      status: "running",
+      entityVersion: 1
+    }
+  });
+  releaseScan([{ id: "overlay-task", status: "succeeded", entityVersion: 2 }]);
+  await refresh;
+
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "overlay-task", status: "succeeded" }]);
+});
+
+test("retains a terminal event observed before an older refresh snapshot", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async (_conversationId, _cursor, status) =>
+      status === "running"
+        ? [{ id: "pre-refresh-terminal", status: "running", entityVersion: 1 }]
+        : [],
+    getAllTasks: async () => [{
+      id: "pre-refresh-terminal",
+      status: "running",
+      entityVersion: 1
+    }],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+  feed.selectConversation("conversation-pre-refresh-terminal");
+
+  await feed.applyEvent({
+    eventId: "pre-refresh-terminal-event",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "pre-refresh-terminal",
+      conversationId: "conversation-pre-refresh-terminal",
+      status: "succeeded",
+      entityVersion: 2
+    }
+  });
+  await feed.refresh("conversation-pre-refresh-terminal");
+
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{
+    taskId: "pre-refresh-terminal",
+    status: "succeeded"
+  }]);
+});
+
+test("marks the bounded terminal window partial when a terminal event cannot fit", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => Array.from({ length: 256 }, (_, index) => ({
+      id: `scanned-terminal-${index}`,
+      status: "succeeded",
+      entityVersion: 1
+    })),
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+  feed.selectConversation("conversation-terminal-bound");
+  await feed.refresh("conversation-terminal-bound");
+
+  await feed.applyEvent({
+    eventId: "overflow-terminal-event",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "overflow-terminal",
+      conversationId: "conversation-terminal-bound",
+      status: "succeeded",
+      entityVersion: 2
+    }
+  });
+
+  assert.equal(feed.tasks.some(task => task.id === "overflow-terminal"), false);
+  assert.equal(feed.terminalTasks.length, 256);
+  assert.equal(feed.artifactRestoreStatus, "partial");
+});
+
+test("keeps terminal realtime updates out of active tasks and deduplicates the scanned identity", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => [{ id: "terminal-realtime", status: "succeeded" }],
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+  feed.selectConversation("conversation-terminal");
+
+  await feed.applyEvent({
+    eventId: "terminal-realtime-started",
+    occurredAt: 1,
+    type: "task.updated",
+    payload: {
+      taskId: "terminal-realtime",
+      conversationId: "conversation-terminal",
+      status: "running",
+      entityVersion: 1
+    }
+  });
+  assert.deepEqual(feed.tasks.map(task => ({ id: task.id, status: task.status })), [
+    { id: "terminal-realtime", status: "running" }
+  ]);
+
+  await feed.applyEvent({
+    eventId: "terminal-realtime-finished",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "terminal-realtime",
+      conversationId: "conversation-terminal",
+      status: "succeeded",
+      entityVersion: 2
+    }
+  });
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "terminal-realtime", status: "succeeded" }]);
+
+  await feed.refresh("conversation-terminal");
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "terminal-realtime", status: "succeeded" }]);
+});
+
+test("bounds and replaces the terminal task window across repeated partial scans", async () => {
+  const makePartialTasks = (prefix: string) => Array.from({ length: 257 }, (_, index) => ({
+    id: `${prefix}-${index}`,
+    status: "cancelled"
+  }));
+  let scanTasks = makePartialTasks("first-terminal");
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => scanTasks,
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-terminal");
+  assert.equal(feed.artifactRestoreStatus, "partial");
+  assert.equal(feed.terminalTasks.length, 256);
+  assert.equal(feed.terminalTasks.every(task => task.taskId.startsWith("first-terminal-")), true);
+
+  scanTasks = makePartialTasks("second-terminal");
+  await feed.refresh("conversation-terminal");
+  assert.equal(feed.terminalTasks.length, 256);
+  assert.equal(feed.terminalTasks.some(task => task.taskId === "first-terminal-0"), false);
+  assert.equal(feed.terminalTasks.every(task => task.taskId.startsWith("second-terminal-")), true);
+});
+
 test("reports partial artifact recovery after a bounded scan failure", async () => {
   let scanCalls = 0;
   const feed = new DesktopTaskNotificationFeed({
@@ -358,6 +615,7 @@ test("does not publish a stale artifact scan across conversation binding epochs"
     status: "succeeded",
     artifacts: [{ size: 2, sha256: "b".repeat(64), contentType: "text/plain" }]
   }]);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "new-terminal-task", status: "succeeded" }]);
 });
 
 test("task events update only the fixed task projection and clear completed user input", async () => {
@@ -851,7 +1109,7 @@ test("refreshes on connected only and pulls offline notifications after reconnec
   assert.deepEqual(deliveredKeys, ["notification-delivered:notification-offline"]);
 });
 
-test("keeps newer realtime overlays when an older refresh snapshot resolves", async () => {
+test("keeps newer realtime terminal overlays when an older refresh snapshot resolves", async () => {
   const resolveTasks: ((tasks: readonly DesktopTask[]) => void)[] = [];
   let resolveNotifications: ((notifications: readonly DesktopNotification[]) => void) | undefined;
   const delivered: string[] = [];
@@ -893,8 +1151,8 @@ test("keeps newer realtime overlays when an older refresh snapshot resolves", as
   resolveNotifications?.([]);
   await refresh;
 
-  assert.equal(feed.tasks[0]?.status, "succeeded");
-  assert.equal(feed.tasks[0]?.resultSummary, "新结果");
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "task-race", status: "succeeded" }]);
   assert.equal(feed.currentNotification?.id, "notification-race");
   assert.equal(feed.currentNotification?.status, "delivered");
   assert.deepEqual(delivered, ["notification-race"]);
@@ -993,7 +1251,7 @@ test("does not publish a late old conversation refresh after the same feed switc
   assert.deepEqual([...feed.tasks].map((task: DesktopTask) => task.id), ["task-new"]);
 });
 
-test("ignores an older task event after a newer event", async () => {
+test("ignores an older task event after a newer terminal event", async () => {
   const feed = new DesktopTaskNotificationFeed({
     getTasks: async () => [],
     getUnreadNotifications: async () => [],
@@ -1015,8 +1273,8 @@ test("ignores an older task event after a newer event", async () => {
     payload: { taskId: "task-order", status: "running", resultSummary: "过期" }
   });
 
-  assert.equal(feed.tasks[0]?.status, "succeeded");
-  assert.equal(feed.tasks[0]?.resultSummary, "最新");
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "task-order", status: "succeeded" }]);
 });
 
 test("refresh removes entities omitted by the server when no realtime event changed them", async () => {
@@ -1037,6 +1295,79 @@ test("refresh removes entities omitted by the server when no realtime event chan
 
   assert.deepEqual(feed.tasks, []);
   assert.deepEqual(feed.notifications, []);
+});
+
+test("drops event-only active and terminal states after a complete empty scan", async () => {
+  for (const [taskId, status] of [
+    ["event-active-complete-empty", "running"],
+    ["event-terminal-complete-empty", "succeeded"]
+  ] as const) {
+    const feed = new DesktopTaskNotificationFeed({
+      getTasks: async () => [],
+      getAllTasks: async () => [],
+      getUnreadNotifications: async () => [],
+      markDelivered: async () => undefined,
+      markRead: async () => undefined,
+      dismiss: async () => undefined
+    });
+
+    await feed.refresh("conversation-complete-empty");
+    await feed.applyEvent({
+      eventId: `${taskId}-event`,
+      occurredAt: 1,
+      type: "task.updated",
+      payload: {
+        taskId,
+        conversationId: "conversation-complete-empty",
+        status,
+        entityVersion: 1
+      }
+    });
+
+    assert.equal(feed.tasks.some(task => task.id === taskId), status === "running");
+    assert.equal(feed.terminalTasks.some(task => task.taskId === taskId), status === "succeeded");
+
+    await feed.refresh("conversation-complete-empty");
+    assert.equal(feed.tasks.some(task => task.id === taskId), false);
+    assert.equal(feed.terminalTasks.some(task => task.taskId === taskId), false);
+
+    await feed.refresh("conversation-complete-empty");
+    assert.equal(feed.tasks.some(task => task.id === taskId), false);
+    assert.equal(feed.terminalTasks.some(task => task.taskId === taskId), false);
+  }
+});
+
+test("retains event-only state across a partial no-status scan", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => [],
+    getAllTasks: async () => Array.from({ length: 257 }, (_, index) => ({
+      id: `partial-terminal-${index}`,
+      status: "succeeded"
+    })),
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-partial-event");
+  await feed.applyEvent({
+    eventId: "partial-event-active",
+    occurredAt: 1,
+    type: "task.updated",
+    payload: {
+      taskId: "partial-event-active",
+      conversationId: "conversation-partial-event",
+      status: "running",
+      entityVersion: 1
+    }
+  });
+
+  await feed.refresh("conversation-partial-event");
+
+  assert.deepEqual(feed.tasks.map(task => task.id), ["partial-event-active"]);
+  assert.equal(feed.terminalTasks.length, 256);
+  assert.equal(feed.artifactRestoreStatus, "partial");
 });
 
 test("does not resurrect a notification read or dismissed while refresh snapshot is pending", async () => {
@@ -1245,7 +1576,8 @@ test("does not roll a newer task back when a later HTTP snapshot is stale", asyn
   });
   await feed.refresh();
 
-  assert.equal(feed.tasks[0]?.status, "succeeded");
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "task-refresh-watermark", status: "succeeded" }]);
 });
 
 test("orders same-millisecond task events by entity version", async () => {
@@ -1276,7 +1608,8 @@ test("orders same-millisecond task events by entity version", async () => {
     payload: { taskId: "task-versioned", status: "running", entityVersion: 2 }
   });
 
-  assert.equal(feed.tasks[0]?.status, "succeeded");
+  assert.deepEqual(feed.tasks, []);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "task-versioned", status: "succeeded" }]);
 });
 
 test("collects all task pages and rejects a repeated cursor", async () => {
@@ -1424,7 +1757,8 @@ test("retries an authoritative refresh after the first watermark fallback fails"
   });
 
   assert.equal(taskRequests, nonTerminalTaskStatuses.length * 2);
-  assert.equal(feed.tasks.find(task => task.id === "task-0")?.status, "succeeded");
+  assert.equal(feed.tasks.find(task => task.id === "task-0"), undefined);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "task-0", status: "succeeded" }]);
 });
 
 test("returns the bounded refresh error when the retry also fails", async () => {

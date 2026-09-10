@@ -952,15 +952,22 @@ ol {
 }
 
 .task-item,
+.terminal-task-item,
 .notification-item {
   padding: 17px 0;
   border-top: 1px solid var(--line);
 }
 
 .task-item:first-child,
+.terminal-task-item:first-child,
 .notification-item:first-child {
   padding-top: 0;
   border-top: 0;
+}
+
+.terminal-task-list {
+  display: flex;
+  flex-direction: column;
 }
 
 .artifact-list {
