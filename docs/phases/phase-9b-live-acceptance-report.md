@@ -17,7 +17,21 @@
   未据此认定发生凭据泄露，安全事件的 resolved 结论保持不变。
 - `appsettings.secrets.json` 和 `secrets.json` 已加入精确文件名 Git 忽略规则；
   元数据检查确认未跟踪、未暂存，example 模板仍可跟踪，未读取凭据内容。
-- 当前进行 Desktop 四项修复。新的协议探针、targeted run、最终 A–J run
+- 安全输出限制的本地提交为 `40ec81c2894474c4783cfd62f5bae6080c5ea6b7`，
+  尚未作为最终候选或推送后的 CI 结论。
+- 用户已说明实际 Provider Key 位于 `appsettings.secrets.json`；其具体位置待确认。
+  两个工作树中的完整文件名检查未找到该文件，未读取内容；后续不得静默使用旧默认来源替代。
+- Desktop 正常退出、单次自动轮换、实际 SignalR 连接控制、Main 会话选择持久化已接入。
+  生命周期复审发现的已确认但未激活连接、终态重试、请求代次与连接绑定、切换状态/action、
+  跨会话 task 快照问题均已修复并关闭代码级 P1/P2。
+- 最终源码独立复跑：Desktop unit 222/222、共享 Realtime-agent 13/13 通过；
+  实际 built Electron renderer 场景通过，stderr 干净、所属进程全部退出、临时 profile 已删除。
+  实际 App 覆盖等待 A secret 时切换 B 后拒绝迟到的 A、B 空任务与全局通知保留、
+  B 加载失败保留 A、同 A 重载；其余绑定及终态交错由 unit 合同覆盖。
+  先前 missing-observation 失败保留，原因未确定；最终 Standards / Spec 追加复审完成，
+  无剩余 P1/P2，实际 App surface 的离线验证缺口已关闭。
+  这些结果不替代真实后端、SignalR/WebRTC 或 live 验收。
+- 当前准备固定 Codex 版本的重启协议探针。新的协议探针、targeted run、最终 A–J run
   均尚未执行，尚未冻结最终候选；历史 CI / live 结果不能证明本轮改动。
 - 新一轮运行须重建独立 CODEX_HOME、Desktop profile、数据库、bearer、设备身份、
   allowed root、运行目录、owner marker 和 launchd labels；旧资源及登录不得复用。

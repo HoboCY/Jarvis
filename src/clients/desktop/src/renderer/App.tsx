@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { decodeSignalREventEnvelope } from "@jarvis/contracts-ts";
 import "./app.css";
-import { ensureConversation } from "./conversation-flow.js";
+import {
+  ConversationSelectionOperationCoordinator,
+  restoreSelectedConversation,
+  type ConversationSelectionSnapshot
+} from "./conversation-flow.js";
 import {
   canSendRealtimeText,
   RealtimeAutoConnectGate,
@@ -55,6 +59,11 @@ import {
   type DesktopNotificationActionStates,
   type DesktopNotificationFeedbackAction
 } from "./control-panel.js";
+import {
+  createDesktopActionFailureError,
+  isDesktopActionFailureProjection,
+  projectDesktopActionFailure
+} from "./desktop-ipc.js";
 import {
   desktopDeviceAudioLabel,
   desktopDeviceCanUseLocalAudio,
@@ -242,6 +251,11 @@ function actionUnavailable(state: DesktopActionState | undefined): boolean {
     || state?.status === "terminal";
 }
 
+function isCancelledDesktopAction(reason: unknown): boolean {
+  const failure = projectDesktopActionFailure(reason);
+  return failure.kind === "retryable" && failure.code === "cancelled";
+}
+
 function ActionFeedback({ state, label }: { state?: DesktopActionState; label?: string }): ReactNode {
   if (!state) {
     return null;
@@ -420,6 +434,7 @@ function TaskUserInputForm({
         ))}
         <button
           type="submit"
+          data-testid="phase9b-answer-input"
           disabled={submitting || actionUnavailable(actionState)}
           aria-busy={submitting || actionState?.status === "pending"}
         >
@@ -593,11 +608,43 @@ function deviceFrom(value: unknown): Device {
   return parseDesktopDeviceBootstrap(value);
 }
 
+function phase9bTaskState(tasks: readonly DesktopTask[]): string {
+  const status = tasks[0]?.status;
+  switch (status) {
+    case "assigned": return "starting";
+    case "cancellationRequested": return "ending";
+    case "queued": return "pending";
+    case "recovering": return "restoring";
+    case "running": return "running";
+    case "waitingForApproval":
+    case "waitingForUserInput": return "pending";
+    case "succeeded": return "succeeded";
+    case "failed": return "failed";
+    case "cancelled": return "cancelled";
+    case undefined: return "ready";
+    default: return "error";
+  }
+}
+
+function phase9bDeviceState(device: Device | undefined): string {
+  switch (device?.status) {
+    case "online": return "online";
+    case "offline": return "offline";
+    case "disabled": return "unavailable";
+    default: return "unavailable";
+  }
+}
+
+function boundedPhase9bCount(value: number): number {
+  return Math.min(128, Math.max(0, Number.isSafeInteger(value) ? value : 0));
+}
+
 export function App() {
   const [version, setVersion] = useState("loading");
   const [conversation, setConversation] = useState<Conversation | undefined>();
   const [device, setDevice] = useState<Device | undefined>();
   const [status, setStatus] = useState<DesktopRealtimeStatus>("disconnected");
+  const [remoteTrackCount, setRemoteTrackCount] = useState(0);
   const [persistenceRetryReason, setPersistenceRetryReason] = useState<DesktopRealtimePersistenceRetryReason>();
   const [error, setError] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
@@ -617,6 +664,15 @@ export function App() {
   const [mobilePairingActionKey, setMobilePairingActionKey] = useState<string | undefined>();
   const [creatingMobilePairing, setCreatingMobilePairing] = useState(false);
   const controller = useRef<DesktopRealtimeController | undefined>(undefined);
+  const shutdownStarted = useRef(false);
+  const shutdownRequests = useRef(new Set<string>());
+  const conversationRef = useRef<Conversation | undefined>(undefined);
+  const conversationCoordinator = useRef<ConversationSelectionOperationCoordinator | undefined>(undefined);
+  const conversationCreateFlow = useRef<{
+    generation: number;
+    operation: Promise<Conversation | undefined>;
+  } | undefined>(undefined);
+  const startupSelectionRetry = useRef<string | undefined>(undefined);
   const connectGate = useRef<RealtimeConnectGate | undefined>(undefined);
   const autoConnectGate = useRef<RealtimeAutoConnectGate | undefined>(undefined);
   const actionRunner = useRef<DesktopActionRunner | undefined>(undefined);
@@ -626,7 +682,8 @@ export function App() {
   const feed = useRef<DesktopTaskNotificationFeed | undefined>(undefined);
   const approvalFeed = useRef<DesktopApprovalFeed | undefined>(undefined);
   const activeConversationId = useRef<string | undefined>(undefined);
-  activeConversationId.current = conversation?.id;
+  conversationCoordinator.current ??= new ConversationSelectionOperationCoordinator();
+  activeConversationId.current = conversationRef.current?.id;
   connectGate.current ??= new RealtimeConnectGate();
   autoConnectGate.current ??= new RealtimeAutoConnectGate(connectGate.current);
   actionRunner.current ??= new DesktopActionRunner({
@@ -659,9 +716,14 @@ export function App() {
     ? getActionState(mobilePairingActionKey)
     : undefined;
 
-  async function refreshFeed(conversationId?: string): Promise<void> {
+  async function refreshFeed(
+    conversationId?: string,
+    conversationGeneration?: number
+  ): Promise<void> {
     const currentFeed = feed.current;
-    if (!currentFeed) {
+    if (!currentFeed
+      || conversationGeneration !== undefined
+      && !isCurrentConversationOperation(conversationGeneration)) {
       return;
     }
 
@@ -669,6 +731,10 @@ export function App() {
       currentFeed,
       () => feed.current,
       (nextTasks, nextNotifications) => {
+        if (conversationGeneration !== undefined
+          && !isCurrentConversationOperation(conversationGeneration)) {
+          return;
+        }
         setTasks(nextTasks);
         setNotifications(nextNotifications);
       },
@@ -745,15 +811,21 @@ export function App() {
         }
 
         const decoded = decodeSignalREventEnvelope(value);
+        const feedBinding = currentFeed.captureConversationBinding();
         void Promise.all([
-          currentFeed.applyEvent(decoded),
+          currentFeed.applyEvent(decoded, feedBinding),
           approvalFeed.current?.applyEvent({ eventId: decoded.eventId, type: decoded.type })
         ])
           .then(() => {
             if (!effectActive) {
               return;
             }
-            setTasks(currentFeed.tasks);
+            if (feed.current !== currentFeed) {
+              return;
+            }
+            if (currentFeed.isCurrentConversationBinding(feedBinding)) {
+              setTasks(currentFeed.tasks);
+            }
             setNotifications(currentFeed.notifications);
             setApprovals(approvalFeed.current?.approvals ?? []);
           })
@@ -798,6 +870,40 @@ export function App() {
         }
       }
     });
+    const removeShutdownListener = window.jarvis.onPrepareShutdown(({ requestId }) => {
+      if (shutdownRequests.current.has(requestId)) {
+        return;
+      }
+      shutdownRequests.current.add(requestId);
+      shutdownStarted.current = true;
+      connectGate.current!.freeze();
+      const activeController = controller.current;
+      activeController?.freezeForShutdown();
+      setMuted(true);
+      setWakeState("standby");
+      void (async () => {
+        let shutdownStatus: "completed" | "failed" = "completed";
+        try {
+          if (!await connectGate.current!.waitForCompletion(4_000)) {
+            shutdownStatus = "failed";
+          }
+          const controllerAfterConnect = controller.current;
+          controllerAfterConnect?.freezeForShutdown();
+          if (controllerAfterConnect && !await controllerAfterConnect.disconnect("desktop-quit")) {
+            shutdownStatus = "failed";
+          }
+          controller.current = undefined;
+          setRemoteTrackCount(0);
+        } catch {
+          shutdownStatus = "failed";
+        }
+        try {
+          await window.jarvis.acknowledgeShutdown({ requestId, status: shutdownStatus });
+        } catch {
+          // Main's bounded timeout path performs the trusted fallback.
+        }
+      })();
+    });
     void window.jarvis.getBackendConnectionState()
       .then(applyConnectionState)
       .catch(reason => {
@@ -805,15 +911,22 @@ export function App() {
           setError(desktopActionMessage(reason));
         }
       });
-    const startupConnection = autoConnectGate.current!.run(() =>
-      runAction("realtime-connect", () => connect()).catch(reason => {
-        setError(desktopActionMessage(reason));
-      }));
+    const startupConnection = autoConnectGate.current!.run(async () => {
+      if (!await restoreConversationForStartup()) {
+        return;
+      }
+      await runAction("realtime-connect", () => connect()).catch(reason => {
+        if (!isCancelledDesktopAction(reason)) {
+          setError(desktopActionMessage(reason));
+        }
+      });
+    });
     void startupConnection?.catch(() => undefined);
     return () => {
       effectActive = false;
       removeEventListener();
       removeConnectionListener();
+      removeShutdownListener();
       feed.current?.dispose();
       approvalFeed.current?.dispose();
     };
@@ -827,60 +940,386 @@ export function App() {
   }, [conversation?.id]);
 
   useEffect(() => () => {
-    void controller.current?.disconnect("desktop-closed");
+    if (!shutdownStarted.current) {
+      void controller.current?.disconnect("desktop-closed");
+    }
   }, []);
 
-  async function createConversation(): Promise<Conversation | undefined> {
-    setError(undefined);
+  function isCurrentConversationOperation(generation: number): boolean {
+    return !shutdownStarted.current && conversationCoordinator.current!.isCurrent(generation);
+  }
+
+  function setActiveConversation(
+    next: Conversation,
+    generation?: number,
+    expectedConversationId?: string
+  ): boolean {
+    if (expectedConversationId !== undefined
+      && conversationRef.current?.id !== expectedConversationId) {
+      return false;
+    }
+    if (!conversationCoordinator.current!.markActive(next.id, generation)
+      || (generation !== undefined && !isCurrentConversationOperation(generation))) {
+      return false;
+    }
+    const currentFeed = feed.current;
+    if (currentFeed) {
+      currentFeed.selectConversation(next.id);
+      setTasks(currentFeed.tasks);
+    }
+    conversationRef.current = next;
+    activeConversationId.current = next.id;
+    startupSelectionRetry.current = undefined;
+    setConversation(next);
+    setConversationIdInput(next.id);
+    return true;
+  }
+
+  function setActiveConversationFromBinding(
+    next: Conversation,
+    binding: ConversationSelectionSnapshot,
+    expectedConversationId: string
+  ): boolean {
+    if (!conversationCoordinator.current!.owns(
+      binding,
+      conversationRef.current?.id,
+      shutdownStarted.current)) {
+      return false;
+    }
+    return setActiveConversation(
+      next,
+      conversationCoordinator.current!.currentGeneration,
+      expectedConversationId);
+  }
+
+  async function persistConversationSelection(
+    next: Conversation,
+    generation = conversationCoordinator.current!.currentGeneration
+  ): Promise<boolean> {
+    if (!isCurrentConversationOperation(generation)
+      || conversationRef.current?.id !== next.id) {
+      return false;
+    }
     try {
-      const value = await window.jarvis.createConversation({
-        title: "Desktop Realtime",
-        idempotencyKey: crypto.randomUUID()
-      });
-      const next = conversationFrom(value);
-      setConversation(next);
-      setConversationIdInput(next.id);
-      return next;
+      return await conversationCoordinator.current!.persist(
+        generation,
+        next.id,
+        () => window.jarvis.setConversationSelection(next.id));
     } catch (reason) {
-      setError(desktopActionMessage(reason));
+      if (isCurrentConversationOperation(generation) && conversationRef.current?.id === next.id) {
+        setError(desktopActionMessage(reason));
+      }
+      return false;
+    }
+  }
+
+  async function disconnectControllerForConversationSwitch(
+    generation: number,
+    nextConversationId: string
+  ): Promise<boolean> {
+    if (!isCurrentConversationOperation(generation)) {
+      return false;
+    }
+    const activeController = controller.current;
+    if (!activeController) {
+      if (conversationRef.current?.id !== nextConversationId) {
+        setStatus("disconnected");
+        setPersistenceRetryReason(undefined);
+      }
+      return true;
+    }
+    if (activeController.activeConversationId === nextConversationId) {
+      return true;
+    }
+
+    try {
+      if (!await activeController.disconnect("conversation-switch")) {
+        if (isCurrentConversationOperation(generation)) {
+          setError("旧 Realtime Session 的消息尚未保存，请先重试保存。");
+        }
+        return false;
+      }
+      if (!isCurrentConversationOperation(generation)) {
+        return false;
+      }
+      if (controller.current === activeController) {
+        controller.current = undefined;
+        setRemoteTrackCount(0);
+        setWakeState("standby");
+        setMuted(true);
+        setPersistenceRetryReason(undefined);
+        setStatus("disconnected");
+      } else if (controller.current !== undefined) {
+        return false;
+      }
+      return true;
+    } catch (reason) {
+      if (isCurrentConversationOperation(generation)) {
+        setError(desktopActionMessage(reason));
+      }
+      return false;
+    }
+  }
+
+  async function activateConversationAndPersist(
+    next: Conversation,
+    generation: number
+  ): Promise<boolean> {
+    if (!await disconnectControllerForConversationSwitch(generation, next.id)) {
+      return false;
+    }
+    const previous = conversationRef.current;
+    const previousWasPersisted = previous !== undefined
+      && conversationCoordinator.current!.isPersisted(previous.id);
+    if (!setActiveConversation(next, generation)) {
+      return false;
+    }
+    if (await persistConversationSelection(next, generation)) {
+      return true;
+    }
+    if (isCurrentConversationOperation(generation) && conversationRef.current?.id === next.id) {
+      if (previous !== undefined) {
+        if (setActiveConversation(previous, generation) && previousWasPersisted) {
+          conversationCoordinator.current!.markPersisted(previous.id, generation);
+        }
+      } else if (conversationCoordinator.current!.resetActive(generation)) {
+        conversationRef.current = undefined;
+        activeConversationId.current = undefined;
+        feed.current?.selectConversation(undefined);
+        setTasks([]);
+        setConversation(undefined);
+        setConversationIdInput("");
+      }
+    }
+    return false;
+  }
+
+  async function createConversationFor(generation: number): Promise<Conversation | undefined> {
+    if (!isCurrentConversationOperation(generation)) {
       return undefined;
     }
+    const existing = conversationCreateFlow.current;
+    if (existing?.generation === generation) {
+      return await existing.operation;
+    }
+    const operation = (async (): Promise<Conversation | undefined> => {
+      try {
+        const value = await window.jarvis.createConversation({
+          title: "Desktop Realtime",
+          idempotencyKey: crypto.randomUUID()
+        });
+        if (!isCurrentConversationOperation(generation)) {
+          return undefined;
+        }
+        const next = conversationFrom(value);
+        if (!await activateConversationAndPersist(next, generation)) {
+          return undefined;
+        }
+        return next;
+      } catch (reason) {
+        if (isCurrentConversationOperation(generation)) {
+          setError(desktopActionMessage(reason));
+        }
+        return undefined;
+      }
+    })();
+    const current = { generation, operation };
+    conversationCreateFlow.current = current;
+    try {
+      return await operation;
+    } finally {
+      if (conversationCreateFlow.current === current) {
+        conversationCreateFlow.current = undefined;
+      }
+    }
+  }
+
+  async function createConversation(): Promise<Conversation | undefined> {
+    if (shutdownStarted.current) {
+      return undefined;
+    }
+    const generation = conversationCoordinator.current!.begin();
+    setError(undefined);
+    return await conversationCoordinator.current!.track(
+      () => createConversationFor(generation));
   }
 
   async function loadConversation(): Promise<void> {
+    if (shutdownStarted.current) {
+      return;
+    }
+    const generation = conversationCoordinator.current!.begin();
+    const conversationId = conversationIdInput.trim();
     setError(undefined);
+    await conversationCoordinator.current!.track(async () => {
+      try {
+        const value = await window.jarvis.getConversation(conversationId);
+        if (!isCurrentConversationOperation(generation)) {
+          return;
+        }
+        const next = conversationFrom(value);
+        await activateConversationAndPersist(next, generation);
+      } catch (reason) {
+        if (isCurrentConversationOperation(generation)) {
+          setError(desktopActionMessage(reason));
+        }
+      }
+    });
+  }
+
+  function isConversationNotFound(reason: unknown): boolean {
+    return isDesktopActionFailureProjection(reason) && reason.code === "not_found";
+  }
+
+  async function restoreConversationForStartupOperation(generation: number): Promise<boolean> {
+    if (!isCurrentConversationOperation(generation)) {
+      return false;
+    }
     try {
-      const value = await window.jarvis.getConversation(conversationIdInput.trim());
-      setConversation(conversationFrom(value));
+      const result = await restoreSelectedConversation({
+        readSelection: async () => {
+          const selection = await window.jarvis.getConversationSelection();
+          if (!isCurrentConversationOperation(generation)) {
+            throw new Error("Conversation operation is stale.");
+          }
+          return selection;
+        },
+        load: async conversationId => {
+          if (!isCurrentConversationOperation(generation)) {
+            throw new Error("Conversation operation is stale.");
+          }
+          const value = await window.jarvis.getConversation(conversationId);
+          if (!isCurrentConversationOperation(generation)) {
+            throw new Error("Conversation operation is stale.");
+          }
+          return conversationFrom(value);
+        },
+        clear: async () => {
+          const cleared = await conversationCoordinator.current!.clear(
+            generation,
+            () => window.jarvis.clearConversationSelection());
+          if (!cleared) {
+            throw new Error("Conversation operation is stale.");
+          }
+        },
+        create: () => createConversationFor(generation),
+        isNotFound: isConversationNotFound
+      });
+      if (!isCurrentConversationOperation(generation)) {
+        return false;
+      }
+      if (result.status === "retryable") {
+        startupSelectionRetry.current = result.conversationId;
+        setError("会话暂时不可用，请稍后重试。");
+        return false;
+      }
+      startupSelectionRetry.current = undefined;
+      if (result.status === "restored") {
+        if (!await disconnectControllerForConversationSwitch(generation, result.conversation.id)
+          || !setActiveConversation(result.conversation, generation)) {
+          return false;
+        }
+        conversationCoordinator.current!.markPersisted(result.conversation.id, generation);
+      } else if (conversationRef.current?.id !== result.conversation.id
+        && !await activateConversationAndPersist(result.conversation, generation)) {
+        return false;
+      } else if (conversationRef.current?.id !== result.conversation.id
+        && !setActiveConversation(result.conversation, generation)) {
+        return false;
+      }
+      return true;
     } catch (reason) {
-      setError(desktopActionMessage(reason));
+      if (isCurrentConversationOperation(generation)) {
+        setError(desktopActionMessage(reason));
+      }
+      return false;
     }
   }
 
+  async function restoreConversationForStartup(): Promise<boolean> {
+    if (shutdownStarted.current) {
+      return false;
+    }
+    const generation = conversationCoordinator.current!.begin();
+    return await conversationCoordinator.current!.track(
+      () => restoreConversationForStartupOperation(generation));
+  }
+
   async function connect(): Promise<void> {
+    if (shutdownStarted.current) {
+      throw new Error("Desktop shutdown is already in progress.");
+    }
+    await connectCore();
+  }
+
+  async function connectCore(): Promise<void> {
     setStatus("connecting");
     setError(undefined);
     setWakeState("standby");
     setMuted(true);
+    setRemoteTrackCount(0);
     let ownedMediaStream: MediaStream | undefined;
+    let nextController: DesktopRealtimeController | undefined;
+    let conversationSelection: ConversationSelectionSnapshot | undefined;
+    const ownsConversation = (): boolean => conversationSelection !== undefined
+      && conversationCoordinator.current!.owns(
+        conversationSelection,
+        conversationRef.current?.id,
+        shutdownStarted.current);
+    const requireConversationOwnership = (): void => {
+      if (!ownsConversation()) {
+        throw new Error("Conversation selection changed.");
+      }
+    };
     try {
-      const activeConversation = await ensureConversation(conversation, createConversation);
+      await conversationCoordinator.current!.waitForLatest();
+      if (shutdownStarted.current) {
+        throw new Error("Desktop shutdown is already in progress.");
+      }
+      let activeConversation = conversationRef.current;
+      if (!activeConversation || startupSelectionRetry.current !== undefined) {
+        if (!await restoreConversationForStartup()) {
+          setStatus("degraded");
+          throw new Error("无法恢复会话，请稍后重试。");
+        }
+        activeConversation = conversationRef.current;
+      }
+      if (shutdownStarted.current) {
+        throw new Error("Desktop shutdown is already in progress.");
+      }
       if (!activeConversation) {
         setStatus("degraded");
         throw new Error("无法创建会话，请稍后重试。");
       }
+      const conversationGeneration = conversationCoordinator.current!.currentGeneration;
+      conversationSelection = conversationCoordinator.current!.capture(activeConversation.id);
+      requireConversationOwnership();
+      if (!conversationCoordinator.current!.isPersisted(activeConversation.id)
+        && !await persistConversationSelection(activeConversation, conversationGeneration)) {
+        throw new Error("会话选择暂未保存，请稍后重试。");
+      }
+      requireConversationOwnership();
       const activeDevice = device ?? deviceFrom(await window.jarvis.getDesktopDevice());
+      requireConversationOwnership();
       setDevice(activeDevice);
       if (!desktopDeviceCanUseLocalAudio(activeDevice)) {
         throw new Error(desktopDeviceAudioLabel(activeDevice));
       }
-      if (controller.current) {
-        if (!await controller.current.disconnect("reconnect")) {
-          setStatus(controller.current.status);
-          setError("旧 Realtime Session 的消息尚未保存，请先重试保存。");
+      const liveRotationPolicy = await window.jarvisPhase9b?.getRealtimeRotationPolicy?.();
+      requireConversationOwnership();
+      const previousController = controller.current;
+      if (previousController) {
+        if (!await previousController.disconnect("reconnect")) {
+          if (ownsConversation()) {
+            setStatus(previousController.status);
+            setError("旧 Realtime Session 的消息尚未保存，请先重试保存。");
+          }
           throw new Error("旧 Realtime Session 的消息尚未保存，请先重试保存。");
         }
-        controller.current = undefined;
+        requireConversationOwnership();
+        if (controller.current === previousController) {
+          controller.current = undefined;
+        }
       }
       const secret = clientSecretFrom(await window.jarvis.createRealtimeClientSecret({
         conversationId: activeConversation.id,
@@ -888,30 +1327,43 @@ export function App() {
         preferredVoice: null,
         idempotencyKey: crypto.randomUUID()
       }));
+      requireConversationOwnership();
       ownedMediaStream = await requestApplicationAudioStream();
+      requireConversationOwnership();
       const wakeWordDetector = createSherpaWakeWordDetector(window.jarvis, secret.wakeWord.keyword);
       const voice = secret.voice;
       let observedWakeState: DesktopRealtimeWakeState | undefined;
       let observedPersistenceRetryReason: DesktopRealtimePersistenceRetryReason | undefined;
       const statusController: { current?: DesktopRealtimeController } = {};
-      const nextController = new DesktopRealtimeController(
+      const conversationId = activeConversation.id;
+      nextController = new DesktopRealtimeController(
         activeConversation.id,
         {
           markConnected: input => window.jarvis.realtimeConnected(input),
           markEnded: input => window.jarvis.realtimeEnded(input),
           ingest: async input => {
             const result = await window.jarvis.ingestRealtimeEvents(input);
-            const refreshed = await window.jarvis.getConversation(activeConversation.id);
-            setConversation(conversationFrom(refreshed));
+            if (!ownsConversation()) {
+              return result;
+            }
+            const refreshed = await window.jarvis.getConversation(conversationId);
+            if (ownsConversation()) {
+              setActiveConversationFromBinding(
+                conversationFrom(refreshed),
+                conversationSelection!,
+                conversationId);
+            }
             return result;
           },
           delegateTask: async (input, idempotencyKey) => {
             const result = await window.jarvis.delegateTask({
               ...input,
-              conversationId: activeConversation.id,
+              conversationId,
               idempotencyKey
             });
-            await refreshFeed(activeConversation.id);
+            if (ownsConversation()) {
+              await refreshFeed(conversationId);
+            }
             return result;
           },
           getTaskStatus: async input => mapRealtimeTaskStatusResponse(
@@ -927,6 +1379,9 @@ export function App() {
           })
         },
         (nextStatus, nextError) => {
+          if (!ownsConversation()) {
+            return;
+          }
           const nextPersistenceRetryReason = statusController.current?.persistenceRetryReason;
           if (nextPersistenceRetryReason !== observedPersistenceRetryReason) {
             actionRunner.current!.reset("realtime-retry-persistence");
@@ -937,11 +1392,23 @@ export function App() {
           if (nextError) {
             setError(nextError);
           }
+        },
+        undefined,
+        undefined,
+        undefined,
+        liveRotationPolicy?.rotationAfterMs,
+        observation => {
+          if (ownsConversation()) {
+            setRemoteTrackCount(observation.remoteAudioTrackCount);
+          }
         }
       );
       statusController.current = nextController;
       nextController.setWakeAcknowledgementPlayer(createBrowserWakeAcknowledgementPlayer());
       nextController.setWakeWordDetector(wakeWordDetector, nextWakeState => {
+        if (!ownsConversation()) {
+          return;
+        }
         if (nextWakeState === "error" && observedWakeState !== "error") {
           actionRunner.current!.reset("realtime-retry-wake");
         }
@@ -949,18 +1416,51 @@ export function App() {
         setWakeState(nextWakeState);
         setMuted(nextWakeState !== "awake");
       });
-      nextController.setRotationProvider(async () => clientSecretFrom(await window.jarvis.createRealtimeClientSecret({
-        conversationId: activeConversation.id,
-        deviceId: activeDevice.deviceId,
-        preferredVoice: voice,
-        idempotencyKey: crypto.randomUUID()
-      })));
+      nextController.setRotationProvider(async () => {
+        requireConversationOwnership();
+        const nextSecret = clientSecretFrom(await window.jarvis.createRealtimeClientSecret({
+          conversationId,
+          deviceId: activeDevice.deviceId,
+          preferredVoice: voice,
+          idempotencyKey: crypto.randomUUID()
+        }));
+        requireConversationOwnership();
+        return nextSecret;
+      });
+      requireConversationOwnership();
       controller.current = nextController;
       await nextController.connect({ ...secret, mediaStream: ownedMediaStream });
+      requireConversationOwnership();
       ownedMediaStream = undefined;
     } catch (reason) {
       for (const track of ownedMediaStream?.getTracks() ?? []) {
         track.stop();
+      }
+      if (nextController !== undefined
+        && (controller.current === nextController || nextController.realtimeSessionId !== undefined)) {
+        try {
+          await nextController.disconnect("conversation-switch");
+        } catch {
+          // The controller retains its bounded terminal retry state for the next user action.
+        }
+        if (controller.current === nextController) {
+          controller.current = undefined;
+        }
+      }
+      const staleConversation = conversationSelection !== undefined && !ownsConversation();
+      if (staleConversation || shutdownStarted.current) {
+        if (staleConversation && !shutdownStarted.current) {
+          const currentController = controller.current;
+          if (currentController === undefined
+            || currentController.activeConversationId !== conversationSelection?.conversationId) {
+            setStatus("disconnected");
+            setPersistenceRetryReason(undefined);
+          } else {
+            setStatus(currentController.status);
+          }
+          throw createDesktopActionFailureError("retryable", "cancelled");
+        }
+        return;
       }
       setStatus("degraded");
       setError(desktopActionMessage(reason));
@@ -974,7 +1474,9 @@ export function App() {
       realtimeActionCycle.current!.begin();
     }
     return runAction("realtime-connect", () => connectGate.current!.run(connect)).catch(reason => {
-      setError(desktopActionMessage(reason));
+      if (!isCancelledDesktopAction(reason)) {
+        setError(desktopActionMessage(reason));
+      }
     });
   }
 
@@ -993,6 +1495,7 @@ export function App() {
     try {
       if (await activeController.disconnect()) {
         controller.current = undefined;
+        setRemoteTrackCount(0);
         setWakeState("standby");
         setMuted(true);
       } else {
@@ -1059,12 +1562,20 @@ export function App() {
 
   async function sendTyped(): Promise<void> {
     const text = draft.trim();
-    if (!text || !conversation) {
+    const activeConversation = conversationRef.current ?? conversation;
+    if (!text || !activeConversation) {
       return;
     }
 
     const activeController = controller.current;
-    if (!canSendRealtimeText(status, connectGate.current?.isRunning ?? false) || !activeController) {
+    const conversationSelection = conversationCoordinator.current!.capture(activeConversation.id);
+    if (!canSendRealtimeText(status, connectGate.current?.isRunning ?? false)
+      || !activeController
+      || activeController.activeConversationId !== activeConversation.id
+      || !conversationCoordinator.current!.owns(
+        conversationSelection,
+        conversationRef.current?.id,
+        shutdownStarted.current)) {
       setError("请等待 Realtime 连接成功后再发送文字。");
       return;
     }
@@ -1073,20 +1584,39 @@ export function App() {
 
     const persistTyped = async (persistedText: string): Promise<void> => {
       await window.jarvis.addTypedMessage({
-        conversationId: conversation.id,
+        conversationId: activeConversation.id,
         clientRequestId: crypto.randomUUID(),
         text: persistedText,
         realtimeSessionId: activeController.realtimeSessionId,
         idempotencyKey: crypto.randomUUID()
       });
-      const refreshed = await window.jarvis.getConversation(conversation.id);
-      setConversation(conversationFrom(refreshed));
+      if (!conversationCoordinator.current!.owns(
+        conversationSelection,
+        conversationRef.current?.id,
+        shutdownStarted.current)) {
+        return;
+      }
+      const refreshed = await window.jarvis.getConversation(activeConversation.id);
+      if (conversationCoordinator.current!.owns(
+        conversationSelection,
+        conversationRef.current?.id,
+        shutdownStarted.current)) {
+        setActiveConversationFromBinding(
+          conversationFrom(refreshed),
+          conversationSelection,
+          activeConversation.id);
+      }
     };
 
     try {
       await activeController.sendTyped(text, persistTyped);
     } catch (reason) {
-      setError(desktopActionMessage(reason));
+      if (conversationCoordinator.current!.owns(
+        conversationSelection,
+        conversationRef.current?.id,
+        shutdownStarted.current)) {
+        setError(desktopActionMessage(reason));
+      }
     }
   }
 
@@ -1120,6 +1650,16 @@ export function App() {
   }
 
   async function cancelTask(taskId: string): Promise<void> {
+    const currentFeed = feed.current;
+    const conversationId = activeConversationId.current;
+    if (!currentFeed || conversationId === undefined) {
+      return;
+    }
+    const feedBinding = currentFeed.captureConversationBinding();
+    if (feedBinding.conversationId !== conversationId
+      || !currentFeed.hasTask(taskId, feedBinding)) {
+      return;
+    }
     const actionKey = `task-cancel:${taskId}`;
     setError(undefined);
     try {
@@ -1127,7 +1667,11 @@ export function App() {
         taskId,
         idempotencyKey
       }));
-      await refreshFeed(conversation?.id);
+      if (feed.current === currentFeed
+        && activeConversationId.current === conversationId
+        && currentFeed.isCurrentConversationBinding(feedBinding)) {
+        await refreshFeed(conversationId);
+      }
     } catch (reason) {
       setError(desktopActionMessage(reason));
     }
@@ -1198,9 +1742,34 @@ export function App() {
     activeController.setMicrophoneMuted(!muted);
   };
 
+  const phase9bAppState = backendConnectionState === "connected"
+    ? "ready"
+    : backendConnectionState === "connecting"
+      ? "starting"
+      : backendConnectionState;
+  const phase9bRealtimeState = status === "degraded" ? "error" : status;
+  const phase9bTaskStateValue = phase9bTaskState(tasks);
+  const phase9bUserInputState = tasks.some(task => task.pendingUserInput) ? "pending" : "ready";
+  const phase9bApprovalState = approvals[0]?.status ?? "ready";
+
   return (
     <main className="jarvis-shell">
       <div className="sr-only" aria-live="polite" aria-atomic="true">{actionAnnouncement}</div>
+      <div className="sr-only" aria-hidden="true">
+        <span data-testid="phase9b-app-status">{phase9bAppState}</span>
+        <span data-testid="phase9b-realtime-status">{phase9bRealtimeState}</span>
+        <span data-testid="phase9b-realtime-remote-track-count">{remoteTrackCount}</span>
+        {conversation ? <span data-testid="phase9b-conversation-id">{conversation.id}</span> : null}
+        <span data-testid="phase9b-message-count">{boundedPhase9bCount(conversation?.messageCount ?? 0)}</span>
+        <span data-testid="phase9b-task-count">{boundedPhase9bCount(tasks.length)}</span>
+        <span data-testid="phase9b-notification-count">{boundedPhase9bCount(notifications.length)}</span>
+        <span data-testid="phase9b-approval-count">{boundedPhase9bCount(approvals.length)}</span>
+        <span data-testid="phase9b-device-status">{phase9bDeviceState(device)}</span>
+        <span data-testid="phase9b-codex-task-status">{phase9bTaskStateValue}</span>
+        <span data-testid="phase9b-user-input-status">{phase9bUserInputState}</span>
+        <span data-testid="phase9b-approval-status">{phase9bApprovalState}</span>
+        <span data-testid="phase9b-signalr-status">{backendConnectionState}</span>
+      </div>
       <aside className="side-rail" aria-label="主要导航">
         <div className="brand-mark" aria-label="Jarvis">J</div>
         <nav className="primary-nav">
@@ -1267,11 +1836,15 @@ export function App() {
               onDisconnect={() => void requestDisconnect()}
             />
             <details className="session-menu">
-              <summary aria-label="会话选项"><Icon name="chevron" /></summary>
+              <summary data-testid="phase9b-conversation-menu" aria-label="会话选项"><Icon name="chevron" /></summary>
               <div className="session-popover">
                 <div className="session-popover-heading">
                   <strong>会话</strong>
-                  <button type="button" onClick={() => void createConversation()}>
+                  <button
+                    type="button"
+                    data-testid="phase9b-create-conversation"
+                    onClick={() => void createConversation()}
+                  >
                     <Icon name="new" size={17} /> 新建
                   </button>
                 </div>
@@ -1279,12 +1852,17 @@ export function App() {
                 <div className="session-input-row">
                   <input
                     id="conversation-id"
+                    data-testid="phase9b-conversation-input"
                     aria-label="Conversation ID"
                     value={conversationIdInput}
                     onChange={event => setConversationIdInput(event.target.value)}
                     placeholder="Conversation ID"
                   />
-                  <button type="button" onClick={() => void loadConversation()}>加载</button>
+                  <button
+                    type="button"
+                    data-testid="phase9b-load-conversation"
+                    onClick={() => void loadConversation()}
+                  >加载</button>
                 </div>
                 {conversation ? <small>{conversation.id}</small> : null}
               </div>
@@ -1385,6 +1963,7 @@ export function App() {
             </button>
             <button
               className="composer-send"
+              data-testid="phase9b-send-fixture"
               type="submit"
               disabled={!conversation || !canSendRealtimeText(status, connectGate.current?.isRunning ?? false) || !draft.trim()}
               aria-label="发送文字"
@@ -1469,7 +2048,7 @@ export function App() {
             </div>
             {approvals.length > 0 ? (
               <div className="approval-list">
-                {approvals.map(approval => {
+                {approvals.map((approval, approvalIndex) => {
                   const approveState = getActionState(`approval-approve:${approval.id}`);
                   const denyState = getActionState(`approval-deny:${approval.id}`);
                   const approvalBusy = resolvingApprovalIds.has(approval.id);
@@ -1490,6 +2069,7 @@ export function App() {
                         <button
                           className="approve-button"
                           type="button"
+                          {...(approvalIndex === 0 ? { "data-testid": "phase9b-approve" } : {})}
                           disabled={approvalBusy || approvalActionUnavailable}
                           aria-busy={approveState?.status === "pending"}
                           onClick={() => void resolveApproval(approval.id, "approve")}
@@ -1498,6 +2078,7 @@ export function App() {
                         </button>
                         <button
                           type="button"
+                          {...(approvalIndex === 0 ? { "data-testid": "phase9b-deny" } : {})}
                           disabled={approvalBusy || approvalActionUnavailable}
                           aria-busy={denyState?.status === "pending"}
                           onClick={() => void resolveApproval(approval.id, "deny")}

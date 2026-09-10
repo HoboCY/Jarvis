@@ -1,6 +1,7 @@
 import {
   RealtimeSession,
   type RealtimeSessionOptions,
+  REALTIME_ROTATION_AFTER_MS,
   SessionRotationStateMachine,
   createRealtimeAgent,
   mapRealtimeConnectionError,
@@ -178,6 +179,11 @@ export type DesktopRealtimeSessionFactory = (
 
 export type DesktopRealtimeTransportFactory = (mediaStream: MediaStream) => RealtimeTransportLayer;
 
+export type DesktopRealtimeConnectionObservation = {
+  remoteAudioTrackCount: number;
+  liveRemoteAudioTrackCount: number;
+};
+
 type PreparedRealtimeSession = {
   session: RealtimeSession;
   sessionId: string;
@@ -197,24 +203,37 @@ type PendingSessionEnd = {
   idempotencyKey: string;
 };
 
+type PendingSessionEndOperation = {
+  pendingEnd: PendingSessionEnd;
+  promise: Promise<void>;
+};
+
+type ConfirmedRealtimeSession = PreparedRealtimeSession;
+
 const actualSessionIdTimeoutMs = 500;
 
 export class DesktopRealtimeController {
   private session: RealtimeSession | undefined;
   private sessionId: string | undefined;
   private externalSessionId: string | undefined;
-  private readonly rotation = new SessionRotationStateMachine();
+  private readonly rotation: SessionRotationStateMachine;
   private readonly textByItem = new Map<string, string>();
   private readonly modalityByItem = new Map<string, "text" | "audioWithTranscript">();
   private readonly pendingBatches: PendingRealtimeBatch[] = [];
   private eventIngestPersistenceFailed = false;
-  private pendingSessionEnd: PendingSessionEnd | undefined;
+  private readonly pendingSessionEnds = new Map<string, PendingSessionEnd>();
+  private readonly pendingSessionEndOperations = new Map<string, PendingSessionEndOperation>();
+  private readonly confirmedSessions = new Map<string, ConfirmedRealtimeSession>();
+  private readonly terminalizedSessionIds = new Set<string>();
+  private disconnectOperation: Promise<boolean> | undefined;
   private persistenceTimer: ReturnType<typeof setTimeout> | undefined;
   private persistenceFlush: Promise<boolean> | undefined;
   private rotationTimer: ReturnType<typeof setInterval> | undefined;
+  private rotationOperation: Promise<void> | undefined;
   private statusValue: DesktopRealtimeStatus = "disconnected";
   private connectionGeneration = 0;
   private nextConnectionGeneration = 0;
+  private lifecycleGeneration = 0;
   private readonly pendingAudioInterruptions = new WeakSet<RealtimeSession>();
   private readonly interruptedItems = new WeakMap<RealtimeSession, Set<string>>();
   private wakeWordDetector: WakeWordDetector | undefined;
@@ -236,6 +255,7 @@ export class DesktopRealtimeController {
     voice: string;
     instructions: string;
   }>) | undefined;
+  private lifecycleFrozen = false;
 
   public constructor(
     private readonly conversationId: string,
@@ -244,8 +264,18 @@ export class DesktopRealtimeController {
     private readonly now: () => number = () => Date.now(),
     private readonly createSession: DesktopRealtimeSessionFactory = (agent, options) => new RealtimeSession(agent, options),
     private readonly createTransport: DesktopRealtimeTransportFactory = mediaStream =>
-      new OpenAIRealtimeWebRTC({ mediaStream })
-  ) {}
+      new OpenAIRealtimeWebRTC({ mediaStream }),
+    rotationAfterMs = REALTIME_ROTATION_AFTER_MS,
+    private readonly onConnectionObservation?: (observation: DesktopRealtimeConnectionObservation) => void
+  ) {
+    const isLiveOverride = rotationAfterMs !== REALTIME_ROTATION_AFTER_MS;
+    if (!Number.isSafeInteger(rotationAfterMs)
+      || rotationAfterMs <= 0
+      || isLiveOverride && (rotationAfterMs < 20 * 1000 || rotationAfterMs > 120 * 1000)) {
+      throw new RangeError("Realtime rotation interval is invalid.");
+    }
+    this.rotation = new SessionRotationStateMachine(rotationAfterMs);
+  }
 
   public get status(): DesktopRealtimeStatus {
     return this.statusValue;
@@ -253,6 +283,10 @@ export class DesktopRealtimeController {
 
   public get realtimeSessionId(): string | undefined {
     return this.sessionId;
+  }
+
+  public get activeConversationId(): string {
+    return this.conversationId;
   }
 
   public get wakeState(): DesktopRealtimeWakeState {
@@ -269,7 +303,9 @@ export class DesktopRealtimeController {
     if (this.eventIngestPersistenceFailed) {
       return "event-ingest";
     }
-    return this.pendingSessionEnd ? "session-end" : undefined;
+    return this.pendingSessionEnds.size > 0
+      ? "session-end"
+      : undefined;
   }
 
   public setWakeWordDetector(
@@ -307,7 +343,22 @@ export class DesktopRealtimeController {
     this.rotationProvider = provider;
   }
 
+  /**
+   * Freeze all new connection and rotation work before the Main process asks
+   * the renderer to flush and acknowledge desktop shutdown.
+   */
+  public freezeForShutdown(): void {
+    this.lifecycleGeneration++;
+    this.lifecycleFrozen = true;
+    this.stopRotationTimer();
+    this.failClosedAudio(this.session);
+  }
+
   public async connect(input: DesktopRealtimeConnectionInput): Promise<void> {
+    if (this.lifecycleFrozen) {
+      throw new Error("Realtime shutdown is already in progress.");
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
     if (!input.clientSecret || !input.realtimeSessionId || !input.instructions.trim()) {
       throw new Error("A realtime session id, instructions, and ephemeral client secret are required.");
     }
@@ -326,10 +377,18 @@ export class DesktopRealtimeController {
     this.onStatus(this.statusValue);
 
     try {
-      const prepared = await this.prepareSession(input);
+      const prepared = await this.prepareSession(input, lifecycleGeneration);
+      if (this.lifecycleFrozen || lifecycleGeneration !== this.lifecycleGeneration) {
+        prepared.session.close();
+        throw new Error("Realtime shutdown is already in progress.");
+      }
       this.activate(prepared);
     } catch (error) {
       const mapped = mapRealtimeConnectionError(error);
+      if (lifecycleGeneration !== this.lifecycleGeneration) {
+        await this.releaseAudioResources();
+        throw error;
+      }
       if (previousSession && previousSessionId) {
         // prepareSession never mutates the active connection, so this is a
         // true state-preserving failure path rather than a restore-after-swap.
@@ -351,7 +410,13 @@ export class DesktopRealtimeController {
     }
   }
 
-  private async prepareSession(input: DesktopRealtimeConnectionInput): Promise<PreparedRealtimeSession> {
+  private async prepareSession(
+    input: DesktopRealtimeConnectionInput,
+    expectedLifecycleGeneration = this.lifecycleGeneration
+  ): Promise<PreparedRealtimeSession> {
+    if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+      throw new Error("Realtime shutdown is already in progress.");
+    }
     const generation = ++this.nextConnectionGeneration;
     const mediaStream = input.mediaStream ?? this.realtimeMediaStream;
     if (mediaStream) {
@@ -406,12 +471,20 @@ export class DesktopRealtimeController {
         model: input.model,
         ...(input.webRtcUrl ? { url: input.webRtcUrl } : {})
       });
-      if (typeof window !== "undefined" && window.jarvisPhase9b !== undefined
-          && session.transport instanceof OpenAIRealtimeWebRTC) {
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+        throw new Error("Realtime shutdown is already in progress.");
+      }
+      if (session.transport instanceof OpenAIRealtimeWebRTC) {
         const observation = projectPhase9bRealtimeConnection(
           input.realtimeSessionId, session.transport.connectionState.peerConnection);
         if (observation !== undefined) {
-          await window.jarvisPhase9b.observeRealtimeConnection(observation);
+          this.onConnectionObservation?.({
+            remoteAudioTrackCount: observation.remoteAudioTrackCount,
+            liveRemoteAudioTrackCount: observation.liveRemoteAudioTrackCount
+          });
+          if (typeof window !== "undefined" && window.jarvisPhase9b !== undefined) {
+            await window.jarvisPhase9b.observeRealtimeConnection(observation);
+          }
         }
       }
       if (mediaStream) {
@@ -433,12 +506,28 @@ export class DesktopRealtimeController {
           clearTimeout(timeout);
         }
       }
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+        throw new Error("Realtime shutdown is already in progress.");
+      }
       await this.backend.markConnected({
         sessionId: input.realtimeSessionId,
         externalSessionId: actualExternalSessionId,
         idempotencyKey: crypto.randomUUID()
       });
+      this.terminalizedSessionIds.delete(input.realtimeSessionId);
+      this.confirmedSessions.set(input.realtimeSessionId, {
+        session,
+        sessionId: input.realtimeSessionId,
+        externalSessionId: actualExternalSessionId,
+        generation
+      });
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+        throw new Error("Realtime shutdown is already in progress.");
+      }
       await this.startWakeWordDetector();
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+        throw new Error("Realtime shutdown is already in progress.");
+      }
       return {
         session,
         sessionId: input.realtimeSessionId,
@@ -447,7 +536,12 @@ export class DesktopRealtimeController {
       };
     } catch (error) {
       session.close();
-      await this.markFailed(input.realtimeSessionId, "connection-failed");
+      // Main owns the terminal transition once shutdown has frozen the
+      // lifecycle. Retrying here would send a second ended request with a
+      // different idempotency key after Main compensation has completed.
+      if (!this.lifecycleFrozen) {
+        await this.markFailed(input.realtimeSessionId, "connection-failed");
+      }
       throw error;
     }
   }
@@ -525,7 +619,7 @@ export class DesktopRealtimeController {
     if (this.statusValue === "degraded") {
       this.statusValue = this.session ? "connected" : "disconnected";
       this.onStatus(this.statusValue);
-      if (this.session) {
+      if (this.session && !this.lifecycleFrozen) {
         this.startRotationTimer();
       }
     }
@@ -625,9 +719,27 @@ export class DesktopRealtimeController {
   }
 
   public async disconnect(reason = "user-disconnected"): Promise<boolean> {
+    const inFlight = this.disconnectOperation;
+    if (inFlight) {
+      return await inFlight;
+    }
+
+    const operation = this.performDisconnect(reason);
+    this.disconnectOperation = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.disconnectOperation === operation) {
+        this.disconnectOperation = undefined;
+      }
+    }
+  }
+
+  private async performDisconnect(reason: string): Promise<boolean> {
+    this.lifecycleGeneration++;
     this.stopRotationTimer();
     this.failClosedAudio(this.session);
-    if (!await this.flushPendingPersistence() || !await this.retryPendingSessionEnd()) {
+    if (!await this.flushPendingPersistence()) {
       this.statusValue = "degraded";
       this.onStatus(
         this.statusValue,
@@ -635,41 +747,66 @@ export class DesktopRealtimeController {
           ? "Message persistence failed; the realtime session remains connected for retry."
           : "Message persistence failed; retry is required before the session can finish disconnecting."
       );
-      if (this.session) {
+      if (this.session && !this.lifecycleFrozen) {
         this.startRotationTimer();
       }
       return false;
     }
 
+    const pendingSessionIdsBeforeRetry = new Set(this.pendingSessionEnds.keys());
+    const pendingSessionEndsSucceeded = await this.retryPendingSessionEnd();
+
     this.connectionGeneration = ++this.nextConnectionGeneration;
     const session = this.session;
     const sessionId = this.sessionId;
+    const confirmedSessions = new Map(this.confirmedSessions);
+    if (session && sessionId && !confirmedSessions.has(sessionId)) {
+      confirmedSessions.set(sessionId, {
+        session,
+        sessionId,
+        externalSessionId: this.externalSessionId ?? "",
+        generation: this.connectionGeneration
+      });
+    }
     this.session = undefined;
     this.sessionId = undefined;
     this.externalSessionId = undefined;
     this.rotation.disconnected();
-    if (session) {
+    const closedSessions = new Set<RealtimeSession>();
+    for (const confirmed of confirmedSessions.values()) {
+      confirmed.session.close();
+      closedSessions.add(confirmed.session);
+    }
+    if (session && !closedSessions.has(session)) {
       session.close();
     }
     await this.releaseAudioResources();
-    if (sessionId) {
-      const pendingEnd: PendingSessionEnd = {
-        sessionId,
-        reason,
-        status: "disconnected",
-        idempotencyKey: crypto.randomUUID()
-      };
+    let terminalFailure = false;
+    for (const confirmed of confirmedSessions.values()) {
+      if (this.terminalizedSessionIds.has(confirmed.sessionId)) {
+        continue;
+      }
+      if (pendingSessionIdsBeforeRetry.has(confirmed.sessionId)
+        && this.pendingSessionEnds.has(confirmed.sessionId)) {
+        terminalFailure = true;
+        continue;
+      }
+      const pendingEnd = this.pendingSessionEnds.get(confirmed.sessionId) ?? {
+          sessionId: confirmed.sessionId,
+          reason,
+          status: "disconnected",
+          idempotencyKey: crypto.randomUUID()
+        } satisfies PendingSessionEnd;
       try {
-        await this.backend.markEnded(pendingEnd);
+        await this.persistSessionEnd(pendingEnd);
       } catch (error) {
-        this.pendingSessionEnd = pendingEnd;
         this.statusValue = "degraded";
         this.onStatus(this.statusValue, mapRealtimeConnectionError(error).message);
-        if (this.session) {
-          this.startRotationTimer();
-        }
-        return false;
+        terminalFailure = true;
       }
+    }
+    if (terminalFailure || !pendingSessionEndsSucceeded) {
+      return false;
     }
     this.statusValue = "disconnected";
     this.onStatus(this.statusValue);
@@ -696,7 +833,7 @@ export class DesktopRealtimeController {
         this.statusValue = "degraded";
         void this.releaseAudioResources();
         this.onStatus(this.statusValue, "Realtime connection was interrupted.");
-        if (droppedSessionId) {
+        if (droppedSessionId && !this.lifecycleFrozen) {
           void this.markFailed(droppedSessionId, "connection-lost");
         }
       }
@@ -714,7 +851,7 @@ export class DesktopRealtimeController {
         this.statusValue = "degraded";
         void this.releaseAudioResources();
         this.onStatus(this.statusValue, mapped.message);
-        if (droppedSessionId) {
+        if (droppedSessionId && !this.lifecycleFrozen) {
           void this.markFailed(droppedSessionId, "transport-error");
         }
       }
@@ -1063,6 +1200,18 @@ export class DesktopRealtimeController {
   }
 
   private async markFailed(sessionId: string, reason: string): Promise<void> {
+    if (this.terminalizedSessionIds.has(sessionId)) {
+      return;
+    }
+    const existingPendingEnd = this.pendingSessionEnds.get(sessionId);
+    if (existingPendingEnd) {
+      try {
+        await this.persistSessionEnd(existingPendingEnd);
+      } catch (error) {
+        this.onStatus(this.statusValue, error instanceof Error ? error.message : "Realtime failure could not be persisted.");
+      }
+      return;
+    }
     const pendingEnd: PendingSessionEnd = {
       sessionId,
       reason,
@@ -1070,9 +1219,8 @@ export class DesktopRealtimeController {
       idempotencyKey: crypto.randomUUID()
     };
     try {
-      await this.backend.markEnded(pendingEnd);
+      await this.persistSessionEnd(pendingEnd);
     } catch (error) {
-      this.pendingSessionEnd ??= pendingEnd;
       this.onStatus(this.statusValue, error instanceof Error ? error.message : "Realtime failure could not be persisted.");
     }
   }
@@ -1128,6 +1276,9 @@ export class DesktopRealtimeController {
   }
 
   private startRotationTimer(): void {
+    if (this.lifecycleFrozen) {
+      return;
+    }
     this.stopRotationTimer();
     this.rotationTimer = setInterval(() => {
       void this.rotateIfIdle();
@@ -1135,7 +1286,30 @@ export class DesktopRealtimeController {
   }
 
   public async rotateIfIdle(): Promise<void> {
+    if (this.lifecycleFrozen || this.rotationOperation) {
+      return;
+    }
+
+    const operation = this.rotateIfIdleOperation();
+    this.rotationOperation = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.rotationOperation === operation) {
+        this.rotationOperation = undefined;
+      }
+    }
+  }
+
+  private async rotateIfIdleOperation(): Promise<void> {
+    if (this.lifecycleFrozen) {
+      return;
+    }
+    const lifecycleGeneration = this.lifecycleGeneration;
     if (!await this.retryPendingSessionEnd()) {
+      return;
+    }
+    if (this.lifecycleFrozen || lifecycleGeneration !== this.lifecycleGeneration) {
       return;
     }
 
@@ -1144,7 +1318,7 @@ export class DesktopRealtimeController {
     }
 
     if (this.rotationProvider) {
-      await this.rotate();
+      await this.rotate(lifecycleGeneration);
     } else {
       this.onStatus(this.statusValue, "Realtime session is ready for idle rotation.");
     }
@@ -1157,8 +1331,9 @@ export class DesktopRealtimeController {
     }
   }
 
-  private async rotate(): Promise<void> {
-    if (!this.rotationProvider || !this.rotation.canRotate() || !this.sessionId) {
+  private async rotate(expectedLifecycleGeneration = this.lifecycleGeneration): Promise<void> {
+    if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration
+      || !this.rotationProvider || !this.rotation.canRotate() || !this.sessionId) {
       return;
     }
 
@@ -1170,16 +1345,27 @@ export class DesktopRealtimeController {
       // Context assembly happens on the backend, so all transcript writes from
       // the old session must be accepted before requesting the next secret.
       if (!await this.flushPendingPersistence()) {
-        this.startRotationTimer();
+        if (!this.lifecycleFrozen && expectedLifecycleGeneration === this.lifecycleGeneration) {
+          this.startRotationTimer();
+        }
+        return;
+      }
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
         return;
       }
       nextSession = await this.rotationProvider();
     } catch (error) {
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+        return;
+      }
       const mapped = mapRealtimeConnectionError(error);
       // Secret/bootstrap failures do not invalidate the active transport.
       this.statusValue = "connected";
       this.startRotationTimer();
       this.onStatus(this.statusValue, mapped.message);
+      return;
+    }
+    if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
       return;
     }
     if (!this.rotation.consumeRotation()) {
@@ -1191,14 +1377,25 @@ export class DesktopRealtimeController {
     try {
       // Connect and durably acknowledge the replacement before touching the
       // currently usable session. A failed replacement leaves it untouched.
-      prepared = await this.prepareSession(nextSession);
+      prepared = await this.prepareSession(nextSession, expectedLifecycleGeneration);
     } catch (error) {
+      if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+        return;
+      }
       const mapped = mapRealtimeConnectionError(error);
       // Rotation owns the audio boundary from its first await onward. Keep
       // the old session usable only through a later explicit wake request.
       this.statusValue = "connected";
       this.startRotationTimer();
       this.onStatus(this.statusValue, mapped.message);
+      return;
+    }
+
+    if (this.lifecycleFrozen || expectedLifecycleGeneration !== this.lifecycleGeneration) {
+      prepared.session.close();
+      if (!this.lifecycleFrozen) {
+        await this.markFailed(prepared.sessionId, "rotation-superseded");
+      }
       return;
     }
 
@@ -1216,12 +1413,11 @@ export class DesktopRealtimeController {
       idempotencyKey: crypto.randomUUID()
     };
     try {
-      await this.backend.markEnded(pendingEnd);
+      await this.persistSessionEnd(pendingEnd);
     } catch (error) {
       // The generation was already swapped, so closing the old transport is
       // safe even when its durable terminal update needs a later retry.
       oldSession?.close();
-      this.pendingSessionEnd = pendingEnd;
       const mapped = mapRealtimeConnectionError(error);
       this.statusValue = "connected";
       this.startRotationTimer();
@@ -1232,19 +1428,75 @@ export class DesktopRealtimeController {
   }
 
   private async retryPendingSessionEnd(): Promise<boolean> {
-    const pendingEnd = this.pendingSessionEnd;
-    if (!pendingEnd) {
+    const sessionIds = new Set([
+      ...this.pendingSessionEnds.keys(),
+      ...this.pendingSessionEndOperations.keys()
+    ]);
+    if (sessionIds.size === 0) {
       return true;
     }
 
+    let succeeded = true;
+    let lastError: unknown;
+    for (const sessionId of sessionIds) {
+      const pendingEnd = this.pendingSessionEnds.get(sessionId);
+      const inFlight = this.pendingSessionEndOperations.get(sessionId);
+      if (!pendingEnd && !inFlight) {
+        continue;
+      }
+
+      try {
+        if (inFlight) {
+          await inFlight.promise;
+        } else {
+          await this.persistSessionEnd(pendingEnd!);
+        }
+      } catch (error) {
+        succeeded = false;
+        lastError = error;
+      }
+    }
     try {
-      await this.backend.markEnded(pendingEnd);
-      this.pendingSessionEnd = undefined;
+      if (!succeeded) {
+        throw lastError ?? new Error("Realtime session end persistence failed.");
+      }
       this.onStatus(this.statusValue);
       return true;
     } catch (error) {
       this.onStatus(this.statusValue, mapRealtimeConnectionError(error).message);
       return false;
+    }
+  }
+
+  private async persistSessionEnd(pendingEnd: PendingSessionEnd): Promise<void> {
+    const existingOperation = this.pendingSessionEndOperations.get(pendingEnd.sessionId);
+    if (existingOperation) {
+      return await existingOperation.promise;
+    }
+
+    const operationEnd = this.pendingSessionEnds.get(pendingEnd.sessionId) ?? pendingEnd;
+    const request = Promise.resolve().then(async () => {
+      await this.backend.markEnded(operationEnd);
+    });
+    const operation = request.finally(() => {
+      if (this.pendingSessionEndOperations.get(operationEnd.sessionId)?.promise === operation) {
+        this.pendingSessionEndOperations.delete(operationEnd.sessionId);
+      }
+    });
+    this.pendingSessionEndOperations.set(operationEnd.sessionId, { pendingEnd: operationEnd, promise: operation });
+    try {
+      await operation;
+      if (this.pendingSessionEnds.get(operationEnd.sessionId)?.idempotencyKey === operationEnd.idempotencyKey) {
+        this.pendingSessionEnds.delete(operationEnd.sessionId);
+      }
+      this.confirmedSessions.delete(operationEnd.sessionId);
+      this.terminalizedSessionIds.add(operationEnd.sessionId);
+    } catch (error) {
+      const current = this.pendingSessionEnds.get(operationEnd.sessionId);
+      if (!current || current.idempotencyKey === operationEnd.idempotencyKey) {
+        this.pendingSessionEnds.set(operationEnd.sessionId, operationEnd);
+      }
+      throw error;
     }
   }
 }

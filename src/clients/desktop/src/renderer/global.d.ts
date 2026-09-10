@@ -6,6 +6,10 @@ interface Window {
       remoteAudioTrackCount: number;
       liveRemoteAudioTrackCount: number;
     }) => Promise<void>;
+    getRealtimeRotationPolicy?: () => Promise<{ rotationAfterMs: number } | null>;
+    pauseSignalR?: () => Promise<"paused" | "disconnected">;
+    resumeSignalR?: () => Promise<"connected" | "disconnected" | "paused">;
+    getSignalRState?: () => Promise<"connecting" | "connected" | "reconnecting" | "disconnected" | "paused">;
   };
   jarvis: {
     getAppVersion: () => Promise<string>;
@@ -19,6 +23,9 @@ interface Window {
     }) => Promise<unknown>;
     createConversation: (input: { title?: string | null; idempotencyKey: string }) => Promise<unknown>;
     getConversation: (conversationId: string) => Promise<unknown>;
+    getConversationSelection: () => Promise<unknown>;
+    setConversationSelection: (conversationId: string) => Promise<unknown>;
+    clearConversationSelection: () => Promise<void>;
     addTypedMessage: (input: {
       conversationId: string;
       clientRequestId: string;
@@ -114,5 +121,10 @@ interface Window {
     onWakeWordError: (listener: (message: string) => void) => () => void;
     onBackendEvent: (listener: (event: unknown) => void) => () => void;
     onBackendConnectionState: (listener: (event: unknown) => void) => () => void;
+    acknowledgeShutdown: (input: {
+      requestId: string;
+      status: "completed" | "failed";
+    }) => Promise<void>;
+    onPrepareShutdown: (listener: (value: { requestId: string }) => void) => () => void;
   };
 }

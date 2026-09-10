@@ -587,7 +587,12 @@ test("keeps newer realtime overlays when an older refresh snapshot resolves", as
     eventId: "task-newer",
     occurredAt: 200,
     type: "task.updated",
-    payload: { taskId: "task-race", status: "succeeded", resultSummary: "新结果" }
+    payload: {
+      taskId: "task-race",
+      conversationId: "conversation-race",
+      status: "succeeded",
+      resultSummary: "新结果"
+    }
   });
   await feed.applyEvent({
     eventId: "notification-newer",
@@ -612,6 +617,99 @@ test("keeps newer realtime overlays when an older refresh snapshot resolves", as
   assert.equal(feed.currentNotification?.id, "notification-race");
   assert.equal(feed.currentNotification?.status, "delivered");
   assert.deepEqual(delivered, ["notification-race"]);
+});
+
+test("switching conversations clears task state, keeps global notifications, and filters scoped events", async () => {
+  let taskRefreshes = 0;
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async conversationId => {
+      taskRefreshes++;
+      return conversationId === "conversation-new"
+        ? [{ id: "task-new", status: "running", entityVersion: 1 }]
+        : conversationId === "conversation-old"
+          ? [{ id: "task-old", status: "running", entityVersion: 1 }]
+          : [];
+    },
+    getUnreadNotifications: async () => [{
+      id: "notification-global",
+      status: "delivered",
+      title: "全局通知",
+      body: "设备范围"
+    }],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  await feed.refresh("conversation-old");
+  assert.equal(feed.hasTask("task-old"), true);
+  assert.equal(feed.notifications[0]?.id, "notification-global");
+
+  const oldBinding = feed.captureConversationBinding();
+  feed.selectConversation("conversation-new");
+  assert.deepEqual(feed.tasks, []);
+  assert.equal(feed.notifications[0]?.id, "notification-global");
+  assert.equal(feed.hasTask("task-old", oldBinding), false);
+
+  await feed.applyEvent({
+    eventId: "late-old-task",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "task-old",
+      conversationId: "conversation-old",
+      status: "succeeded",
+      entityVersion: 2
+    }
+  }, feed.captureConversationBinding());
+  assert.deepEqual(feed.tasks, []);
+
+  await feed.applyEvent({
+    eventId: "new-task-without-scope",
+    occurredAt: 3,
+    type: "task.updated",
+    payload: { taskId: "task-new", status: "succeeded", entityVersion: 2 }
+  });
+  assert.deepEqual([...feed.tasks].map((task: DesktopTask) => task.id), ["task-new"]);
+  assert.ok(taskRefreshes > nonTerminalTaskStatuses.length);
+});
+
+test("does not publish a late old conversation refresh after the same feed switches", async () => {
+  let releaseOldRefresh!: () => void;
+  const oldRefreshReady = new Promise<void>(resolve => { releaseOldRefresh = resolve; });
+  const appliedTaskIds: string[] = [];
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async conversationId => {
+      if (conversationId === "conversation-old") {
+        await oldRefreshReady;
+      }
+      return conversationId === "conversation-new"
+        ? [{ id: "task-new", status: "running" }]
+        : [{ id: "task-old", status: "running" }];
+    },
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+
+  const oldRefresh = refreshFeedIfCurrent(
+    feed,
+    () => feed,
+    tasks => appliedTaskIds.push(...tasks.map(task => task.id)),
+    "conversation-old");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  feed.selectConversation("conversation-new");
+  await refreshFeedIfCurrent(
+    feed,
+    () => feed,
+    tasks => appliedTaskIds.push(...tasks.map(task => task.id)),
+    "conversation-new");
+  releaseOldRefresh();
+  await oldRefresh;
+
+  assert.deepEqual(appliedTaskIds, ["task-new"]);
+  assert.deepEqual([...feed.tasks].map((task: DesktopTask) => task.id), ["task-new"]);
 });
 
 test("ignores an older task event after a newer event", async () => {
@@ -1106,7 +1204,12 @@ test("does not apply a stale watermark retry after switching conversations", asy
       eventId: `task-watermark-switch-${index}`,
       occurredAt: index,
       type: "task.updated",
-      payload: { taskId: `old-task-${index}`, status: "running", entityVersion: index }
+      payload: {
+        taskId: `old-task-${index}`,
+        conversationId: "old",
+        status: "running",
+        entityVersion: index
+      }
     });
   }
 

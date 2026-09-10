@@ -57,6 +57,26 @@ Initial offline verification on the resumption baseline:
   `secrets.json`. Filename/index checks confirm they are ignored and neither is
   tracked or staged; the corresponding example templates remain trackable.
   No credential content was read for this check.
+- The restricted-output checkpoint is local commit
+  `40ec81c2894474c4783cfd62f5bae6080c5ea6b7`; it is not a frozen live candidate.
+- Desktop normal quit now waits for nonce-bound renderer acknowledgement and
+  trusted bounded Main compensation; immutable terminal intents survive retries
+  for every confirmed session. Rotation is single-flight and keeps the production
+  50-minute default. Validated live controls operate the real SignalR connection,
+  and Main persists selected Conversation metadata before startup auto-connect.
+- Follow-up review closed the lifecycle findings for confirmed-but-unactivated
+  sessions, selection request versus connection binding, connection action state,
+  and Conversation-scoped task snapshots. Final independent local verification
+  passed Desktop unit tests 222/222 and shared Realtime-agent tests 13/13. The
+  built Electron renderer scenario passed with clean stderr, all owned processes
+  gone, and its fresh profile removed. Actual App coverage includes pending A
+  connection followed by manual B selection and a late A result, empty B task
+  state with global notifications preserved, failed B load preserving A, and
+  same-A reload. Further binding and terminal races are covered by unit contracts.
+  An earlier missing-observation renderer failure remains recorded without a
+  proven cause. These checks do not prove authenticated backend, SignalR/WebRTC,
+  or live acceptance behavior. Final independent Standards and Spec review found
+  no remaining P1/P2, including the actual App surface verification gap.
 - Locked .NET restore, tool restore, frozen pnpm install, and the pinned Codex
   schema/canonical checks passed. Node `24.19.0` and Codex `0.146.0` were obtained
   in a new tool-only directory and checked against their published/pinned hashes.
@@ -86,11 +106,16 @@ The user requested execution of the Phase 9B instructions in the ChatGPT convers
 Azure OpenAI Realtime and DeepSeek Responses configuration. This replaces the original
 official-OpenAI-only provider requirement. It does not turn missing live evidence into a pass.
 
-Provider credentials come from the API project's existing ASP.NET Core User Secrets.
-Only provider settings are selected for the isolated run; the daily database, local bearer,
-Desktop profile and Codex home are not reused. Environment overrides retain their existing
-precedence. Credential values and any value derived from a credential are excluded from
-reports and command output.
+The original Phase 9B run selected provider settings through ASP.NET Core User
+Secrets. For this resumption, the user identifies `appsettings.secrets.json` as
+the actual Azure OpenAI and DeepSeek key source. Its explicit location is still
+pending; filename-only checks found no such file in either Jarvis worktree.
+The existing loader supports an explicit JSON source and selects only provider
+settings. The resumed run must use the confirmed source; it must not silently
+substitute the historical default. The daily database, local bearer, Desktop
+profile and Codex home are not reused. Environment overrides retain their
+existing precedence. Credential values and any derived representations are
+excluded from reports and command output.
 
 | Component | Selected configuration | Acceptance boundary |
 | --- | --- | --- |

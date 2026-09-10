@@ -41,6 +41,7 @@ const workspaceSourcePlugin = {
 const taskId = "0198b0a1-0000-7000-8000-000000000201";
 const executionId = "0198b0a1-0000-7000-8000-000000000202";
 const conversationId = "0198b0a1-0000-7000-8000-000000000203";
+const replacementConversationId = "0198b0a1-0000-7000-8000-000000000214";
 const approvalId = "0198b0a1-0000-7000-8000-000000000204";
 const notificationId = "0198b0a1-0000-7000-8000-000000000205";
 const inputTaskId = "0198b0a1-0000-7000-8000-000000000206";
@@ -119,6 +120,13 @@ let notificationDeliveryDeferredEntered;
 let notificationDeliveryDeferredEnteredResolve;
 let notificationDeliveryDeferred;
 let notificationDeliveryDeferredResolve;
+let selectedConversationId = conversationId;
+let deferNextRealtimeClientSecret = false;
+let realtimeClientSecretDeferredEntered;
+let realtimeClientSecretDeferredEnteredResolve;
+let realtimeClientSecretDeferred;
+let realtimeClientSecretDeferredResolve;
+let failNextConversationLoad = false;
 
 function assertScenarioUserDataPath() {
   if (typeof scenarioUserDataPath !== "string") {
@@ -166,6 +174,28 @@ function armNotificationDeliveryDeferred() {
     notificationDeliveryDeferredResolve = resolve;
   });
   notificationDeliveryOutcomes.set(notificationIdTwo, "deferred");
+}
+
+function armRealtimeClientSecretDeferred() {
+  realtimeClientSecretDeferredEntered = new Promise(resolve => {
+    realtimeClientSecretDeferredEnteredResolve = resolve;
+  });
+  realtimeClientSecretDeferred = new Promise(resolve => {
+    realtimeClientSecretDeferredResolve = resolve;
+  });
+  deferNextRealtimeClientSecret = true;
+}
+
+async function waitForRealtimeClientSecretDeferred() {
+  if (!realtimeClientSecretDeferredEntered) {
+    throw new Error("The renderer scenario did not arm deferred Realtime secret delivery.");
+  }
+  await Promise.race([
+    realtimeClientSecretDeferredEntered,
+    wait(2_000).then(() => {
+      throw new Error("The renderer scenario did not enter deferred Realtime secret delivery.");
+    })
+  ]);
 }
 
 async function waitForNotificationDeliveryDeferred() {
@@ -285,6 +315,18 @@ const conversation = {
   messageCount: 2
 };
 
+const replacementConversation = {
+  id: replacementConversationId,
+  title: "Renderer scenario replacement",
+  messages: [],
+  messageCount: 0
+};
+
+const scenarioConversations = new Map([
+  [conversation.id, conversation],
+  [replacementConversation.id, replacementConversation]
+]);
+
 const tasks = [
   { id: taskId, status: "running", goal: "检查控制面板", execution: { id: executionId }, progressSummary: "正在收集状态" },
   {
@@ -304,6 +346,11 @@ const tasks = [
     }
   }
 ];
+
+const tasksByConversation = new Map([
+  [conversationId, tasks],
+  [replacementConversationId, []]
+]);
 
 const approvals = [
   {
@@ -365,7 +412,7 @@ const requiredControlSpecs = [
   { id: "header-notifications", selector: ".notification-button", container: "viewport" },
   { id: "header-connection", selector: ".connection-button", container: "viewport" },
   { id: "header-session-summary", selector: '.session-menu > summary[aria-label="会话选项"]', container: "viewport" },
-  { id: "header-session-new", selector: ".session-popover button", text: "新建", container: "viewport" },
+  { id: "header-session-new", selector: '[data-testid="phase9b-create-conversation"]', container: "viewport" },
   { id: "header-conversation-input", selector: '#conversation-id[aria-label="Conversation ID"]', container: "viewport" },
   { id: "header-conversation-load", selector: ".session-input-row button", text: "加载", container: "viewport" },
   { id: "realtime-persistence-retry", selector: ".header-actions .quiet-button", text: "重试保存", required: false, container: "viewport" },
@@ -426,9 +473,38 @@ function registerScenarioIpc() {
     status: "offline"
   }));
   registerHandler("backend:getConnectionState", () => ({ state: "connected", revision: 1 }));
-  registerHandler("backend:getConversation", () => conversation);
+  registerHandler("backend:getConversation", (_event, input) => {
+    const requestedConversationId = input?.conversationId;
+    if (failNextConversationLoad && requestedConversationId === replacementConversationId) {
+      failNextConversationLoad = false;
+      return scenarioIpcFailure("retryable", "backend_unavailable");
+    }
+    return scenarioConversations.get(requestedConversationId)
+      ?? scenarioIpcFailure("terminal", "not_found");
+  });
   registerHandler("backend:createConversation", () => conversation);
-  registerHandler("backend:getTasks", () => ({ items: tasks, nextCursor: null }));
+  registerHandler("conversationSelection:get", () => selectedConversationId
+    ? {
+      schemaVersion: 1,
+      conversationId: selectedConversationId,
+      updatedAt: "2026-09-10T00:00:00.000Z"
+    }
+    : null);
+  registerHandler("conversationSelection:set", (_event, input) => {
+    if (!scenarioConversations.has(input?.conversationId)) {
+      throw new Error("The renderer scenario received an unknown conversation id.");
+    }
+    selectedConversationId = input.conversationId;
+    return undefined;
+  });
+  registerHandler("conversationSelection:clear", () => {
+    selectedConversationId = undefined;
+    return undefined;
+  });
+  registerHandler("backend:getTasks", (_event, input) => ({
+    items: tasksByConversation.get(input?.conversationId) ?? [],
+    nextCursor: null
+  }));
   registerHandler("backend:getNotifications", () => ({ items: notifications }));
   registerHandler("backend:getApprovals", () => ({ items: approvals }));
   registerHandler("backend:getDiagnostics", () => {
@@ -553,8 +629,13 @@ function registerScenarioIpc() {
       expiresAtMs: Date.now() + 60_000
     };
   });
-  registerHandler("backend:createRealtimeClientSecret", () => {
+  registerHandler("backend:createRealtimeClientSecret", async () => {
     realtimeClientSecretRequests++;
+    if (deferNextRealtimeClientSecret) {
+      deferNextRealtimeClientSecret = false;
+      realtimeClientSecretDeferredEnteredResolve?.();
+      await realtimeClientSecretDeferred;
+    }
     return {
       realtimeSessionId: "0198b0a1-0000-7000-8000-000000000209",
       clientSecret: "scenario-client-secret",
@@ -667,6 +748,66 @@ async function waitForStableStartupConnection(window) {
     await wait(50);
   }
   throw new Error("The renderer startup Realtime connection did not reach a stable state.");
+}
+
+async function readPhase9bState(window) {
+  return evaluate(window, `(() => {
+    const read = selector => document.querySelector(selector)?.textContent?.trim() ?? null;
+    const readCount = selector => {
+      const value = read(selector);
+      return value !== null && /^\\d+$/.test(value) ? Number(value) : null;
+    };
+    const connect = document.querySelector('[data-testid="phase9b-connect-realtime"]');
+    const disconnect = document.querySelector('[data-testid="phase9b-disconnect-realtime"]');
+    const activeConnection = connect ?? disconnect;
+    return {
+      appStatus: read('[data-testid="phase9b-app-status"]'),
+      realtimeStatus: read('[data-testid="phase9b-realtime-status"]'),
+      conversationId: read('[data-testid="phase9b-conversation-id"]'),
+      taskCount: readCount('[data-testid="phase9b-task-count"]'),
+      notificationCount: readCount('[data-testid="phase9b-notification-count"]'),
+      connectionIntent: connect ? "connect" : disconnect ? "disconnect" : null,
+      connectionDisabled: activeConnection instanceof HTMLButtonElement
+        ? activeConnection.disabled
+        : null
+    };
+  })()`);
+}
+
+async function waitForPhase9bState(window, predicate, timeoutMessage) {
+  const deadline = Date.now() + 5_000;
+  let latest;
+  while (Date.now() < deadline) {
+    try {
+      latest = await readPhase9bState(window);
+    } catch {
+      latest = undefined;
+    }
+    if (latest && predicate(latest)) {
+      return latest;
+    }
+    await wait(40);
+  }
+  throw new Error(timeoutMessage);
+}
+
+async function setConversationFromScenarioSurface(window, nextConversationId) {
+  await evaluate(window, `(() => {
+    const menu = document.querySelector('[data-testid="phase9b-conversation-menu"]');
+    const details = menu?.parentElement;
+    if (details instanceof HTMLDetailsElement && !details.open) {
+      menu.click();
+    }
+    const input = document.querySelector('[data-testid="phase9b-conversation-input"]');
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, ${JSON.stringify(nextConversationId)});
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  await wait(20);
+  await evaluate(window, `document.querySelector('[data-testid="phase9b-load-conversation"]')?.click()`);
 }
 
 async function writeAtomicJson(path, value) {
@@ -982,6 +1123,94 @@ async function runScenario() {
     clientSecretRequests: realtimeClientSecretRequests,
     connection: startupConnection
   };
+  const initialSurfaceState = await readPhase9bState(window);
+  if (initialSurfaceState.realtimeStatus === "connected") {
+    await evaluate(window, `document.querySelector('[data-testid="phase9b-disconnect-realtime"]')?.click()`);
+    await waitForPhase9bState(
+      window,
+      state => state.connectionIntent === "connect" && state.connectionDisabled === false,
+      "The renderer did not expose a manual Realtime connect control after disconnect.");
+  }
+  const secretRequestsBeforeInterleaving = realtimeClientSecretRequests;
+  armRealtimeClientSecretDeferred();
+  await evaluate(window, `document.querySelector('[data-testid="phase9b-connect-realtime"]')?.click()`);
+  await waitForRealtimeClientSecretDeferred();
+  const pendingConversationState = await readPhase9bState(window);
+  await setConversationFromScenarioSurface(window, replacementConversationId);
+  const replacementConversationState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === replacementConversationId
+      && state.taskCount === 0
+      && state.notificationCount === 3,
+    "The renderer did not commit the replacement conversation feed state.");
+  if (!realtimeClientSecretDeferredResolve) {
+    throw new Error("The renderer scenario did not expose the deferred Realtime resolver.");
+  }
+  realtimeClientSecretDeferredResolve();
+  const staleConnectState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === replacementConversationId
+      && state.realtimeStatus === "disconnected"
+      && state.connectionIntent === "connect"
+      && state.connectionDisabled === false,
+    "The stale Realtime connection did not fail closed after the conversation switch.");
+
+  await setConversationFromScenarioSurface(window, conversationId);
+  const restoredConversationState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === conversationId && state.taskCount === 2,
+    "The renderer did not restore the original conversation task feed.");
+  failNextConversationLoad = true;
+  await setConversationFromScenarioSurface(window, replacementConversationId);
+  await wait(100);
+  const failedReplacementState = await readPhase9bState(window);
+  await setConversationFromScenarioSurface(window, conversationId);
+  await waitForPhase9bState(
+    window,
+    state => state.conversationId === conversationId && state.taskCount === 2,
+    "The renderer did not retain the original conversation after a failed switch.");
+  const sameConversationReloadState = await readPhase9bState(window);
+  const conversationInterleaving = {
+    secretRequestCount: realtimeClientSecretRequests - secretRequestsBeforeInterleaving,
+    pendingConversation: pendingConversationState.conversationId,
+    replacementConversation: replacementConversationState,
+    staleConnect: staleConnectState,
+    restoredConversation: restoredConversationState,
+    failedReplacement: {
+      conversationId: failedReplacementState.conversationId,
+      taskCount: failedReplacementState.taskCount,
+      notificationCount: failedReplacementState.notificationCount
+    },
+    sameConversationReload: {
+      conversationId: sameConversationReloadState.conversationId,
+      taskCount: sameConversationReloadState.taskCount,
+      realtimeStatus: sameConversationReloadState.realtimeStatus
+    },
+    failedSwitchPreservedOriginal: failedReplacementState.conversationId === conversationId
+      && failedReplacementState.taskCount === 2,
+    sameConversationBindingPreserved: sameConversationReloadState.conversationId === conversationId
+      && sameConversationReloadState.taskCount === 2
+  };
+  if (conversationInterleaving.secretRequestCount !== 1) {
+    throw new Error("The renderer interleaving did not issue one deferred secret request.");
+  }
+  if (conversationInterleaving.replacementConversation.conversationId !== replacementConversationId
+    || conversationInterleaving.replacementConversation.taskCount !== 0
+    || conversationInterleaving.replacementConversation.notificationCount !== 3) {
+    throw new Error("The renderer interleaving did not isolate replacement conversation feed state.");
+  }
+  if (conversationInterleaving.staleConnect.conversationId !== replacementConversationId
+    || conversationInterleaving.staleConnect.realtimeStatus !== "disconnected"
+    || conversationInterleaving.staleConnect.connectionIntent !== "connect"
+    || conversationInterleaving.staleConnect.connectionDisabled) {
+    throw new Error("The renderer interleaving did not fail closed for the stale connection.");
+  }
+  if (conversationInterleaving.restoredConversation.conversationId !== conversationId
+    || conversationInterleaving.restoredConversation.taskCount !== 2
+    || !conversationInterleaving.failedSwitchPreservedOriginal
+    || !conversationInterleaving.sameConversationBindingPreserved) {
+    throw new Error("The renderer interleaving did not preserve the original conversation binding.");
+  }
   const initialDeliveryFeedback = await readInitialNotificationDeliveryFeedback(window);
   const expectedInitialDeliveryFeedback = [
     {
@@ -1600,6 +1829,7 @@ async function runScenario() {
     ipcBridgeProbe,
     ipcRecovery,
     startupRealtime,
+    conversationInterleaving,
     dist: {
       canonical: canonicalDistProof,
       identity: "src/clients/desktop/dist",
@@ -1647,6 +1877,19 @@ async function runScenario() {
     || !startupRealtime.connection?.stable
     || startupRealtime.connection.disabled
     || startupRealtime.connection.status === "connecting"
+    || conversationInterleaving.secretRequestCount !== 1
+    || conversationInterleaving.pendingConversation !== conversationId
+    || conversationInterleaving.replacementConversation.conversationId !== replacementConversationId
+    || conversationInterleaving.replacementConversation.taskCount !== 0
+    || conversationInterleaving.replacementConversation.notificationCount !== 3
+    || conversationInterleaving.staleConnect.conversationId !== replacementConversationId
+    || conversationInterleaving.staleConnect.realtimeStatus !== "disconnected"
+    || conversationInterleaving.staleConnect.connectionIntent !== "connect"
+    || conversationInterleaving.staleConnect.connectionDisabled
+    || conversationInterleaving.restoredConversation.conversationId !== conversationId
+    || conversationInterleaving.restoredConversation.taskCount !== 2
+    || !conversationInterleaving.failedSwitchPreservedOriginal
+    || !conversationInterleaving.sameConversationBindingPreserved
     || !["connected", "degraded"].includes(realtimeRecoveryPersistence.failure.status)
     || realtimeRecoveryPersistence.failure.persistenceRetryReason !== "event-ingest"
     || realtimeRecoveryPersistence.failure.ingestCalls !== 1
@@ -1810,6 +2053,22 @@ runScenario()
     if (finished) {
       return;
     }
-    console.error(error instanceof Error ? error.message : error);
-    void finish(1);
+    const stack = error instanceof Error ? error.stack ?? "" : "";
+    const location = /renderer-scenario\.mjs:(\d+):(\d+)/.exec(stack);
+    const failureObservation = {
+      status: "failed",
+      observationAvailable: false,
+      failureReason: "SCENARIO_STEP_FAILED",
+      errorLocation: location
+        ? { line: Number(location[1]), column: Number(location[2]) }
+        : null
+    };
+    void (async () => {
+      if (scenarioOutput) {
+        await writeAtomicJson(scenarioOutput, failureObservation);
+      }
+      await finish(1);
+    })().catch(() => {
+      void finish(1);
+    });
   });

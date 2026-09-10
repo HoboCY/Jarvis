@@ -126,10 +126,10 @@ export function DesktopRealtimeRetryControls(
   return (
     <>
       {projectDesktopRealtimeRetryButtons(input).map(button => (
-        <button
-          aria-busy={button.busy}
-          aria-label={button.ariaLabel}
-          className="quiet-button"
+    <button
+      aria-busy={button.busy}
+      aria-label={button.ariaLabel}
+      className="quiet-button"
           data-realtime-recovery={button.key}
           disabled={button.disabled}
           key={button.key}
@@ -151,6 +151,9 @@ export function DesktopRealtimeConnectionControl(
     <button
       aria-busy={button.busy}
       className={`connection-button is-${input.status}`}
+      data-testid={button.intent === "connect"
+        ? "phase9b-connect-realtime"
+        : "phase9b-disconnect-realtime"}
       data-realtime-connection={button.intent}
       disabled={button.disabled}
       type="button"

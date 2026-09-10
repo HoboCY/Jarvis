@@ -273,6 +273,11 @@ export type DesktopFeedEvent = {
   payload: unknown;
 };
 
+export type DesktopTaskFeedConversationBinding = Readonly<{
+  conversationId: string | undefined;
+  epoch: number;
+}>;
+
 type EventVersion = {
   occurredAt: number;
   entityVersion?: number;
@@ -301,8 +306,17 @@ export async function refreshFeedIfCurrent(
   ) => void,
   conversationId?: string
 ): Promise<void> {
-  await feed.refresh(conversationId);
-  if (currentFeed() !== feed || feed.isDisposed) {
+  const binding = feed.captureConversationBinding();
+  if (binding.conversationId !== undefined && binding.conversationId !== conversationId) {
+    return;
+  }
+
+  await feed.refresh(
+    conversationId,
+    binding.conversationId === conversationId ? binding : undefined);
+  if (currentFeed() !== feed || feed.isDisposed
+    || (binding.conversationId === conversationId && !feed.isCurrentConversationBinding(binding))
+    || feed.currentConversationId !== conversationId) {
     return;
   }
 
@@ -389,6 +403,51 @@ export class DesktopTaskNotificationFeed {
     return this.disposed;
   }
 
+  public get currentConversationId(): string | undefined {
+    return this.lastConversationId;
+  }
+
+  public captureConversationBinding(): DesktopTaskFeedConversationBinding {
+    return {
+      conversationId: this.lastConversationId,
+      epoch: this.conversationGeneration
+    };
+  }
+
+  public isCurrentConversationBinding(
+    binding: DesktopTaskFeedConversationBinding
+  ): boolean {
+    return !this.disposed
+      && binding.epoch === this.conversationGeneration
+      && binding.conversationId === this.lastConversationId;
+  }
+
+  /**
+   * Changes the conversation owned by the task portion of the feed.  The
+   * notification portion is device wide and intentionally survives this
+   * transition.
+   */
+  public selectConversation(conversationId?: string): DesktopTaskFeedConversationBinding {
+    if (conversationId === this.lastConversationId) {
+      return this.captureConversationBinding();
+    }
+
+    this.conversationGeneration++;
+    this.lastConversationId = conversationId;
+    this.taskById.clear();
+    this.taskEventVersions.clear();
+    this.taskWatermarkRequiresRefresh = false;
+    return this.captureConversationBinding();
+  }
+
+  public hasTask(
+    taskId: string,
+    binding?: DesktopTaskFeedConversationBinding
+  ): boolean {
+    return (binding === undefined || this.isCurrentConversationBinding(binding))
+      && this.taskById.has(taskId);
+  }
+
   public dispose(): void {
     this.disposed = true;
     this.conversationGeneration++;
@@ -401,15 +460,22 @@ export class DesktopTaskNotificationFeed {
     retryWaiter?.();
   }
 
-  public async refresh(conversationId?: string): Promise<void> {
+  public async refresh(
+    conversationId?: string,
+    expectedBinding?: DesktopTaskFeedConversationBinding
+  ): Promise<void> {
     if (this.disposed) {
       return;
     }
 
-    if (conversationId !== this.lastConversationId) {
-      this.conversationGeneration++;
+    if (expectedBinding !== undefined) {
+      if (!this.isCurrentConversationBinding(expectedBinding)
+        || expectedBinding.conversationId !== conversationId) {
+        return;
+      }
+    } else if (conversationId !== this.lastConversationId) {
+      this.selectConversation(conversationId);
     }
-    this.lastConversationId = conversationId;
     const conversationGeneration = this.conversationGeneration;
     const refreshGeneration = ++this.refreshGeneration;
     const refreshRevision = this.revision;
@@ -524,7 +590,10 @@ export class DesktopTaskNotificationFeed {
     );
   }
 
-  public async applyEvent(event: DesktopFeedEvent): Promise<void> {
+  public async applyEvent(
+    event: DesktopFeedEvent,
+    expectedBinding?: DesktopTaskFeedConversationBinding
+  ): Promise<void> {
     const payload = record(event.payload);
     if (!payload) {
       return;
@@ -533,6 +602,19 @@ export class DesktopTaskNotificationFeed {
     if (event.type === "task.updated" || event.type === "task.eventAdded") {
       const id = stringValue(payload.taskId) ?? stringValue(payload.id);
       if (!id) {
+        return;
+      }
+      if (expectedBinding !== undefined && !this.isCurrentConversationBinding(expectedBinding)) {
+        return;
+      }
+      const eventConversationId = stringValue(payload.conversationId);
+      if (eventConversationId !== undefined && eventConversationId !== this.lastConversationId) {
+        return;
+      }
+      if (eventConversationId === undefined
+        && this.lastConversationId !== undefined
+        && !this.taskById.has(id)) {
+        await this.refreshAfterWatermarkFallback(this.lastConversationId);
         return;
       }
       if (this.taskWatermarkRequiresRefresh && !this.taskEventVersions.has(id)) {
@@ -693,7 +775,10 @@ export class DesktopTaskNotificationFeed {
       }
 
       try {
-        await this.refresh(conversationId);
+        await this.refresh(conversationId, {
+          conversationId,
+          epoch: conversationGeneration
+        });
         return;
       } catch (reason) {
         lastError = reason;
