@@ -91,8 +91,15 @@ a separate live artifact projection gap. Its real approval and persisted file/ma
 passed in `62bb130d-e1e6-4968-b0c8-36a506a4a07f`, but the completion Outbox event omitted
 artifact metadata. The fix projects only size/hash/content type, with no path or result
 text; database RED/GREEN and immediate Desktop projection/replay tests cover it.
-All failures remain in the report. H/G verification, final review/freeze and A–J remain
-pending; successful authentication stays retained throughout these fixes.
+All failures remain in the report. Fix `5d91b96608a158a723d6899841e74e5deb4c8c10`
+passed .NET 355/355, headless 297/297, offline E2E 152/152, static/security checks,
+actual macOS service publish, Desktop packaging and the built renderer gate.
+Run `a10b35b0-ad16-479d-ab78-46f9ed5edd77` then passed real H/G, immediate artifact
+display, idempotent repeat decisions, rejection of approval reuse for another
+pending request, automatic artifact restoration and normal quit. Its evidence is
+`LIVE_PARTIAL`, with four provider requests, two Realtime connections, two Codex
+tasks and no retry. Final independent review, candidate freeze, final authentication,
+full A–J and CI on that same final SHA remain pending. Authentication is retained.
 
 Path C proves bounded safe failure, not native resumption. The final I scenario must
 remain BLOCKED if neither reissue nor safe continuation is supported; a passing
