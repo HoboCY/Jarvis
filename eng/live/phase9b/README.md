@@ -34,7 +34,7 @@ The interactive runner is a long-lived JSONL process:
 ```sh
 PATH=/absolute/path/to/pinned/node/bin:$PATH \
 PHASE9B_CODEX_PATH=/absolute/path/to/pinned/codex \
-PHASE9B_CODEX_HOME=/absolute/path/to/isolated/login-home \
+PHASE9B_TARGETED_AUTH_METADATA=/absolute/path/to/private/targeted-login-metadata.json \
 PHASE9B_PROVIDER_CONFIG_FILE=/absolute/path/to/private/provider-source.json \
 PHASE9B_PROVIDER_PREFLIGHT_CALLS=2 \
 PHASE9B_API_PATH=/absolute/path/to/Jarvis.Api \
@@ -43,6 +43,15 @@ PHASE9B_DESKTOP_APP_PATH=/absolute/path/to/Jarvis.app \
 PHASE9B_SECURITY_REMEDIATION_STATUS=RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE \
 pnpm phase9b:live
 ```
+
+The current targeted run retains its independently verified authentication across
+probe and product failures. The metadata must have the private retention marker;
+do not also set `PHASE9B_CODEX_HOME`. Cleanup removes only each attempt's owned
+runtime resources. Login has no assistant-imposed waiting deadline. A final frozen
+A–J run may require one final new authentication under its separate contract.
+An explicit `PHASE9B_ROTATION_AFTER_MS` integer from 20000 through 120000 exercises
+automatic rotation through the existing validated live-profile policy. Omission
+keeps the production interval; ordinary Desktop launches receive no override.
 
 On macOS, set `PHASE9B_USE_LAUNCHD=1` to load the API and Device Node through
 two run-unique launchd labels. The harness writes owner-only plists and log
@@ -90,7 +99,11 @@ state ids are `phase9b-app-status`, `phase9b-realtime-status`,
 `phase9b-approval-count`, `phase9b-device-status`,
 `phase9b-codex-task-status`, `phase9b-user-input-status`,
 `phase9b-approval-status`, `phase9b-signalr-status`, and
-`phase9b-artifact-sha256`. The fixed action ids cover connect/disconnect
+`phase9b-artifact-sha256`. Cold-start state also includes the existing
+`phase9b-terminal-task-count`, `phase9b-terminal-task-id`,
+`phase9b-terminal-task-status`, `phase9b-artifact-count`, and
+`phase9b-artifact-restore-status` projections, with the same typed allowlist.
+The fixed action ids cover connect/disconnect
 Realtime, send fixture, pause/resume SignalR, load conversation, answer input,
 approve, deny, restart Device Node, and quit: `phase9b-connect-realtime`,
 `phase9b-disconnect-realtime`, `phase9b-send-fixture`,

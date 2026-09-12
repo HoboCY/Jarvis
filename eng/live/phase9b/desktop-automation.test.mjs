@@ -101,6 +101,25 @@ test("desktop automation rejects caller selectors, evaluation, scripts, and unkn
   assert.equal(calls, 0);
 });
 
+test("cold-start observations admit only bounded terminal identity and artifact restoration state", () => {
+  const output = validOutput({ states: [
+    { testId: DESKTOP_AUTOMATION_TEST_IDS.terminalTaskCount, value: 2 },
+    { testId: DESKTOP_AUTOMATION_TEST_IDS.terminalTaskId, value: randomUUID() },
+    { testId: DESKTOP_AUTOMATION_TEST_IDS.terminalTaskStatus, value: "failed" },
+    { testId: DESKTOP_AUTOMATION_TEST_IDS.artifactCount, value: 1 },
+    { testId: DESKTOP_AUTOMATION_TEST_IDS.artifactRestoreStatus, value: "complete" }
+  ] });
+  assert.doesNotThrow(() => sanitizeDesktopAutomationOutput(output));
+  for (const [testId, value] of [
+    [DESKTOP_AUTOMATION_TEST_IDS.terminalTaskCount, 1_000_000],
+    [DESKTOP_AUTOMATION_TEST_IDS.terminalTaskId, "private-task-text"],
+    [DESKTOP_AUTOMATION_TEST_IDS.artifactRestoreStatus, "private-error-message"]
+  ]) {
+    assert.throws(() => sanitizeDesktopAutomationOutput({ ...output, states: [{ testId, value }] }),
+      { code: "INVALID_AUTOMATION_OUTPUT" });
+  }
+});
+
 test("desktop automation output allows only bounded state types and rejects secret-shaped or private values", () => {
   assert.doesNotThrow(() => sanitizeDesktopAutomationOutput(validOutput()));
   for (const value of [

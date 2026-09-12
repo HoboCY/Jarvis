@@ -2163,6 +2163,77 @@ done
         }
     }
 
+    [Theory]
+    [InlineData(TaskUserInputStatusValue.Pending, false)]
+    [InlineData(TaskUserInputStatusValue.Answered, false)]
+    [InlineData(TaskUserInputStatusValue.Pending, true)]
+    public async System.Threading.Tasks.Task ReclaimedNativeInteractionFailsClosedBeforeLaunchingOrAnsweringAnUnseenRequest(
+        TaskUserInputStatusValue inputStatus,
+        bool cancelBeforeRecovery)
+    {
+        var root = Directory.CreateTempSubdirectory("jarvis-unresumable-input-");
+        try
+        {
+            var taskId = Guid.NewGuid();
+            var executionId = Guid.NewGuid();
+            var deviceId = Guid.NewGuid();
+            var controlPlane = new RecordingControlPlane
+            {
+                CancelWhenTaskRead = cancelBeforeRecovery,
+                UserInputAnswerAfterPolls = 1,
+                UserInputAnswers = new Dictionary<string, TaskUserInputAnswer>
+                {
+                    ["choice"] = new(["alpha"])
+                },
+                UserInputResponse = new DeviceTaskUserInputResponse(
+                    taskId, executionId, "99", "old-item", "old-thread", "old-turn",
+                    [new TaskUserInputQuestion("Choice", "choice", "Choose")], inputStatus)
+            };
+            var task = await controlPlane.GetTaskAsync(taskId, CancellationToken.None);
+            // The claim can predate an input request or its answer. Recovery
+            // must use the durable device projection before creating a runtime.
+            task = task with { PendingUserInput = null, Status = TaskStatusValue.Recovering };
+            var execution = new TaskExecutionResponse(
+                executionId, taskId, deviceId, WorkerKindValue.Codex, null,
+                "old-thread", "old-turn", TaskExecutionStatusValue.Recovering,
+                "{}", null, [], 1, null, 1, CodexTurnStartRequestedAtMs: 1);
+            var options = Options.Create(new DeviceNodeOptions
+            {
+                CodexBinaryPath = Path.Combine(root.FullName, "must-not-launch"),
+                CodexArguments = [],
+                CodexHome = CreateSecureDirectory(Path.Combine(root.FullName, "codex-home")),
+                MaxRestartAttempts = 3,
+                RestartDelayMs = 1,
+                Capabilities = new CapabilityEnvelopeOptions
+                {
+                    ReadFiles = true,
+                    AllowedRoots = [root.FullName]
+                }
+            });
+            var worker = new DeviceNodeWorker(options, controlPlane, NullLogger<DeviceNodeWorker>.Instance);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+            await worker.ExecuteClaimAsync(
+                new DeviceTaskClaimResponse(true, task, execution, "recovery-owner", 30_000,
+                    new CapabilityEnvelopeContract(ReadFiles: true, AllowedRoots: [root.FullName])),
+                Jarvis.Application.Devices.CapabilityPolicy.Create(options.Value.Capabilities.ToEnvelope()),
+                deadline.Token);
+
+            Assert.Equal(0, controlPlane.UserInputPollCount);
+            Assert.Equal(0, controlPlane.ResolveUserInputCalls);
+            Assert.DoesNotContain(controlPlane.Events, item =>
+                item.EventType is "codex.turn.starting" or "codex.turn.started" or "task.recovering" or "task.completed");
+            var terminal = Assert.Single(controlPlane.Events);
+            Assert.Equal(cancelBeforeRecovery ? "task.cancelled" : "task.failed", terminal.EventType);
+            Assert.Equal(cancelBeforeRecovery ? null : "CODEX_PENDING_INTERACTION_NOT_RESUMABLE", terminal.ErrorCode);
+            Assert.True(Directory.Exists(options.Value.CodexHome));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public void ApprovalResponsesUsePinnedEnumsAndNeverGrantOutsideTheCapabilityEnvelope()
     {
@@ -2357,7 +2428,7 @@ done
         public int FailTaskReads { get; set; }
         public TaskStatusValue LastTaskStatus { get; private set; } = TaskStatusValue.Running;
         public IReadOnlyDictionary<string, TaskUserInputAnswer>? UserInputAnswers { get; set; }
-        public DeviceTaskUserInputResponse? UserInputResponse { get; private set; }
+        public DeviceTaskUserInputResponse? UserInputResponse { get; set; }
         public int ResolveUserInputCalls { get; private set; }
 
         public System.Threading.Tasks.Task<DeviceHeartbeatResponse> HeartbeatAsync(DeviceHeartbeatRequest request, string idempotencyKey, CancellationToken cancellationToken) =>
@@ -2388,7 +2459,7 @@ done
                     UserInputResponse.ThreadId,
                     UserInputResponse.TurnId,
                     UserInputResponse.Questions,
-                    TaskUserInputStatusValue.Pending,
+                    UserInputResponse.Status,
                     UserInputResponse.ExpiresAtMs,
                     UserInputResponse.RequestIdIsString);
             return System.Threading.Tasks.Task.FromResult(new TaskResponse(

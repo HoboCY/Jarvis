@@ -6,7 +6,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { loadProviderConfig } from "./credentials.mjs";
 import { createBudgetTracker, withTimeout } from "./budgets.mjs";
-import { createRunIsolation, adoptExternalCodexHome, writePrivateJson } from "./isolation.mjs";
+import { createRunIsolation, adoptExternalCodexHome, assertSafeTempRoot, writePrivateJson } from "./isolation.mjs";
+import { verifyAuthMetadata } from "./codex-restart-probe.mjs";
 import { ProcessSupervisor } from "./process-supervisor.mjs";
 import { LaunchdSupervisor } from "./launchd-supervisor.mjs";
 import { runPreflight } from "./preflight.mjs";
@@ -108,6 +109,11 @@ export class InteractiveSession {
   #finished = false;
 
   constructor(options = {}) {
+    if (options.rotationAfterMs !== undefined
+      && (!Number.isSafeInteger(options.rotationAfterMs)
+        || options.rotationAfterMs < 20_000 || options.rotationAfterMs > 120_000)) {
+      throw safeError("INVALID_COMMAND", "Live rotation interval is invalid.");
+    }
     this.#options = options;
     this.#launchdMode = options.useLaunchd === true || options.launchdSupervisor !== undefined
       || options.launchdSupervisorFactory !== undefined;
@@ -200,7 +206,17 @@ export class InteractiveSession {
       this.#secretValues = collectSecretValues(this.#providerConfig, this.#isolation);
 
       await this.#writeNonceFixture();
-      if (options.externalCodexHome !== undefined) {
+      if (options.targetedAuthMetadataPath !== undefined) {
+        if (options.externalCodexHome !== undefined) {
+          throw safeError("UNSAFE_CODEX_HOME", "Authentication source is ambiguous.");
+        }
+        const authentication = await verifyAuthMetadata(options.targetedAuthMetadataPath);
+        if (authentication.reusableTargetedAuth !== true) {
+          throw safeError("UNSAFE_CODEX_HOME", "Targeted authentication retention is required.");
+        }
+        await assertSafeTempRoot(authentication.codexHome, { repositoryRoot: this.#isolation.root });
+        this.#isolation.runtimeEnvironment.CODEX_HOME = authentication.codexHome;
+      } else if (options.externalCodexHome !== undefined) {
         await adoptExternalCodexHome(options.externalCodexHome, this.#isolation, {
           allowedBinaryPath: options.codexPath ?? process.env.PHASE9B_CODEX_PATH
         });
@@ -422,6 +438,9 @@ export class InteractiveSession {
       JARVIS_PHASE9B_OWNER_MARKER: join(this.#isolation.root, ".phase9b-owner.json"),
       JARVIS_PHASE9B_ADMISSION_DESCRIPTOR: this.#privatePaths.admissionDescriptorPath,
       JARVIS_PHASE9B_REALTIME_CALL_URL: phase9bRealtimeCallUrl(provider.openAi.baseUrl),
+      ...(context.options.rotationAfterMs === undefined ? {} : {
+        JARVIS_PHASE9B_ROTATION_AFTER_MS: String(context.options.rotationAfterMs)
+      }),
       CODEX_HOME: context.runtimeEnvironment.CODEX_HOME,
       JARVIS_ALLOWED_ROOT: context.runtimeEnvironment.JARVIS_ALLOWED_ROOT
     };
@@ -763,7 +782,7 @@ export class InteractiveSession {
         Name: "Phase9B Desktop Device",
         Platform: "macos",
         WorkingDirectory: this.#isolation.directories.allowedRoot,
-        CodexHome: this.#isolation.directories.codexHome,
+        CodexHome: this.#isolation.runtimeEnvironment.CODEX_HOME,
         CodexBinaryPath: codexPath,
         CodexArguments: [
           "app-server",
@@ -1721,6 +1740,9 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === currentFile) {
     sessionOptions: {
       repositoryRoot: process.cwd(),
       userSecretsPath: process.env.PHASE9B_PROVIDER_CONFIG_FILE,
+      targetedAuthMetadataPath: process.env.PHASE9B_TARGETED_AUTH_METADATA,
+      rotationAfterMs: process.env.PHASE9B_ROTATION_AFTER_MS === undefined
+        ? undefined : Number(process.env.PHASE9B_ROTATION_AFTER_MS),
       codexPath: process.env.PHASE9B_CODEX_PATH,
       externalCodexHome: process.env.PHASE9B_CODEX_HOME ?? process.env.PHASE9B_ISOLATED_CODEX_HOME,
       apiBinaryPath: process.env.PHASE9B_API_PATH,

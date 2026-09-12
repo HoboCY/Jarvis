@@ -466,13 +466,17 @@ public sealed class EfDeviceStore(
             .Where(item => item.TaskId == taskId && item.DeviceId == deviceId)
             .OrderByDescending(item => item.StartedAtMs)
             .FirstOrDefaultAsync(cancellationToken);
-        var nowMs = Now();
+        // This device-only projection retains answered interaction identity for
+        // restart safety, without returning answers. Expired-but-unsettled input
+        // also cannot be replayed. The UI exposes only actionable pending input.
         var pendingUserInput = await db.TaskUserInputRequests.AsNoTracking()
             .Where(item => item.TaskId == taskId
-                && task.Status == DomainTaskStatus.WaitingForUserInput
+                && task.Status != DomainTaskStatus.Succeeded
+                && task.Status != DomainTaskStatus.Failed
+                && task.Status != DomainTaskStatus.Cancelled
                 && (execution == null || item.ExecutionId == execution.Id)
-                && item.Status == TaskUserInputRequestStatus.Pending
-                && (item.ExpiresAtMs == null || item.ExpiresAtMs > nowMs))
+                && (item.Status == TaskUserInputRequestStatus.Answered
+                    || item.Status == TaskUserInputRequestStatus.Pending))
             .OrderByDescending(item => item.CreatedAtMs)
             .FirstOrDefaultAsync(cancellationToken);
         return new(DeviceOperationStatus.Succeeded, ToTaskResponse(task, execution, pendingUserInput));
@@ -655,6 +659,7 @@ public sealed class EfDeviceStore(
                 request.ErrorMessage ?? "The Device Node execution failed.",
                 nowMs);
             execution.MarkFailed(request.PayloadJson ?? "{\"reason\":\"device_execution_failed\"}", nowMs);
+            await ClearFailedExecutionInputAsync(task, execution.Id, nowMs, cancellationToken).ConfigureAwait(false);
             AddTerminalNotification(task, "task.failed", NotificationSeverity.Error, "后台任务执行失败", request.ErrorMessage ?? "The Device Node execution failed.", nowMs);
         }
         else if (string.Equals(request.EventType, "task.cancelled", StringComparison.OrdinalIgnoreCase)
@@ -1295,9 +1300,52 @@ public sealed class EfDeviceStore(
             request.ThreadId,
             request.TurnId,
             questions,
-            TaskUserInputStatusValue.Pending,
+            request.Status == TaskUserInputRequestStatus.Answered
+                ? TaskUserInputStatusValue.Answered
+                : TaskUserInputStatusValue.Pending,
             request.ExpiresAtMs,
             request.RequestIdIsString);
+    }
+
+    private async System.Threading.Tasks.Task ClearFailedExecutionInputAsync(
+        DomainTask task,
+        Guid executionId,
+        long nowMs,
+        CancellationToken cancellationToken)
+    {
+        var pendingInputs = await db.TaskUserInputRequests
+            .Where(item => item.TaskId == task.Id && item.ExecutionId == executionId
+                && item.Status == TaskUserInputRequestStatus.Pending)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var input in pendingInputs)
+        {
+            input.Clear(nowMs);
+            var dedupKey = $"task:{task.Id:D}:user-input:{input.RequestId}";
+            var notification = await db.Notifications.SingleOrDefaultAsync(item =>
+                item.UserId == task.UserId && item.TaskId == task.Id
+                    && item.Type == "task.needsUserInput" && item.DedupKey == dedupKey,
+                cancellationToken).ConfigureAwait(false);
+            if (notification is null
+                || notification.Status is NotificationStatus.Actioned or NotificationStatus.Dismissed
+                || !notification.MarkActioned(nowMs))
+            {
+                continue;
+            }
+            AddOutbox("notification.updated", new
+            {
+                userId = task.UserId,
+                notificationId = notification.Id,
+                taskId = task.Id,
+                conversationId = task.ConversationId,
+                status = "actioned",
+                title = notification.Title,
+                body = notification.Body,
+                type = notification.Type,
+                dedupKey,
+                action = "userInputFailed",
+                entityVersion = notification.Version
+            }, nowMs);
+        }
     }
 
     private static string[] DeserializeList(string json)

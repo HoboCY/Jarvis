@@ -1985,6 +1985,7 @@ export function App() {
           <form className="composer" onSubmit={event => { event.preventDefault(); void sendTyped(); }}>
             <input
               aria-label="Typed message"
+              data-testid="phase9b-fixture-input"
               value={draft}
               onChange={event => setDraft(event.target.value)}
               placeholder="输入消息或按住说话…"

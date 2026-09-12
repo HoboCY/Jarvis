@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -320,6 +320,50 @@ test("prepare references the private provider source without copying keys into r
   }
 });
 
+test("targeted product cleanup retains authentication across failed startup and a new runtime", async () => {
+  const fixture = await createFixture();
+  const authRoot = await mkdtemp(join(await realpath(fixture.baseDirectory), "targeted-auth-fixture-"));
+  await chmod(authRoot, 0o700);
+  const codexHome = join(authRoot, "codex-home");
+  for (const name of ["codex-home", "home", "tmp", "allowed-root"]) {
+    await mkdir(join(authRoot, name), { mode: 0o700 });
+  }
+  await writeFile(join(codexHome, "auth.json"), "controlled-auth-fixture", { mode: 0o600 });
+  const metadataPath = join(authRoot, "login-metadata.json");
+  const runId = randomUUID();
+  await writeFile(metadataPath, JSON.stringify({ schemaVersion: 1, runId, codexHome,
+    runtimeRoot: authRoot, allowedRoot: join(authRoot, "allowed-root"), authenticationCompleted: true,
+    credentialStore: "file", previousRuntimeReused: false }), { mode: 0o600 });
+  await writeFile(join(authRoot, "targeted-auth-retention.json"), JSON.stringify({ schemaVersion: 1, runId,
+    purpose: "current-targeted-gap-run", codexHome, metadataPath, authenticationVerified: true,
+    retainOnProbeOrProductFailure: true, reuseUntilTargetedRunComplete: true }), { mode: 0o600 });
+  const roots = [];
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const session = createInteractiveSession({ repositoryRoot: fixture.repositoryRoot,
+        homeDirectory: fixture.homeDirectory, baseDirectory: fixture.baseDirectory,
+        desktopAppPath: fixture.desktopAppPath, providerConfig: fixtureProvider,
+        preflightResult: fixturePreflight(), targetedAuthMetadataPath: metadataPath,
+        codexPath: join(fixture.root, "missing-controlled-executable") });
+      try {
+        assert.equal((await session.prepare()).status, "PREPARED");
+        roots.push(session.isolation.root);
+        assert.equal(session.isolation.runtimeEnvironment.CODEX_HOME, codexHome);
+        const device = JSON.parse(await readFile(session.privatePaths.deviceConfigPath, "utf8"));
+        assert.equal(device.DeviceNode.CodexHome, codexHome);
+        await assert.rejects(session.start(), error => error.code === "CODEX_PATH_REQUIRED");
+      } finally {
+        await session.finish();
+      }
+      await assert.rejects(stat(roots.at(-1)), { code: "ENOENT" });
+      assert.equal((await stat(join(codexHome, "auth.json"))).isFile(), true);
+    }
+    assert.notEqual(roots[0], roots[1]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("runtime secret scanning includes only secrets written by this isolation", async () => {
   const fixture = await createFixture();
   const staleSafetyIdentifierSalt = "stale-user-profile-safety-salt";
@@ -581,6 +625,7 @@ test("launchd mode owns API and Device Node while Desktop remains foreground sup
   const processSupervisor = {
     start: async (_command, _args, options) => {
       assert.equal(options.env.JARVIS_PHASE9B_LIVE, "1");
+      assert.equal(options.env.JARVIS_PHASE9B_ROTATION_AFTER_MS, "45000");
       const handle = { isRunning: () => true, stop: async () => {} };
       desktopHandles.push(handle);
       return handle;
@@ -618,6 +663,7 @@ test("launchd mode owns API and Device Node while Desktop remains foreground sup
       preflightResult: fixturePreflight(),
       launchdSupervisor,
       processSupervisor,
+      rotationAfterMs: 45_000,
       codexPath: process.execPath,
       apiBinaryPath: process.execPath,
       deviceNodePath: process.execPath,
@@ -650,6 +696,15 @@ test("launchd mode owns API and Device Node while Desktop remains foreground sup
     globalThis.fetch = originalFetch;
     await session?.finish?.().catch(() => {});
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("live rotation override rejects invalid intervals before runtime preparation", () => {
+  for (const rotationAfterMs of [null, "45000", 19_999, 120_001, 45_000.5, NaN, Infinity]) {
+    assert.throws(() => createInteractiveSession({ rotationAfterMs }), { code: "INVALID_COMMAND" });
+  }
+  for (const rotationAfterMs of [undefined, 20_000, 120_000]) {
+    assert.doesNotThrow(() => createInteractiveSession({ rotationAfterMs }));
   }
 });
 

@@ -84,8 +84,8 @@ function readHistory(overrides = {}) {
   };
 }
 
-async function createAuthFixture(overrides = {}) {
-  const root = await mkdtemp(join(await realpath(tmpdir()), "protocol-auth-phase9b-"));
+async function createAuthFixture(overrides = {}, targeted = false) {
+  const root = await mkdtemp(join(await realpath(tmpdir()), targeted ? "targeted-auth-phase9b-" : "protocol-auth-phase9b-"));
   const paths = {
     codexHome: join(root, "codex-home"),
     allowedRoot: join(root, "allowed-root"),
@@ -110,6 +110,13 @@ async function createAuthFixture(overrides = {}) {
   const metadataPath = join(root, "login-metadata.json");
   await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
   await chmod(metadataPath, 0o600);
+  if (targeted) {
+    await writeFile(join(root, "targeted-auth-retention.json"), JSON.stringify({
+      schemaVersion: 1, runId: metadata.runId, purpose: "current-targeted-gap-run",
+      codexHome: paths.codexHome, metadataPath, authenticationVerified: true,
+      retainOnProbeOrProductFailure: true, reuseUntilTargetedRunComplete: true
+    }), { mode: 0o600 });
+  }
   return {
     root,
     paths,
@@ -1352,6 +1359,17 @@ test("server request registry accepts only the current logical request and consu
   );
 });
 
+test("native other-input flag preserves identity without allowing uncontrolled answers", () => {
+  const registry = new ServerRequestRegistry();
+  registry.beginProcess(1);
+  const params = userInputParams({ questions: [{ ...userInputParams().questions[0], isOther: true }] });
+  registry.observe({ processGeneration: 1, requestId: REQUEST_ID, method: CODEX_APP_SERVER_METHODS.requestUserInput, params });
+  assert.throws(() => registry.consumeAnswer({ processGeneration: 1, requestId: REQUEST_ID,
+    answers: { choice: { answers: ["controlled-unlisted-answer"] } } }), error => error.code === PROBE_ERROR_CODES.ANSWER_INVALID);
+  assert.deepEqual(registry.consumeAnswer({ processGeneration: 1, requestId: REQUEST_ID,
+    answers: { choice: { answers: ["alpha"] } } }), { answers: { choice: { answers: ["alpha"] } } });
+});
+
 test("registry refuses a resolved request before accepting its answer", () => {
   const registry = new ServerRequestRegistry();
   registry.beginProcess(1);
@@ -1556,7 +1574,7 @@ test("history classifier permits one read-only pending interaction and rejects u
   }), pending);
   assert.equal(questionsOnlyWithWrongId.safeContinuation, false);
 
-  const questionsOnlyWithFlag = classifyThreadHistory(readHistory({
+  const questionsOnlyWithSecretFlag = classifyThreadHistory(readHistory({
     thread: {
       id: THREAD_ID,
       turns: [{
@@ -1568,15 +1586,15 @@ test("history classifier permits one read-only pending interaction and rejects u
           status: "inProgress",
           tool: "request_user_input",
           arguments: {
-            questions: [{ ...userInputParams().questions[0], isOther: true }]
+            questions: [{ ...userInputParams().questions[0], isSecret: true }]
           }
         }]
       }]
     }
   }), pending);
-  assert.equal(questionsOnlyWithFlag.safeContinuation, false);
+  assert.equal(questionsOnlyWithSecretFlag.safeContinuation, false);
 
-  const envelopeWithFlag = classifyThreadHistory(readHistory({
+  const envelopeWithSecretFlag = classifyThreadHistory(readHistory({
     thread: {
       id: THREAD_ID,
       turns: [{
@@ -1588,13 +1606,13 @@ test("history classifier permits one read-only pending interaction and rejects u
           status: "inProgress",
           tool: "request_user_input",
           arguments: userInputParams({
-            questions: [{ ...userInputParams().questions[0], isOther: true }]
+            questions: [{ ...userInputParams().questions[0], isSecret: true }]
           })
         }]
       }]
     }
   }), pending);
-  assert.equal(envelopeWithFlag.safeContinuation, false);
+  assert.equal(envelopeWithSecretFlag.safeContinuation, false);
 
   for (const extraItem of [
     { type: "commandExecution", id: "prior-command" },
@@ -1897,6 +1915,35 @@ test("late current-process input after the bounded wait blocks the physical cont
   }
 });
 
+test("targeted authentication survives failed probes with distinct runtimes and one retained home", async () => {
+  const fixture = await createAuthFixture({}, true);
+  try {
+    const runs = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const fake = createFakeNative({ mode: "input-then-effectful" });
+      const output = await runCodexRestartProbe({
+        securityRemediationStatus: "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE", offlineGatesPassed: true,
+        codexPath: "/private/fake/codex", authMetadataPath: fixture.metadataPath, spawnProcess: fake.spawnProcess,
+        testSeam: { verifyAuthMetadata, claimProbeConsumption, verifyPinnedCodex: async () => true,
+          createProcessLifecycle: createCodeOwnedTestProcessLifecycle }
+      });
+      assert.equal(output.status, "FAIL");
+      assert.equal(output.errorCode, PROBE_ERROR_CODES.EFFECTFUL_REQUEST_REJECTED);
+      assert.equal(output.cleanup.processGroupGone, true);
+      assert.equal(fake.spawnCalls[0].options.env.CODEX_HOME, fixture.paths.codexHome);
+      assert.equal((await lstat(join(fixture.paths.codexHome, "auth.json"))).isFile(), true);
+      await assert.rejects(lstat(join(fixture.root, ".phase9b-targeted-probe-active")), { code: "ENOENT" });
+      runs.push({ runId: output.runId, cwd: fake.spawnCalls[0].options.cwd });
+    }
+    assert.notEqual(runs[0].runId, runs[1].runId);
+    assert.notEqual(runs[0].cwd, runs[1].cwd);
+    await rm(join(fixture.root, "targeted-auth-retention.json"));
+    await assert.rejects(verifyAuthMetadata(fixture.metadataPath), error => error.code === PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("auth metadata requires the helper-owned runtime layout", async () => {
   const fixture = await createAuthFixture();
   try {
@@ -2096,7 +2143,7 @@ test("public probe completes a controlled reissued request through the fake nati
     for (const initialization of initializations) {
       assert.equal(initialization.params.capabilities.experimentalApi, false);
       assert.equal(initialization.params.capabilities.requestAttestation, false);
-      assert.deepEqual(initialization.params.capabilities.optOutNotificationMethods, ["remoteControl/status/changed"]);
+      assert.deepEqual(initialization.params.capabilities.optOutNotificationMethods, ["remoteControl/status/changed", "mcpServer/startupStatus/updated", "thread/goal/cleared"]);
     }
     const starts = fake.children.flatMap((child) => child.writes)
       .filter((message) => message.method === CODEX_APP_SERVER_METHODS.threadStart
@@ -2432,7 +2479,8 @@ test("controlled task instruction contract names the fixed question and ordered 
     assert.equal(typeof turnStart?.params?.input?.[0]?.text, "string");
     assert.match(turnStart.params.input[0].text, /one question/);
     assert.match(turnStart.params.input[0].text, /id choice/);
-    assert.match(turnStart.params.input[0].text, /isOther false/);
+    assert.doesNotMatch(turnStart.params.input[0].text, /isOther false/);
+    assert.match(turnStart.params.input[0].text, /Omit autoResolutionMs/);
     assert.match(turnStart.params.input[0].text, /isSecret false/);
     assert.match(turnStart.params.input[0].text, /alpha.*beta/);
   } finally {

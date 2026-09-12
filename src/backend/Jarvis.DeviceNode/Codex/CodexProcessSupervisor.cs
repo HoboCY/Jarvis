@@ -97,6 +97,11 @@ public sealed class CodexProcessSupervisor
                 await NotifyAsync(onStateAsync, failed, cancellationToken).ConfigureAwait(false);
                 throw;
             }
+            catch (CodexPendingInteractionNotResumableException)
+            {
+                // Another restart cannot make an old process's request safe.
+                throw;
+            }
             catch (Exception exception)
             {
                 var nextAttempt = restartAttempt + 1;

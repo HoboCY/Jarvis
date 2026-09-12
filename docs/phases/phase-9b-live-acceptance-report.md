@@ -1,10 +1,46 @@
 # Phase 9B Result
 
-## Phase 9B-R 追加检查点 — 2026-09-12
+## Phase 9B-R 当前检查点 — 2026-09-12
 
 本节为最新进度；下方 2026-09-10 记录及原 live 结果保留为历史，不转移到本次候选。
 安全状态继续为 `RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE`。仍使用原分支和 Draft PR #8，
 未创建新 PR、未合并、未进入 Phase 9C；尚未冻结最终候选，也未推送本轮修复。
+
+- 按用户最新控制要求，新建独立认证目录并仅启动一次官方浏览器登录。登录期间
+  为 `AUTH_PENDING`，不设置助手侧固定截止、不自动清理目录。收到完成确认后，
+  静默官方状态检查通过，并将认证登记给当前 targeted gap run。认证 run ID 为
+  `7700aabe-9a40-41cb-8815-1b9b08f52d64`；不记录认证路径或材料。
+- 同一次登录已支持四次有界原生尝试；每次重新建立探针运行目录和 allowed root，
+  保留原 CODEX_HOME。运行器使用私有保留标记和独占锁防止并发消费，产品失败只
+  清理其所属 DB、profile、服务和运行目录。当前 targeted 完成前继续复用此认证；
+  最终冻结 A–J 如需全新环境，届时才单独创建最后一份认证。此要求覆盖此前
+  “每次探针消费并删除成功登录”的规则。
+- 前三次分别在 `mcpServer/startupStatus/updated`、原生 `isOther` 字段和
+  `thread/goal/cleared` 处被拒绝。对固定 schema 的两项无关通知显式 opt-out；
+  根据官方 0.146.0 实现接受原生 `isOther: true`，但回答仍严格限制在受控的
+  alpha/beta 选项，不允许自由回答。没有保留消息 payload。
+- 第四次 run `9810505e-2623-4ca5-b43f-cdac049f0d8e` 得到本次实验的 C 结果：
+  `BLOCKED_CODEX_PROTOCOL_LIMITATION` / `NOT_RESUMABLE` /
+  `CODEX_PENDING_INTERACTION_NOT_RESUMABLE`。任务 1、重启 1、回答 0、continuation 0；
+  原进程已收到一个真实输入请求，重启后同一 Thread 没有重新发出当前进程请求，
+  历史为 `UNCLASSIFIED_HISTORY`，不足以安全继续。恢复判定 9.752 秒，总计 20.33 秒。
+  进程组清理通过，认证保留。此结果不证明 Codex 在所有场景下均无法恢复。
+- 该探针源码 SHA 为 `ed2ae95d50819d6091b35526d7c7a7d5b5ce9b4ca42417c04b92ebb47c03e5b1`；
+  受控证据 SHA 为 `3ec248824c906d600882ee228b67e29e489d96cd5edd18a2c08cdfccdfc412df`。
+  两者均是非认证证据标识，不是凭据派生值。Azure/DeepSeek Provider 请求数为 0。
+- 产品路径实现保守 C 处理：新进程接管原执行的待输入或已回答记录时，启动 Codex
+  前以固定错误码结束任务，不重建旧 waiter、不回答 unseen request、不重放 turn。
+  Device 专用读取保留输入身份与状态，不返回答案；UI 仍只投影可操作的待输入。
+  失败事件在同一数据库事务中结束 Task/Execution、清除待输入并 action 通知。
+  取消仍优先，事件重放保持幂等。新增公开入口测试通过；Device Node 81/81、真实
+  数据库及 HTTP 恢复检查 3/3（包含过期但未清理的输入）、完整 live 合同 147/147 通过。
+  本次后端全量回归 355/355、headless 296/296、typecheck、lint、format 验证、
+  source/package/renderer secrets scan 与独立 15 个暂存源码路径检查均通过。
+- 影响限于跨进程恢复和失败任务的输入清理；没有 schema migration。回退应同时
+  停用旧输入恢复 live 场景，避免重新开放未证明安全的旧请求回答路径。新的服务包、
+  targeted Desktop 验证和最终 A–J 仍待后续门禁，不将上述离线结果当作 live 验收。
+
+## Phase 9B-R 此前检查点 — 2026-09-12（历史）
 
 - 三次全新独立环境的官方浏览器登录通过静默 `codex login status` 验证，仅检查认证
   文件元数据。中间超时登录由控制器清理；成功环境被探针消费后不再复用。
@@ -77,6 +113,14 @@
   错误码阻断启动，不回退到环境 Key。普通 API 启动保持既有配置方式。回退该加载器
   时必须同时停用依赖此路径的 live runner，不能恢复复制 Key 的旧执行方式。
   targeted 与最终 A–J 均未运行；最新原生失败仍待新的独立认证环境复验。
+- 提交 `f681109c0c24c7ba3bff850e10a663df5491e32e` 后启动的下一轮登录，
+  在用户回报完成时，私有控制器已返回 `AUTH_TIMEOUT` / `AUTH_RUNTIME_REMOVED`。
+  没有可验证的成功认证状态，也未运行后续探针。该 15 分钟截止由助手控制器设置，
+  不是本次已证明的官方认证限制。现已移除助手侧等待截止，由官方进程成功、失败
+  或用户取消结束；SIGTERM 进入所属进程与未完成目录的清理路径。
+  三项受控离线夹具覆盖超过原等待窗口后的成功、失败与取消，均通过；未启动真实
+  登录。用户提出重复登录问题后，没有再自动打开登录页面。原生、targeted、A–J
+  验收仍未完成，不能把浏览器中的完成提示替代本地认证状态验证。
 
 ## Phase 9B-R 历史执行记录 — 2026-09-10
 

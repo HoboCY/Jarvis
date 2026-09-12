@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
-import { open, chmod, lstat } from "node:fs/promises";
+import { open, chmod, lstat, mkdir, mkdtemp, unlink } from "node:fs/promises";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1158,7 +1158,7 @@ export async function verifyAuthMetadata(metadataPath, { expectedUid = process.g
   const authRoot = dirname(metadataPath);
   const rootStat = await lstat(authRoot).catch(() => null);
   if (rootStat === null || !rootStat.isDirectory() || !isOwnerOnly(rootStat, 0o700, expectedUid)
-      || !/^protocol-auth-[A-Za-z0-9_-]+$/.test(basename(authRoot))) {
+      || !/^(protocol|targeted)-auth-[A-Za-z0-9_-]+$/.test(basename(authRoot))) {
     throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
   }
   const metadata = await readPrivateJson(metadataPath, expectedUid, MAX_AUTH_METADATA_BYTES);
@@ -1204,7 +1204,20 @@ export async function verifyAuthMetadata(metadataPath, { expectedUid = process.g
     }
   }
   await assertPrivateFile(join(directories.codexHome, "auth.json"), expectedUid, 0o600, MAX_AUTH_FILE_BYTES);
+  const reusableTargetedAuth = basename(authRoot).startsWith("targeted-auth-");
+  if (reusableTargetedAuth) {
+    const retention = await readPrivateJson(join(authRoot, "targeted-auth-retention.json"), expectedUid, MAX_AUTH_METADATA_BYTES);
+    if (!isPlainObject(retention) || !sameKeys(retention, ["schemaVersion", "runId", "purpose", "codexHome", "metadataPath",
+      "authenticationVerified", "retainOnProbeOrProductFailure", "reuseUntilTargetedRunComplete"])
+      || retention.schemaVersion !== 1 || retention.runId !== metadata.runId
+      || retention.purpose !== "current-targeted-gap-run" || retention.codexHome !== directories.codexHome
+      || retention.metadataPath !== metadataPath || retention.authenticationVerified !== true
+      || retention.retainOnProbeOrProductFailure !== true || retention.reuseUntilTargetedRunComplete !== true) {
+      throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+    }
+  }
   return Object.freeze({
+    ...(reusableTargetedAuth ? { reusableTargetedAuth: true } : {}),
     runId: metadata.runId,
     codexHome: directories.codexHome,
     runtimeRoot: directories.runtimeRoot,
@@ -1213,6 +1226,39 @@ export async function verifyAuthMetadata(metadataPath, { expectedUid = process.g
     tmpDirectory: directories.tmpDirectory,
     metadataRoot: authRoot
   });
+}
+
+async function createTargetedProbeRuntime(auth) {
+  const lockPath = join(auth.metadataRoot, ".phase9b-targeted-probe-active");
+  let lock;
+  try {
+    lock = await open(lockPath, "wx", 0o600);
+  } catch {
+    throw probeError(PROBE_ERROR_CODES.PROBE_ALREADY_CONSUMED);
+  }
+  try {
+    const runtimeRoot = await mkdtemp(join(auth.metadataRoot, "probe-runtime-"));
+    await chmod(runtimeRoot, 0o700);
+    const paths = {
+      allowedRoot: join(runtimeRoot, "allowed-root"),
+      homeDirectory: join(runtimeRoot, "home"),
+      tmpDirectory: join(runtimeRoot, "tmp")
+    };
+    for (const path of Object.values(paths)) {
+      await mkdir(path, { mode: 0o700 });
+    }
+    return {
+      auth: { ...auth, ...paths, runtimeRoot, metadataRoot: runtimeRoot, runId: randomUUID() },
+      async release() {
+        await lock.close();
+        await unlink(lockPath);
+      }
+    };
+  } catch (error) {
+    await lock.close();
+    await unlink(lockPath);
+    throw error;
+  }
 }
 
 export async function verifyPinnedCodex(binaryPath, { expectedSha256 = PINNED_CODEX.sha256 } = {}) {
@@ -1307,6 +1353,7 @@ export async function runCodexRestartProbe({
   const deadline = createMonotonicDeadline(maxDurationMs, now);
   const finish = (patch = {}) => projectProbeOutput({ ...result, ...patch, cleanup: cleanupState });
   let auth;
+  let targetedRuntime;
   let firstServer;
   let secondServer;
   let finalPatch = {};
@@ -1322,6 +1369,10 @@ export async function runCodexRestartProbe({
     const seam = resolveProbeTestSeam(testSeam, spawnProcess);
     phase = "auth";
     auth = await seam.verifyAuthMetadata(authMetadataPath);
+    if (auth.reusableTargetedAuth === true) {
+      targetedRuntime = await createTargetedProbeRuntime(auth);
+      auth = targetedRuntime.auth;
+    }
     result.runId = auth.runId;
     phase = "claim";
     await seam.claimProbeConsumption(auth.metadataRoot, auth.runId);
@@ -1624,8 +1675,15 @@ export async function runCodexRestartProbe({
         errorCode: PROBE_ERROR_CODES.PROCESS_CLEANUP_FAILED
       };
     }
-    // The metadata root belongs to the caller's fresh-login helper. The probe
-    // only claims its one-time marker and never removes or copies that home.
+    if (targetedRuntime !== undefined && cleanupState.processGroupGone) {
+      try {
+        await targetedRuntime.release();
+      } catch {
+        finalPatch = { status: "FAIL", errorCode: PROBE_ERROR_CODES.PROCESS_CLEANUP_FAILED };
+      }
+    }
+    // Authentication stays in its caller-owned home. Targeted probes claim
+    // a fresh runtime marker for each attempt without copying credentials.
   }
   result.budget = boundary.budgetSnapshot();
   result.phase = phase;
@@ -1940,7 +1998,7 @@ class JsonRpcAppServer {
       capabilities: {
         experimentalApi: false,
         requestAttestation: false,
-        optOutNotificationMethods: ["remoteControl/status/changed"]
+        optOutNotificationMethods: ["remoteControl/status/changed", "mcpServer/startupStatus/updated", "thread/goal/cleared"]
       }
     }, deadline);
     await this.notify(CODEX_APP_SERVER_METHODS.initialized, null, deadline);
@@ -2405,7 +2463,7 @@ class JsonRpcAppServer {
   }
 }
 
-const CONTROLLED_TASK_PROMPT = "Before any other action, use the native request_user_input tool to ask exactly one question with id choice, isOther false, isSecret false, and exactly the options alpha followed by beta. Do not read files, write files, run commands, access the network, request approval, or call another tool. After the answer, finish with a short completion.";
+const CONTROLLED_TASK_PROMPT = "Before any other action, use the native request_user_input tool to ask exactly one question with id choice, isSecret false, and exactly the options alpha followed by beta. Use those exact labels without a Recommended suffix. Omit autoResolutionMs because an explicit answer is required. Do not read files, write files, run commands, access the network, request approval, or call another tool. After the answer, finish with a short completion.";
 const CONTROLLED_CONTINUATION_PROMPT = "Continue only the one pending user-input interaction for this task. Do not read or write files, run commands, access the network, request approval, or call another tool. After the bounded answer is available, finish.";
 
 function boundaryRequestIdentity(boundary) {
@@ -2979,7 +3037,9 @@ function assertControlledQuestions(questions) {
   if (!Array.isArray(questions) || questions.length !== 1 || questions[0]?.id !== "choice") {
     throw probeError(PROBE_ERROR_CODES.INVALID_REQUEST);
   }
-  if (questions[0].isOther !== false || questions[0].isSecret !== false) {
+  // Codex 0.146.0 forces isOther=true. Keep the native flag for identity
+  // matching; normalizeAnswers still limits this probe to the two fixed labels.
+  if (questions[0].isSecret !== false) {
     throw probeError(PROBE_ERROR_CODES.INVALID_REQUEST);
   }
   const labels = questions[0].options?.map((option) => option.label) ?? [];
@@ -3034,7 +3094,7 @@ function normalizeAnswers(answers, questions) {
     const allowedLabels = new Set((question.options ?? []).map((option) => option.label));
     const values = answer.answers.map((item) => {
       if (!boundedText(item, MAX_ANSWER_LENGTH) || containsSecretLike(item)
-          || (allowedLabels.size > 0 && !question.isOther && !allowedLabels.has(item))) {
+          || (allowedLabels.size > 0 && !allowedLabels.has(item))) {
         throw probeError(PROBE_ERROR_CODES.ANSWER_INVALID);
       }
       total += item.length;

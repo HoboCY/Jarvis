@@ -277,8 +277,20 @@ public sealed partial class DeviceNodeWorker(
             execution.CodexTurnId,
             execution.CodexTurnStartRequestedAtMs is not null);
         var supervisor = new CodexProcessSupervisor(
-            _ =>
+            async token =>
             {
+                // A JSON-RPC request belongs to the process that emitted it.
+                // Durable input (including an answer awaiting consumption) is
+                // insufficient evidence that a replacement process can accept it.
+                if (turnState.StartAttempted || turnState.TurnId is not null || task.PendingUserInput is not null)
+                {
+                    var durableTask = await controlPlane.GetTaskAsync(task.Id, token).ConfigureAwait(false);
+                    if (durableTask.PendingUserInput is not null)
+                    {
+                        throw new CodexPendingInteractionNotResumableException();
+                    }
+                }
+
                 var runtimeOptions = new CodexRuntimeOptions(nodeOptions.CodexBinaryPath, nodeOptions.CodexArguments)
                 {
                     Policy = effectivePolicy,
@@ -290,7 +302,7 @@ public sealed partial class DeviceNodeWorker(
                         ["CODEX_HOME"] = nodeOptions.CodexHome
                     })
                 };
-                return Task.FromResult<ICodexRuntime>(new CodexAppServerClient(runtimeOptions));
+                return new CodexAppServerClient(runtimeOptions);
             },
             new CodexSupervisorOptions(
                 Math.Max(0, nodeOptions.MaxRestartAttempts),
@@ -320,6 +332,20 @@ public sealed partial class DeviceNodeWorker(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (CodexPendingInteractionNotResumableException)
+        {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+            await AppendFailureAsync(
+                task,
+                execution,
+                leaseOwner,
+                "CODEX_PENDING_INTERACTION_NOT_RESUMABLE",
+                "The original Codex user-input interaction cannot be safely resumed after process restart.",
+                cancellationToken).ConfigureAwait(false);
         }
         catch (CodexTurnStartUncertainException exception)
         {
@@ -388,8 +414,8 @@ public sealed partial class DeviceNodeWorker(
         CapabilityPolicy policy,
         CancellationToken cancellationToken)
     {
-        // A restarted app-server must reconstruct pending input from the
-        // Control Plane claim, never from runtime memory or the old process.
+        // Re-read after initialization to close the race with a late durable
+        // input write from the previous process. Never reconstruct its waiter.
         var durableTask = await controlPlane.GetTaskAsync(claimedTask.Id, cancellationToken).ConfigureAwait(false);
         var durableExecution = durableTask.Execution is { Id: var executionId } execution
             && executionId == claimedExecution.Id
@@ -408,6 +434,11 @@ public sealed partial class DeviceNodeWorker(
             // process exit) is already durable. Do not let the supervisor
             // restart boundary create another turn for that terminal outcome.
             return "The durable Codex task is already terminal.";
+        }
+
+        if (durableTask.PendingUserInput is not null)
+        {
+            throw new CodexPendingInteractionNotResumableException();
         }
 
         return await ExecuteTurnAsync(
@@ -492,19 +523,9 @@ public sealed partial class DeviceNodeWorker(
             () => cancellationRequested = true,
             turnCancellation);
         var progressNumber = 0;
-        var pendingUserInputRequestId = task.PendingUserInput?.RequestId;
-        var pendingUserInputRequestIdIsString = task.PendingUserInput?.RequestIdIsString ?? true;
+        string? pendingUserInputRequestId = null;
+        var pendingUserInputRequestIdIsString = true;
         Task<DeviceUserInputResolution?>? userInputTask = null;
-        if (task.PendingUserInput is not null)
-        {
-            userInputTask = userInputWaiter.WaitAsync(
-                task.Id,
-                execution.Id,
-                task.PendingUserInput.RequestId,
-                pendingUserInputRequestIdIsString,
-                leaseOwner,
-                turnCancellation.Token);
-        }
 
         await using var runtimeEvents = runtime.ReadEventsAsync(turnCancellation.Token).GetAsyncEnumerator(turnCancellation.Token);
         Task<bool>? nextRuntimeEvent = null;
@@ -2231,6 +2252,9 @@ internal sealed class ActiveTurnState(string? threadId, string? turnId, bool sta
     public string? TurnId { get; set; } = turnId;
     public bool StartAttempted { get; set; } = startAttempted;
 }
+
+internal sealed class CodexPendingInteractionNotResumableException() : Exception(
+    "CODEX_PENDING_INTERACTION_NOT_RESUMABLE");
 
 public sealed class CodexTurnStartUncertainException(string threadId, Exception innerException) : Exception(
     $"Codex turn/start outcome is uncertain for thread '{threadId}'; refusing to replay the turn.", innerException)

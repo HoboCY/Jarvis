@@ -25,7 +25,7 @@ Execution order:
 5. Only after the offline gates pass, execute a new isolated targeted gap run,
    freeze the candidate, and run the complete A–J acceptance from that exact SHA.
 
-The 2026-09-12 checkpoint has verified independent browser authentication and
+An earlier 2026-09-12 checkpoint verified independent browser authentication and
 attempted the pinned native probe three times. The first two stopped before `turn/start`:
 the first failed during initialization because CLI dotted permission keys were
 quoted; the second rejected `remoteControl/status/changed` during thread startup.
@@ -49,8 +49,33 @@ probe transport and pinned binary passed initialization, thread creation, exact
 permission-profile ID confirmation, and cleanup without starting a Turn. This
 is not behavioral proof of every filesystem/network rule; that remains a native
 acceptance gap. The full
-live-harness contracts pass 142/142. A fresh authenticated recovery probe remains
-required. Targeted and final A–J runs have not started.
+live-harness contracts passed 142/142 at that checkpoint.
+
+The latest user instruction replaces consumption/deletion of successful logins:
+one new independently authenticated CODEX_HOME is retained throughout the current
+targeted gap run. Browser login has no assistant-imposed deadline. AUTH_PENDING
+does not trigger cleanup. Cleanup is permitted only after explicit cancellation,
+clear login failure, or invalid authentication. Protocol/product failure may
+rebuild owned DB, Desktop profile, allowed root, services, and evidence, but must
+preserve successful authentication. The current authentication was verified with
+silent official login status and assigned to targeted run
+`7700aabe-9a40-41cb-8815-1b9b08f52d64`.
+
+Four bounded native attempts used that same authentication. After resolving
+two unrelated notification opt-outs and the pinned native `isOther` shape,
+run `9810505e-2623-4ca5-b43f-cdac049f0d8e` reached a real pending input and one
+restart. It returned C (`CODEX_PENDING_INTERACTION_NOT_RESUMABLE`) in 9.752 seconds
+of recovery: the same Thread did not reissue a current-process input request and
+history was unclassified. Answers and continuations remained zero; owned processes
+were cleaned up and authentication retained. This bounded result is not a claim
+that all Codex recovery is unsupported. Controlled answers remain alpha/beta only.
+
+Product recovery now refuses old-process input before another Codex launch,
+including an answer already committed to the original interaction. Failure ends
+Task/Execution and clears pending input/notification in one transaction. There is
+no automatic replay or old waiter. Device Node tests pass 81/81 and database/HTTP
+recovery tests pass 3/3, including expired-but-unsettled input. Actual Desktop
+targeted and final A–J runs remain pending.
 
 The interactive runner now requires the explicit private Provider source and
 disables ambient Provider overrides. Runtime configuration contains a source
@@ -63,9 +88,18 @@ The designated Provider fields were then selected in trusted memory: policy and
 required-key presence checks passed with only statuses and booleans emitted.
 No credential contents or derived values were retained; no Provider call occurred.
 
-Every new live run requires a fresh CODEX_HOME, Desktop profile, database, bearer,
-device identity, allowed root, owner marker, launchd labels, and run ID. Prior
-runtime resources and logins must not be reused. Automation output remains limited
+The next login attempt after `f681109` ended in the private controller's
+`AUTH_TIMEOUT` and runtime removal before a local success could be verified.
+The controller's artificial 15-minute human-interaction deadline has now been
+removed; official process completion/expiry or explicit cancellation ends the
+wait. Offline fixtures passed delayed success, failure, and cancellation checks.
+This is a controller correction, not proof about the official OAuth lifetime.
+This historical attempt was superseded by the single retained login described above.
+
+Each targeted attempt creates a fresh Desktop profile, database, bearer, device
+identity, allowed root, owner marker, launchd labels, and run ID, while reusing the
+current verified targeted authentication. Only the final frozen A–J run may require
+one final fresh CODEX_HOME under the complete-run contract. Automation output remains limited
 to approved state fields, enums, counts, UUIDs, booleans, bounded error codes, and
 SHAs; OAuth URLs, tokens, credentials, private text, generic DOM/UI dumps, full
 accessibility trees, and unrestricted screenshots remain prohibited.
@@ -291,13 +325,13 @@ official-OpenAI-only provider requirement. It does not turn missing live evidenc
 
 The user has now supplied the exact ASP.NET Core User Secrets source privately
 in this task. Only the Azure OpenAI and DeepSeek fields needed by Phase 9B may be
-selected. No provider-source content has been read in this resumption. The source
+selected. Required fields have been selected privately as described above. The source
 must not be replaced by a fallback or ambient environment values. Credential
 contents must not be copied, summarized, hashed, logged, committed, or included in
-arguments or evidence. The current interactive harness still materializes provider
-keys in temporary production JSON; that path must be replaced and verified before
-any provider configuration is loaded for a new live run. The daily database,
-local bearer, Desktop profile, and Codex home are not reused.
+arguments or evidence. The interactive harness now supplies only a source pointer;
+the API selects the needed keys into memory without copying them into runtime JSON.
+The database, local bearer, and Desktop profile are rebuilt per attempt. Current
+targeted authentication follows the user's retention rule above.
 
 | Component | Selected configuration | Acceptance boundary |
 | --- | --- | --- |
