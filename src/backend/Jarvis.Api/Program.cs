@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Security.Claims;
 using Jarvis.Api.Authentication;
+using Jarvis.Api.Configuration;
 using Jarvis.Api.Conversations;
 using Jarvis.Api.Approvals;
 using Jarvis.Api.Devices;
@@ -25,6 +26,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.OpenApi;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddProviderKeySource();
 
 builder.Logging.ClearProviders();
 builder.Logging.AddJarvisConsole(builder.Configuration);

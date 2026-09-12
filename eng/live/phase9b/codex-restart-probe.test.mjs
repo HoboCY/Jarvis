@@ -1205,6 +1205,81 @@ test("probe output is a strict projection with bounded values and no external id
   );
 });
 
+test("rejected protocol diagnostics expose only fixed methods and never private input", async () => {
+  for (const [message, expected, errorCode] of [
+    [{ method: "thread/settings/updated", params: { private: "controlled-private-material" } }, { kind: "notification", method: "thread/settings/updated" }, PROBE_ERROR_CODES.UNSUPPORTED_REQUEST],
+    [{ method: "controlled-private-material", params: {} }, { kind: "notification", method: "UNKNOWN" }, PROBE_ERROR_CODES.UNSUPPORTED_REQUEST],
+    [{ id: 19, method: "attestation/generate", params: { private: "controlled-private-material" } }, { kind: "serverRequest", method: "attestation/generate" }, PROBE_ERROR_CODES.UNSUPPORTED_REQUEST],
+    [{ id: 20, method: "item/commandExecution/requestApproval", params: { private: "controlled-private-material" } }, { kind: "serverRequest", method: "item/commandExecution/requestApproval" }, PROBE_ERROR_CODES.EFFECTFUL_REQUEST_REJECTED]
+  ]) {
+    const { child, server } = await createProtocolServer();
+    try {
+      child.emitJson(message);
+      await assert.rejects(server.request(CODEX_APP_SERVER_METHODS.initialize, {}), error => error.code === errorCode);
+      assert.deepEqual(server.rejectedMessage, expected);
+      const output = projectProbeOutput({ schemaVersion: 1, status: "FAIL", rejectedMessage: server.rejectedMessage });
+      assert.equal(JSON.stringify(output).includes("controlled-private-material"), false);
+    } finally {
+      await server.stop();
+    }
+  }
+  for (const rejectedMessage of [
+    null,
+    "controlled-private-material",
+    { kind: "notification", method: "controlled-private-material" },
+    { kind: "private", method: "UNKNOWN" },
+    { kind: "notification", method: "UNKNOWN", params: "controlled-private-material" }
+  ]) {
+    assert.throws(() => projectProbeOutput({ schemaVersion: 1, status: "FAIL", rejectedMessage }),
+      error => error.code === PROBE_ERROR_CODES.OUTPUT_REJECTED);
+  }
+  assert.throws(() => projectProbeOutput({ schemaVersion: 1, status: "PASS", rejectedMessage: { kind: "notification", method: "UNKNOWN" } }),
+    error => error.code === PROBE_ERROR_CODES.OUTPUT_REJECTED);
+});
+
+test("public failed probe retains the bounded rejected-message diagnostic after cleanup", async () => {
+  const capture = {};
+  const output = await runPublicFakeProbe("reissued", {
+    capture,
+    onTurnStartResponse: ({ generation }) => {
+      if (generation === 1) {
+        capture.fake.children[0].emitJson({
+          method: "thread/settings/updated",
+          params: { private: "controlled-private-material" }
+        });
+      }
+    }
+  });
+  assert.equal(output.status, "FAIL");
+  assert.equal(output.errorCode, PROBE_ERROR_CODES.UNSUPPORTED_REQUEST);
+  assert.deepEqual(output.rejectedMessage, { kind: "notification", method: "thread/settings/updated" });
+  assert.equal(output.restartCount, 0);
+  assert.equal(output.answerCount, 0);
+  assert.equal(output.continuationCount, 0);
+  assert.equal(output.cleanup.completed, true);
+  assert.equal(output.cleanup.processGroupGone, true);
+  assert.equal(JSON.stringify(output).includes("controlled-private-material"), false);
+});
+
+test("public failed continuation retains the second process rejection after cleanup", async () => {
+  const capture = {};
+  const output = await runPublicFakeProbe("continuation", {
+    capture,
+    onTurnStartResponse: ({ generation }) => {
+      if (generation === 2) {
+        capture.fake.children[1].emitJson({ method: "thread/settings/updated", params: { private: "controlled-private-material" } });
+      }
+    }
+  });
+  assert.equal(output.status, "FAIL");
+  assert.equal(output.errorCode, PROBE_ERROR_CODES.UNSUPPORTED_REQUEST);
+  assert.deepEqual(output.rejectedMessage, { kind: "notification", method: "thread/settings/updated" });
+  assert.equal(output.restartCount, 1);
+  assert.equal(output.cleanup.completed, true);
+  assert.equal(output.cleanup.processGroupGone, true);
+  assert.equal(JSON.stringify(output).includes("controlled-private-material"), false);
+});
+
 test("server request registry accepts only the current logical request and consumes one answer", () => {
   const registry = new ServerRequestRegistry();
   registry.beginProcess(1);

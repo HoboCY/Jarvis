@@ -22,6 +22,7 @@ export async function runPreflight({
   repositoryRoot = process.cwd(),
   homeDirectory = homedir(),
   env = process.env,
+  providerEnvironment = env,
   versionsPath = join(repositoryRoot, "eng", "versions.json"),
   userSecretsPath,
   codexPath = env.PHASE9B_CODEX_PATH,
@@ -62,7 +63,7 @@ export async function runPreflight({
   const credentialResult = await loadProviderConfig({
     repositoryRoot,
     homeDirectory,
-    env,
+    env: providerEnvironment,
     userSecretsPath
   });
   checks.credentials = {

@@ -89,6 +89,91 @@ const HISTORY_STATUS_VALUES = new Set(["inProgress", "completed", "failed", "int
 const NATIVE_TURN_STATUS_VALUES = new Set(["inProgress", "completed", "failed", "interrupted"]);
 const INTERNAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+// Fixed 0.146.0 schema names only; never serialize arbitrary incoming method text.
+const PROTOCOL_DIAGNOSTIC_METHODS = new Set([
+  "UNKNOWN",
+  "account/chatgptAuthTokens/refresh",
+  "account/login/completed",
+  "account/rateLimits/updated",
+  "account/updated",
+  "app/list/updated",
+  "applyPatchApproval",
+  "attestation/generate",
+  "command/exec/outputDelta",
+  "configWarning",
+  "deprecationNotice",
+  "error",
+  "execCommandApproval",
+  "externalAgentConfig/import/completed",
+  "externalAgentConfig/import/progress",
+  "fs/changed",
+  "fuzzyFileSearch/sessionCompleted",
+  "fuzzyFileSearch/sessionUpdated",
+  "guardianWarning",
+  "hook/completed",
+  "hook/started",
+  "item/agentMessage/delta",
+  "item/autoApprovalReview/completed",
+  "item/autoApprovalReview/started",
+  "item/commandExecution/outputDelta",
+  "item/commandExecution/requestApproval",
+  "item/commandExecution/terminalInteraction",
+  "item/completed",
+  "item/fileChange/outputDelta",
+  "item/fileChange/patchUpdated",
+  "item/fileChange/requestApproval",
+  "item/mcpToolCall/progress",
+  "item/permissions/requestApproval",
+  "item/plan/delta",
+  "item/reasoning/summaryPartAdded",
+  "item/reasoning/summaryTextDelta",
+  "item/reasoning/textDelta",
+  "item/started",
+  "item/tool/call",
+  "item/tool/requestUserInput",
+  "mcpServer/elicitation/request",
+  "mcpServer/oauthLogin/completed",
+  "mcpServer/startupStatus/updated",
+  "model/rerouted",
+  "model/safetyBuffering/updated",
+  "model/verification",
+  "process/exited",
+  "process/outputDelta",
+  "remoteControl/status/changed",
+  "serverRequest/resolved",
+  "skills/changed",
+  "thread/archived",
+  "thread/closed",
+  "thread/compacted",
+  "thread/deleted",
+  "thread/environment/connected",
+  "thread/environment/disconnected",
+  "thread/goal/cleared",
+  "thread/goal/updated",
+  "thread/name/updated",
+  "thread/realtime/closed",
+  "thread/realtime/error",
+  "thread/realtime/itemAdded",
+  "thread/realtime/outputAudio/delta",
+  "thread/realtime/sdp",
+  "thread/realtime/started",
+  "thread/realtime/transcript/delta",
+  "thread/realtime/transcript/done",
+  "thread/settings/updated",
+  "thread/started",
+  "thread/status/changed",
+  "thread/tokenUsage/updated",
+  "thread/unarchived",
+  "turn/completed",
+  "turn/diff/updated",
+  "turn/moderationMetadata",
+  "turn/plan/updated",
+  "turn/started",
+  "warning",
+  "windows/worldWritableWarning",
+  "windowsSandbox/setupCompleted"
+]);
+const PROTOCOL_MESSAGE_KINDS = new Set(["notification", "serverRequest"]);
 const MAX_COUNT = 64;
 const MAX_QUESTIONS = 3;
 const MAX_OPTIONS = 20;
@@ -186,6 +271,7 @@ export function projectProbeOutput(value) {
     "phase",
     "mode",
     "errorCode",
+    "rejectedMessage",
     "runId",
     "taskCount",
     "restartCount",
@@ -244,6 +330,17 @@ export function projectProbeOutput(value) {
       assertEnum(value.errorCode, ERROR_VALUES);
     }
     output.errorCode = value.errorCode;
+  }
+  if (value.rejectedMessage !== undefined) {
+    if (value.status === "PASS") {
+      throw probeError(PROBE_ERROR_CODES.OUTPUT_REJECTED);
+    }
+    const rejected = value.rejectedMessage;
+    assertPlainObject(rejected, PROBE_ERROR_CODES.OUTPUT_REJECTED);
+    assertExactKeys(rejected, ["kind", "method"], [], PROBE_ERROR_CODES.OUTPUT_REJECTED);
+    assertEnum(rejected.kind, PROTOCOL_MESSAGE_KINDS);
+    assertEnum(rejected.method, PROTOCOL_DIAGNOSTIC_METHODS);
+    output.rejectedMessage = { kind: rejected.kind, method: rejected.method };
   }
   if (value.runId !== undefined) {
     assertInternalUuid(value.runId);
@@ -1512,6 +1609,10 @@ export async function runCodexRestartProbe({
     if (firstStopResult === undefined) {
       firstStopResult = await stopServerSafely(firstServer);
     }
+    const rejectedMessage = secondServer?.rejectedMessage ?? firstServer?.rejectedMessage;
+    if (rejectedMessage !== undefined) {
+      result.rejectedMessage = rejectedMessage;
+    }
     const stopResults = [firstStopResult, secondStopResult].filter(Boolean);
     cleanupState.completed = stopResults.every((stop) => stop.completed);
     cleanupState.processGroupGone = stopResults.every((stop) => stop.processGroupGone);
@@ -1787,6 +1888,7 @@ class JsonRpcAppServer {
   #stopping = false;
   #closePromise;
   #fatalError;
+  #rejectedMessage;
   #stdoutObserved = false;
   #stderrObserved = false;
   #stdoutBytes = 0;
@@ -1815,6 +1917,17 @@ class JsonRpcAppServer {
     if (signal?.aborted) {
       this.#abortHandler();
     }
+  }
+
+  get rejectedMessage() {
+    return this.#rejectedMessage === undefined ? undefined : { ...this.#rejectedMessage };
+  }
+
+  #rememberRejectedMessage(kind, method) {
+    this.#rejectedMessage ??= {
+      kind,
+      method: PROTOCOL_DIAGNOSTIC_METHODS.has(method) ? method : "UNKNOWN"
+    };
   }
 
   async initialize(deadline = this.#deadline) {
@@ -2123,6 +2236,7 @@ class JsonRpcAppServer {
     }
     if (hasId && typeof value.method === "string" && Object.hasOwn(value, "params")) {
       if (value.method !== CODEX_APP_SERVER_METHODS.requestUserInput) {
+        this.#rememberRejectedMessage("serverRequest", value.method);
         throw probeError(EFFECTFUL_NOTIFICATION_PREFIXES.some((prefix) => value.method.startsWith(prefix))
           ? PROBE_ERROR_CODES.EFFECTFUL_REQUEST_REJECTED
           : PROBE_ERROR_CODES.UNSUPPORTED_REQUEST);
@@ -2147,11 +2261,17 @@ class JsonRpcAppServer {
       return;
     }
     if (typeof value.method === "string") {
-      const notification = parseNotification(
-        value.method,
-        value.params,
-        this.#serverRequests.at(-1)?.params
-      );
+      let notification;
+      try {
+        notification = parseNotification(
+          value.method,
+          value.params,
+          this.#serverRequests.at(-1)?.params
+        );
+      } catch (error) {
+        this.#rememberRejectedMessage("notification", value.method);
+        throw error;
+      }
       if (notification.method === CODEX_APP_SERVER_METHODS.serverRequestResolved) {
         const request = this.#serverRequests.find((candidate) =>
           candidate.key === protocolIdKey(notification.requestId));

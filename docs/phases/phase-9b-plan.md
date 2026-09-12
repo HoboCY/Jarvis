@@ -26,13 +26,21 @@ Execution order:
    freeze the candidate, and run the complete A–J acceptance from that exact SHA.
 
 The 2026-09-12 checkpoint has verified independent browser authentication and
-attempted the pinned native probe twice. Both stopped before `turn/start`:
+attempted the pinned native probe three times. The first two stopped before `turn/start`:
 the first failed during initialization because CLI dotted permission keys were
 quoted; the second rejected `remoteControl/status/changed` during thread startup.
 Neither reached a pending interaction, restart, answer, or continuation, so neither
 establishes an A/B/C recovery result or a native protocol limitation.
 Both process groups were cleaned up. Consumed authentication environments are
 not reused; intervening expired logins were removed by the login controller.
+
+The third probe passed initialization, thread creation, and profile-ID confirmation,
+then failed with `UNSUPPORTED_REQUEST` at `turn-start` after 2.74 seconds. It did
+not reach restart, answer, or continuation; whether the Turn was accepted is not
+established. Its process group was cleaned up. An unauthenticated control did not
+reproduce that failure. The diagnostic patch now retains only the rejected message
+kind and a method from the pinned schema, with `UNKNOWN` for other methods and
+no payload. It preserves fail-closed acceptance and budget rules.
 
 The startup fixes now use the product's unquoted generated permission-profile
 key and the pinned `optOutNotificationMethods` capability for the unrelated
@@ -41,8 +49,19 @@ probe transport and pinned binary passed initialization, thread creation, exact
 permission-profile ID confirmation, and cleanup without starting a Turn. This
 is not behavioral proof of every filesystem/network rule; that remains a native
 acceptance gap. The full
-live-harness contracts pass 139/139. A fresh authenticated recovery probe remains
+live-harness contracts pass 142/142. A fresh authenticated recovery probe remains
 required. Targeted and final A–J runs have not started.
+
+The interactive runner now requires the explicit private Provider source and
+disables ambient Provider overrides. Runtime configuration contains a source
+path instead of Provider keys. API startup loads only the two selected keys into
+memory and rejects invalid sources with a fixed error without source details.
+Controlled fixtures proved real API startup, preserved local authentication,
+no Provider keys in runtime JSON or output, and complete process/root cleanup.
+The published API passed the same fixture checks after a fresh service build.
+The designated Provider fields were then selected in trusted memory: policy and
+required-key presence checks passed with only statuses and booleans emitted.
+No credential contents or derived values were retained; no Provider call occurred.
 
 Every new live run requires a fresh CODEX_HOME, Desktop profile, database, bearer,
 device identity, allowed root, owner marker, launchd labels, and run ID. Prior

@@ -35,6 +35,7 @@ The interactive runner is a long-lived JSONL process:
 PATH=/absolute/path/to/pinned/node/bin:$PATH \
 PHASE9B_CODEX_PATH=/absolute/path/to/pinned/codex \
 PHASE9B_CODEX_HOME=/absolute/path/to/isolated/login-home \
+PHASE9B_PROVIDER_CONFIG_FILE=/absolute/path/to/private/provider-source.json \
 PHASE9B_PROVIDER_PREFLIGHT_CALLS=2 \
 PHASE9B_API_PATH=/absolute/path/to/Jarvis.Api \
 PHASE9B_DEVICE_NODE_PATH=/absolute/path/to/Jarvis.DeviceNode \
@@ -148,21 +149,27 @@ ten-second bound; observed runtime errors remain failures. Only a real completed
 reissue or verified continuation establishes recovery support. Offline fixtures
 and generated protocol schemas do not establish that support.
 
+Failed probes may include `rejectedMessage` with a fixed message-kind enum and
+a method enum from the pinned schema; unknown methods become `UNKNOWN`.
+This identifies the message rejected by parsing or validation, not necessarily
+an unsupported method. Interpret it together with `errorCode`; no payload,
+arbitrary method text, or raw error is retained. Successful probes reject this field.
+
 ## Configuration and isolation
 
-For Phase 9B-R, the user-designated `appsettings.secrets.json` is the approved
-Provider configuration source. Its exact path must be supplied through the
-private controller. The legacy Secret Manager selection described below is
-not a fallback for this run; targeted and final live execution must wait for
-the explicit-file selection and all offline gates. The standalone Codex probe
+For Phase 9B-R, the user-designated Provider configuration file is the approved
+source. Supply its absolute path through `PHASE9B_PROVIDER_CONFIG_FILE` in the
+private controller environment, never as a command-line argument or in evidence.
+The interactive runner requires this explicit source and ignores ambient
+Provider overrides. Targeted and final live execution must wait for all offline gates. The standalone Codex probe
 uses separate fresh Codex authentication and does not read Provider keys.
 
 The credential loader reads `UserSecretsId` from
 `src/backend/Jarvis.Api/Jarvis.Api.csproj`, then reads the BOM-safe Secret
 Manager file at `~/.microsoft/usersecrets/<id>/secrets.json`. It selects only
 the approved Azure OpenAI Realtime and DeepSeek Responses fields. ASP.NET
-double-underscore environment overrides are accepted for those provider
-fields. Unrelated database, local bearer, profile, and daily credentials are
+double-underscore environment overrides remain available to standalone loader
+callers, but are disabled by the interactive runner. Unrelated database, local bearer, profile, and daily credentials are
 not copied, and `OPENAI_API_KEY` is not required.
 
 Provider policy accepts HTTPS Azure OpenAI endpoints on the official supported
@@ -172,8 +179,14 @@ without substitution or fallback.
 
 Every run gets a fresh owner-marked temporary root, loopback port, local API
 bearer, safety salt, SQLite path, Desktop profile, allowed root, and Codex
-home. Secret-bearing values are retained in trusted process memory or private
-0600 JSON beneath a 0700 run root. The external Codex login home may be
+home. Provider keys stay in trusted memory: the API production configuration
+contains only `ProviderKeySource:Path`, and API startup selects `OpenAI:ApiKey`
+and `DeepSeek:ApiKey` from that original file into an in-memory configuration
+provider before registering services. Invalid or missing selected keys stop
+startup with a fixed error and no source details. No Provider keys are written
+to runtime JSON, launchd plists, child environment overrides, or artifacts.
+Fresh local runtime values use private 0600 JSON beneath a 0700 run root.
+The external Codex login home may be
 atomically adopted after owner and pinned-helper validation; the normal global
 Codex home is never copied. Version probing also uses a disposable isolated
 `CODEX_HOME` so `codex --version` cannot touch the daily profile.

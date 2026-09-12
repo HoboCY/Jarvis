@@ -269,7 +269,7 @@ test("budget reconciliation keeps provider, realtime, delegation, and Codex fact
   );
 });
 
-test("prepare writes provider-only production configuration and keeps secrets out of prompt JSON", async () => {
+test("prepare references the private provider source without copying keys into runtime configuration or prompt JSON", async () => {
   const fixture = await createFixture();
   const secretValues = [fixtureProvider.openAi.apiKey, fixtureProvider.deepSeek.apiKey, "fresh-local-bearer"];
   try {
@@ -279,6 +279,7 @@ test("prepare writes provider-only production configuration and keeps secrets ou
       baseDirectory: fixture.baseDirectory,
       desktopAppPath: fixture.desktopAppPath,
       providerConfig: fixtureProvider,
+      userSecretsPath: join(fixture.homeDirectory, "controlled-provider-source.json"),
       preflightResult: fixturePreflight(),
       secretValues,
       localBearerFactory: () => "fresh-local-bearer"
@@ -294,8 +295,12 @@ test("prepare writes provider-only production configuration and keeps secrets ou
     assert.equal(JSON.stringify(result).includes(secretValues[1]), false);
     assert.equal(JSON.stringify(result).includes(secretValues[2]), false);
     const configText = await readFile(session.privatePaths.apiConfigPath, "utf8");
-    assert.equal(configText.includes(secretValues[0]), true);
-    assert.equal(configText.includes(secretValues[1]), true);
+    assert.equal(configText.includes(secretValues[0]), false);
+    assert.equal(configText.includes(secretValues[1]), false);
+    const apiConfig = JSON.parse(configText);
+    assert.equal(apiConfig.ProviderKeySource.Path, join(fixture.homeDirectory, "controlled-provider-source.json"));
+    assert.equal(Object.hasOwn(apiConfig.OpenAI, "ApiKey"), false);
+    assert.equal(Object.hasOwn(apiConfig.DeepSeek, "ApiKey"), false);
     assert.equal((await stat(session.privatePaths.apiConfigPath)).mode & 0o777, 0o600);
     assert.equal((await stat(session.isolation.root)).mode & 0o777, 0o700);
     const deviceConfig = JSON.parse(await readFile(session.privatePaths.deviceConfigPath, "utf8"));
@@ -376,7 +381,11 @@ test("prepare reports blocked credentials without starting a process or making a
           credentials: { status: "PASS", errors: [], presence: {} }
         }
       },
-      providerLoader: async () => {
+      userSecretsPath: join(fixture.homeDirectory, "controlled-provider-source.json"),
+      env: { OpenAI__ApiKey: "must-not-use-ambient-fixture" },
+      providerLoader: async (options) => {
+        assert.deepEqual(options.env, {});
+        assert.equal(options.userSecretsPath, join(fixture.homeDirectory, "controlled-provider-source.json"));
         loaderCalls += 1;
         return { status: "BLOCKED_CREDENTIALS", errors: ["MISSING_OPENAI_API_KEY"], presence: {} };
       },

@@ -19,8 +19,7 @@ const PROVIDER_FIELDS = Object.freeze({
     "AuthenticationMode",
     "BaseUrl",
     "RealtimeModel",
-    "RealtimeVoice",
-    "SafetyIdentifierSalt"
+    "RealtimeVoice"
   ],
   Responses: ["Provider", "Model", "SummarizerModel"],
   DeepSeek: ["ApiKey", "BaseUrl"]

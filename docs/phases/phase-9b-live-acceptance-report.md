@@ -6,7 +6,7 @@
 安全状态继续为 `RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE`。仍使用原分支和 Draft PR #8，
 未创建新 PR、未合并、未进入 Phase 9C；尚未冻结最终候选，也未推送本轮修复。
 
-- 两次全新独立环境的官方浏览器登录通过静默 `codex login status` 验证，仅检查认证
+- 三次全新独立环境的官方浏览器登录通过静默 `codex login status` 验证，仅检查认证
   文件元数据。中间超时登录由控制器清理；成功环境被探针消费后不再复用。
 - 原生探针一：run `16421e8b-0665-48b9-a64e-4708a72685fe`，`FAIL` /
   `first-initialize` / `PROBE_RUNTIME_ERROR`，0.86 秒。CLI 权限 profile 的点分隔键
@@ -17,6 +17,17 @@
   `optOutNotificationMethods` 排除该无关通知，其他 fail-closed 限制保持生效。
 - 两次探针均未启动 Turn，restart / answer / continuation 均为 0，所属进程组已清理。
   因此没有原生 A/B/C 恢复结论，不能归类为已证实的 Codex 协议限制。
+- 原生探针三：run `e41767d2-adf8-4e15-b020-6f783908a27f`，`FAIL` /
+  `turn-start` / `UNSUPPORTED_REQUEST`，2.74 秒；源码提交
+  `fcb1d5f400bd9d88f69566adacec245b63cf1c97`。profile ID 确认通过，
+  restart / answer / continuation 均为 0，进程组已清理。原始消息未保留，尚不能
+  确定拒绝的方法，也不能确认 Turn 已被接受。无认证对照没有复现该拒绝。
+  受控证据 SHA 为 `9912c7870e7b95e2c7b7764fed90365bca41b2a733151e9383ef77b9d11651f5`。
+- 诊断补片只保留固定 schema 方法枚举与消息类别；未知方法折叠为 `UNKNOWN`，
+  不保留 payload/错误原文。字段表示解析或验证拒绝的消息，需结合错误码解释。
+  独立审查指出的空对象守卫已修复，第一与第二进程清理后的诊断保留、受控错误码
+  和 effectful 拒绝覆盖均通过；没有放宽协议、预算或 unseen-response 限制。
+  最新完整 live 合同为 142/142（80.49 秒），lint、format 和后端 Release 全量回归通过。
 - 修后由真实 `createAppServer` 和固定二进制完成无认证 initialize / thread/start /
   exact permission-profile / cleanup 检查，无 Turn；对应回归先 RED 后 GREEN。
   最新 `pnpm test:phase9b-live-contract` 为 139/139（70.96 秒）。
@@ -51,9 +62,21 @@
   [extract-zip 公告](https://github.com/advisories/GHSA-7pqw-9j4j-h8q3)、
   [js-yaml 公告](https://github.com/advisories/GHSA-2883-xcg3-v3hh) 及
   [Electron 解压器说明](https://github.com/electron/extract-zip)。
-- Provider 配置的准确来源已由用户私下指定；本轮尚未读取。当前限制禁止复制凭据，
-  现有 interactive harness 将 Provider Key 写入临时 Production JSON 的行为必须
-  在 live 前替换并验证。targeted 与最终 A–J 均未运行。
+- Provider 配置的准确来源已由用户私下指定。运行器已移除临时
+  Production JSON 中的两项 Key，改为 `ProviderKeySource:Path`；API 启动时只将
+  原文件两项 Key 加入内存配置。运行器要求显式绝对路径，并屏蔽环境 Provider 覆盖；
+  不再读取源文件的 safety salt。32 项相关 JS 合同通过，真实 API 进程使用受控
+  假数据完成启动、原本地鉴权保留、临时配置不含 Provider Key、输出不含假 Key、
+  进程组与运行目录清理检查。未发起 Provider 请求。
+- macOS 服务重新 publish 通过（41.27 秒）；发布后的 API 用受控假数据复验启动、
+  本地鉴权和完整清理均通过。两个服务归档仍各 372 项，禁入配置文件为 0。
+  BOM/空白兼容夹具、OpenAPI、format 和 secrets gate 均通过。随后仅在可信内存中
+  选择用户指定源文件的 Phase 9B Provider 字段，配置策略及两项 Key 存在性检查通过；
+  只输出状态与布尔值，未输出字段值、摘要或 hash，未复制凭据，Provider 请求数为 0。
+- 配置影响仅在显式设置 `ProviderKeySource:Path` 时生效；缺失或无效源文件使用固定
+  错误码阻断启动，不回退到环境 Key。普通 API 启动保持既有配置方式。回退该加载器
+  时必须同时停用依赖此路径的 live runner，不能恢复复制 Key 的旧执行方式。
+  targeted 与最终 A–J 均未运行；最新原生失败仍待新的独立认证环境复验。
 
 ## Phase 9B-R 历史执行记录 — 2026-09-10
 

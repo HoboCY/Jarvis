@@ -170,12 +170,18 @@ export class InteractiveSession {
     });
     try {
       this.#assertActive();
+      if ((options.providerConfig === undefined && !isAbsolute(options.userSecretsPath ?? ""))
+        || (options.userSecretsPath !== undefined && !isAbsolute(options.userSecretsPath))) {
+        throw safeError("INVALID_PROVIDER_CONFIG", "An absolute private provider source is required.");
+      }
       this.#budget = createBudgetTracker(options.budgetOptions);
       this.#preflight = options.preflightResult ?? await runPreflight({
         repositoryRoot: options.repositoryRoot ?? process.cwd(),
         homeDirectory: options.homeDirectory ?? homedir(),
         noProviderCall: true,
         ...options.preflightOptions,
+        userSecretsPath: options.userSecretsPath,
+        providerEnvironment: {},
         codexPath: options.codexPath ?? options.preflightOptions?.codexPath ?? process.env.PHASE9B_CODEX_PATH
       });
       this.#assertActive();
@@ -185,7 +191,7 @@ export class InteractiveSession {
         ? await (options.providerLoader ?? loadProviderConfig)({
           repositoryRoot: options.repositoryRoot ?? process.cwd(),
           homeDirectory: options.homeDirectory ?? homedir(),
-          env: options.env ?? process.env,
+          env: {},
           userSecretsPath: options.userSecretsPath
         })
         : providerResultFor(options.providerConfig);
@@ -685,10 +691,12 @@ export class InteractiveSession {
     const provider = this.#providerConfig;
     const runtime = this.#isolation.runtimeEnvironment;
     const apiConfiguration = {
+      ...(this.#options.userSecretsPath === undefined ? {} : {
+        ProviderKeySource: { Path: this.#options.userSecretsPath }
+      }),
       ConnectionStrings: { Jarvis: runtime.ConnectionStrings__Jarvis },
       Authentication: { BearerToken: runtime.Authentication__BearerToken },
       OpenAI: {
-        ApiKey: provider.openAi.apiKey,
         AuthenticationMode: provider.openAi.authenticationMode,
         BaseUrl: provider.openAi.baseUrl,
         RealtimeModel: provider.openAi.realtimeModel,
@@ -706,7 +714,6 @@ export class InteractiveSession {
         PollingIntervalMs: 250
       },
       DeepSeek: {
-        ApiKey: provider.deepSeek.apiKey,
         BaseUrl: provider.deepSeek.baseUrl
       },
       BudgetAdmission: {
@@ -1713,6 +1720,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === currentFile) {
   const result = await runInteractiveCli({
     sessionOptions: {
       repositoryRoot: process.cwd(),
+      userSecretsPath: process.env.PHASE9B_PROVIDER_CONFIG_FILE,
       codexPath: process.env.PHASE9B_CODEX_PATH,
       externalCodexHome: process.env.PHASE9B_CODEX_HOME ?? process.env.PHASE9B_ISOLATED_CODEX_HOME,
       apiBinaryPath: process.env.PHASE9B_API_PATH,
