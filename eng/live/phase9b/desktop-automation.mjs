@@ -835,7 +835,8 @@ function projectFacts(value) {
     "delegationAttemptsObserved",
     "codexTaskExecutions",
     "codexExecutions",
-    "codexTasks"
+    "codexTasks",
+    "codexStartedTasks"
   ];
   assertExactKeys(value, [...countKeys, "sources", "budgetObservation"], "OUTPUT_REJECTED");
   const result = {};
@@ -851,10 +852,11 @@ function projectSources(value) {
   const sources = {
     realtimeSecretsIssued: "sqlite:RealtimeSessions.rows",
     realtimeConnections: "sqlite:RealtimeSessions.ConnectedAtMs",
-    responseRequests: "sqlite:TaskExecutions.WorkerKind.Responses",
+    responseRequests: "sqlite:TaskExecutions.Responses.ExternalExecutionId",
     responseTasks: "sqlite:Tasks.WorkerKind.Responses",
     delegationAttemptsObserved: "sqlite:ResponsesTasks.join.RealtimeMessages",
-    codexTasks: "sqlite:Tasks.WorkerKind.Codex"
+    codexTasks: "sqlite:Tasks.WorkerKind.Codex",
+    codexStartedTasks: "sqlite:TaskExecutions.CodexThreadId.distinctTaskId"
   };
   assertExactKeys(value, Object.keys(sources), "OUTPUT_REJECTED");
   for (const [key, expected] of Object.entries(sources)) {

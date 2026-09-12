@@ -252,6 +252,14 @@ separate observed-facts source: its counts are checked against ledger
 reservations and reported with their source names, but never increment or
 replace the ledger counts.
 
+Queued and claimed worker rows precede launch/request admission. The cross-check
+therefore uses durable Codex thread identities (distinct task IDs) and completed
+Responses request identities as lower bounds, while reporting queued task and
+execution counts separately. Even queued Codex tasks remain capped at five.
+Database facts come from one read transaction; the reservation snapshot is read
+afterward so newly admitted work cannot race ahead of an older snapshot. Failed
+wire attempts and failed process launches remain accounted for by the ledger.
+
 The default direct-process `start` path reports
 `installation.status=UNVERIFIED` with `reason=LAUNCHD_NOT_WIRED`; the explicit
 launchd flag reports `installation.status=PASS` only after the owned API and

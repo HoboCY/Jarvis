@@ -1020,10 +1020,13 @@ export class InteractiveSession {
     }
     try {
       await this.#launchdSupervisor?.scanOutput?.();
-      const reservedBudget = await this.#readAdmissionBudget();
       const facts = await readRuntimeFacts(
         join(this.#isolation.directories.database, "jarvis.db"),
         this.#scan.bind(this));
+      // Reservations precede native effects. Read their monotonic snapshot
+      // after the database facts so concurrent admitted work cannot appear
+      // newer than the reservation snapshot used to validate it.
+      const reservedBudget = await this.#readAdmissionBudget();
       reconcileBudget(this.#budget, facts, this.#providerPreflightCalls, reservedBudget);
     } catch (error) {
       this.#budgetFailure = error?.code === "BUDGET_EXHAUSTED" || error?.code === "SECRET_DETECTED"
@@ -1420,13 +1423,15 @@ export async function readRuntimeFacts(databasePath, scan = () => {}) {
   try {
     const sqlite = await import("node:sqlite");
     database = new sqlite.DatabaseSync(databasePath, { readOnly: true });
+    database.exec("BEGIN");
     const count = (sql) => {
       const value = database.prepare(sql).get()?.count;
       return Number.isSafeInteger(value) && value >= 0 ? value : 0;
     };
     const realtimeSecretsIssued = count("SELECT COUNT(*) AS count FROM RealtimeSessions");
     const realtimeConnections = count("SELECT COUNT(*) AS count FROM RealtimeSessions WHERE ConnectedAtMs IS NOT NULL");
-    const responseRequests = count("SELECT COUNT(*) AS count FROM TaskExecutions WHERE WorkerKind = 1");
+    const responseExecutions = count("SELECT COUNT(*) AS count FROM TaskExecutions WHERE WorkerKind = 1");
+    const responseRequests = count("SELECT COUNT(*) AS count FROM TaskExecutions WHERE WorkerKind = 1 AND ExternalExecutionId IS NOT NULL");
     const responseTasks = count("SELECT COUNT(*) AS count FROM Tasks WHERE WorkerKind = 1");
     const delegationAttemptsObserved = count(`
       SELECT COUNT(*) AS count
@@ -1435,6 +1440,7 @@ export async function readRuntimeFacts(databasePath, scan = () => {}) {
       WHERE task.WorkerKind = 1 AND message.RealtimeSessionId IS NOT NULL`);
     const codexTaskExecutions = count("SELECT COUNT(*) AS count FROM TaskExecutions WHERE WorkerKind = 2");
     const codexTasks = count("SELECT COUNT(*) AS count FROM Tasks WHERE WorkerKind = 2");
+    const codexStartedTasks = count("SELECT COUNT(DISTINCT TaskId) AS count FROM TaskExecutions WHERE WorkerKind = 2 AND CodexThreadId IS NOT NULL");
     const facts = {
       // Keep the short aliases for existing callers, but make each observed
       // source explicit so a report cannot confuse tasks with wire requests.
@@ -1442,21 +1448,24 @@ export async function readRuntimeFacts(databasePath, scan = () => {}) {
       realtimeSessions: realtimeSecretsIssued,
       realtimeConnections,
       responseRequests,
-      responseExecutions: responseRequests,
+      responseExecutions,
       responseTasks,
       delegationAttemptsObserved,
       codexTaskExecutions,
       codexExecutions: codexTaskExecutions,
       codexTasks,
+      codexStartedTasks,
       sources: {
         realtimeSecretsIssued: "sqlite:RealtimeSessions.rows",
         realtimeConnections: "sqlite:RealtimeSessions.ConnectedAtMs",
-        responseRequests: "sqlite:TaskExecutions.WorkerKind.Responses",
+        responseRequests: "sqlite:TaskExecutions.Responses.ExternalExecutionId",
         responseTasks: "sqlite:Tasks.WorkerKind.Responses",
         delegationAttemptsObserved: "sqlite:ResponsesTasks.join.RealtimeMessages",
-        codexTasks: "sqlite:Tasks.WorkerKind.Codex"
+        codexTasks: "sqlite:Tasks.WorkerKind.Codex",
+        codexStartedTasks: "sqlite:TaskExecutions.CodexThreadId.distinctTaskId"
       }
     };
+    database.exec("COMMIT");
     scan(facts);
     return facts;
   } catch (error) {
@@ -1479,12 +1488,22 @@ export function reconcileBudget(budget, facts, providerPreflightCalls, reservedB
     // Codex executions are a separate budget. Only Responses tasks linked to
     // a persisted Realtime message are attributable to delegate_task.
     delegationAttempts: facts.delegationAttemptsObserved,
-    codexTasks: facts.codexTasks,
+    // A queued or claimed row exists before the Device Node's launch
+    // reservation. Native thread identity is a durable lower bound on
+    // admitted tasks; failed launches remain counted by the admission ledger.
+    codexTasks: facts.codexStartedTasks,
     retries: 0
   };
   if (reservedBudget === undefined || reservedBudget === null
       || reservedBudget.used === undefined || reservedBudget.limits === undefined) {
     throw safeError("ADMISSION_INTEGRITY", "The live budget reservation snapshot is unavailable.");
+  }
+  if (!Number.isSafeInteger(facts.codexStartedTasks) || facts.codexStartedTasks < 0
+      || facts.codexStartedTasks > facts.codexTasks) {
+    throw safeError("OBSERVATION_INVALID", "Native task observations are invalid.");
+  }
+  if (facts.codexTasks > reservedBudget.limits.codexTasks) {
+    throw safeError("BUDGET_EXHAUSTED", "The created Codex task limit is exhausted.");
   }
   const mismatches = Object.entries(observed)
     .filter(([kind, amount]) => amount > reservedBudget.used[kind])

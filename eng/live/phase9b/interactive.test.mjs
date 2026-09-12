@@ -9,6 +9,7 @@ import { test } from "node:test";
 import {
   INTERACTIVE_COMMANDS,
   createInteractiveSession as createInteractiveSessionRaw,
+  readRuntimeFacts,
   reconcileBudget,
   parseInteractiveCommand,
   runInteractiveCli as runInteractiveCliRaw,
@@ -102,13 +103,15 @@ async function createFixtureDatabase(path) {
   const database = new sqlite.DatabaseSync(path);
   database.exec(`
     CREATE TABLE RealtimeSessions (ConnectedAtMs INTEGER, ExternalSessionId TEXT);
-    CREATE TABLE TaskExecutions (WorkerKind INTEGER);
+    CREATE TABLE TaskExecutions (WorkerKind INTEGER, TaskId TEXT, CodexThreadId TEXT, ExternalExecutionId TEXT);
     CREATE TABLE Tasks (WorkerKind INTEGER, CreatedByMessageId TEXT);
     CREATE TABLE Messages (Id TEXT, RealtimeSessionId TEXT);
   `);
   database.prepare("INSERT INTO RealtimeSessions (ConnectedAtMs, ExternalSessionId) VALUES (?, ?)")
     .run(Date.now(), "provider-session");
   database.prepare("INSERT INTO TaskExecutions (WorkerKind) VALUES (1), (1), (2), (2), (2), (2), (2)").run();
+  database.exec("UPDATE TaskExecutions SET TaskId = 'task-' || rowid, CodexThreadId = 'thread-' || rowid WHERE WorkerKind = 2");
+  database.exec("UPDATE TaskExecutions SET ExternalExecutionId = 'response-' || rowid WHERE WorkerKind = 1");
   database.prepare("INSERT INTO Messages (Id, RealtimeSessionId) VALUES (?, ?), (?, ?)")
     .run("message-1", "realtime-1", "message-2", "realtime-1");
   database.prepare("INSERT INTO Tasks (WorkerKind, CreatedByMessageId) VALUES (?, ?), (?, ?), (?, NULL), (?, NULL), (?, NULL), (?, NULL), (?, NULL)")
@@ -116,7 +119,7 @@ async function createFixtureDatabase(path) {
   database.close();
 }
 
-async function reserveFixtureFacts(session, fetchImpl = globalThis.fetch) {
+async function reserveFixtureFacts(session, fetchImpl = globalThis.fetch, { codexTasks = 5 } = {}) {
   const client = createAdmissionClient({
     descriptorPath: session.privatePaths.admissionDescriptorPath,
     fetchImpl
@@ -140,7 +143,7 @@ async function reserveFixtureFacts(session, fetchImpl = globalThis.fetch) {
       requestKey: `fixture-delegation:${randomUUID()}`
     });
   }
-  for (let index = 0; index < 5; index += 1) {
+  for (let index = 0; index < codexTasks; index += 1) {
     await client.reserve({
       kind: "codexTasks",
       logicalId: randomUUID(),
@@ -230,6 +233,7 @@ test("budget reconciliation keeps provider, realtime, delegation, and Codex fact
     responseRequests: 2,
     delegationAttemptsObserved: 2,
     codexTasks: 5,
+    codexStartedTasks: 5,
     codexTaskExecutions: 5
   };
   const reserved = {
@@ -265,8 +269,50 @@ test("budget reconciliation keeps provider, realtime, delegation, and Codex fact
   });
   assert.throws(
     () => reconcileBudget(budget, { ...facts, codexTasks: 6 }, 2, reserved),
-    error => error.code === "OBSERVATION_INVALID"
+    error => error.code === "BUDGET_EXHAUSTED"
   );
+});
+
+test("queued worker tasks wait for admission while confirmed native and provider facts remain guarded", async () => {
+  const fixture = await createFixture();
+  const path = join(fixture.baseDirectory, "controlled.db");
+  let database;
+  try {
+    await createFixtureDatabase(path);
+    const sqlite = await import("node:sqlite");
+    database = new sqlite.DatabaseSync(path);
+    database.exec("UPDATE TaskExecutions SET CodexThreadId = NULL WHERE WorkerKind = 2");
+    database.exec("UPDATE TaskExecutions SET ExternalExecutionId = NULL WHERE WorkerKind = 1");
+    const budget = createBudgetTracker();
+    budget.consume("providerRequests", 2);
+    budget.consume("realtimeConnections", 1);
+    budget.consume("delegationAttempts", 2);
+    const waiting = await readRuntimeFacts(path);
+    assert.doesNotThrow(() => reconcileBudget(budget, waiting, 0));
+    assert.equal(waiting.codexTasks, 5);
+    assert.equal(waiting.codexStartedTasks, 0);
+    assert.equal(waiting.responseExecutions, 2);
+    assert.equal(waiting.responseRequests, 0);
+    database.exec("UPDATE TaskExecutions SET ExternalExecutionId = 'controlled-response' WHERE rowid = 1");
+    const responseStarted = await readRuntimeFacts(path);
+    assert.throws(() => reconcileBudget(budget, responseStarted, 0), error => error.code === "OBSERVATION_INVALID");
+    budget.consume("providerRequests");
+    assert.doesNotThrow(() => reconcileBudget(budget, responseStarted, 0));
+    database.exec("UPDATE TaskExecutions SET CodexThreadId = 'controlled-thread' WHERE rowid = 3");
+    const started = await readRuntimeFacts(path);
+    assert.equal(started.codexStartedTasks, 1);
+    assert.throws(() => reconcileBudget(budget, started, 0), error => error.code === "OBSERVATION_INVALID");
+    budget.consume("codexTasks");
+    assert.doesNotThrow(() => reconcileBudget(budget, started, 0));
+    database.exec("INSERT INTO TaskExecutions (WorkerKind, TaskId, CodexThreadId) VALUES (2, 'task-3', 'controlled-thread')");
+    assert.equal((await readRuntimeFacts(path)).codexStartedTasks, 1);
+    database.exec("INSERT INTO Tasks (WorkerKind) VALUES (2)");
+    const beyondLimit = await readRuntimeFacts(path);
+    assert.throws(() => reconcileBudget(budget, beyondLimit, 0), error => error.code === "BUDGET_EXHAUSTED");
+  } finally {
+    database?.close();
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });
 
 test("prepare references the private provider source without copying keys into runtime configuration or prompt JSON", async () => {
@@ -492,11 +538,30 @@ test("start and observe run only owned fixture services, then finish removes the
     const prepared = await session.prepare();
     assert.equal(prepared.status, "PREPARED");
     await createFixtureDatabase(join(session.isolation.directories.database, "jarvis.db"));
-    await reserveFixtureFacts(session);
+    const sqlite = await import("node:sqlite");
+    const database = new sqlite.DatabaseSync(join(session.isolation.directories.database, "jarvis.db"));
+    database.exec("UPDATE TaskExecutions SET CodexThreadId = NULL WHERE WorkerKind = 2");
+    database.close();
+    await reserveFixtureFacts(session, globalThis.fetch, { codexTasks: 0 });
     const started = await session.start();
     assert.equal(started.status, "STARTED");
     assert.equal(started.budgetGuard.startupProviderRequests, 2);
     assert.equal(started.budgetGuard.startupRealtimeConnections, 1);
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const queued = await session.observe();
+    assert.equal(queued.services.api, "started");
+    assert.equal(queued.services.deviceNode, "started");
+    assert.equal(queued.services.desktop, "started");
+    assert.equal(queued.facts.codexTasks, 5);
+    assert.equal(queued.facts.codexStartedTasks, 0);
+    assert.equal(queued.budgets.used.codexTasks, 0);
+    const admission = createAdmissionClient({ descriptorPath: session.privatePaths.admissionDescriptorPath });
+    for (let index = 0; index < 5; index += 1) {
+      await admission.reserve({ kind: "codexTasks", logicalId: randomUUID(), requestKey: `fixture-native:${randomUUID()}` });
+    }
+    const admittedDatabase = new sqlite.DatabaseSync(join(session.isolation.directories.database, "jarvis.db"));
+    admittedDatabase.exec("UPDATE TaskExecutions SET CodexThreadId = 'thread-' || rowid WHERE WorkerKind = 2");
+    admittedDatabase.close();
     const observed = await session.observe();
     assert.equal(observed.api.live, true);
     assert.equal(observed.api.ready, true);
