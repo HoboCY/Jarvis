@@ -2015,9 +2015,14 @@ test("public probe completes a controlled reissued request through the fake nati
     assert.equal(fake.spawnCalls[0].options.cwd, fixture.paths.allowedRoot);
     assert.equal(fake.spawnCalls[1].options.cwd, fixture.paths.allowedRoot);
     assert.equal(fake.spawnCalls.every(({ options }) => options.env.PATH === TEST_PROCESS_PATH), true);
-    const firstInitialize = fake.children[0].writes.find((message) => message.method === CODEX_APP_SERVER_METHODS.initialize);
-    assert.equal(firstInitialize.params.capabilities.experimentalApi, false);
-    assert.equal(firstInitialize.params.capabilities.requestAttestation, false);
+    const initializations = fake.children.flatMap(child => child.writes)
+      .filter(message => message.method === CODEX_APP_SERVER_METHODS.initialize);
+    assert.equal(initializations.length, 2);
+    for (const initialization of initializations) {
+      assert.equal(initialization.params.capabilities.experimentalApi, false);
+      assert.equal(initialization.params.capabilities.requestAttestation, false);
+      assert.deepEqual(initialization.params.capabilities.optOutNotificationMethods, ["remoteControl/status/changed"]);
+    }
     const starts = fake.children.flatMap((child) => child.writes)
       .filter((message) => message.method === CODEX_APP_SERVER_METHODS.threadStart
         || message.method === CODEX_APP_SERVER_METHODS.threadResume);
@@ -2373,6 +2378,15 @@ test("product permission arguments and environment are fixed and caller addition
   assert.equal(args.some((value) => value.includes("network.enabled=false")), true);
   assert.equal(args.some((value) => value.includes("cli_auth_credentials_store=\"file\"")), true);
   assert.equal(args.some((value) => value.includes("model=")), false);
+  // Codex parses -c paths as dotted keys; quoting a path segment would
+  // create a different catalog key from the selected profile id.
+  const selectedProfile = "jarvis-task-123e4567e89b42d3a456426614174000";
+  const profilePaths = args.filter(value => value.startsWith("permissions."))
+    .map(value => value.slice(0, value.indexOf("=")));
+  assert.deepEqual(profilePaths, [
+    `permissions.${selectedProfile}.filesystem`,
+    `permissions.${selectedProfile}.network.enabled`
+  ]);
 
   const environment = buildProbeEnvironment({
     codexHome: "/private/owned/codex-home",

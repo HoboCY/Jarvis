@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { deflateRawSync, gzipSync } from "node:zlib";
+import { assertArtifactEntryAllowed } from "./artifact-file-policy.mjs";
 
 const TAR_BLOCK_SIZE = 512;
 const ZIP_LOCAL_FILE_HEADER = 0x04034b50;
@@ -61,6 +62,8 @@ function collectEntries(source) {
 }
 
 function walk(path, name, entries) {
+  // Reject runtime credentials by filename before opening any entry contents.
+  assertArtifactEntryAllowed(name);
   const stats = lstatSync(path);
   if (name.length > 0) {
     entries.push({ name: name.replaceAll("\\", "/"), path, stats });

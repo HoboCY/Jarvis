@@ -25,15 +25,24 @@ Execution order:
 5. Only after the offline gates pass, execute a new isolated targeted gap run,
    freeze the candidate, and run the complete A–J acceptance from that exact SHA.
 
-The current checkpoint is blocked on fresh browser authentication. The first
-isolated attempt reached its 15-minute bound and returned `AUTH_TIMEOUT` and
-`AUTH_RUNTIME_REMOVED` at 2026-09-10 15:00:46 UTC. A subsequent metadata-only
-directory check found zero remaining authentication runtimes owned by that helper.
-No authentication file contents were read. Probe source commit
-`e873c9e39e4fa43a6a1db1720e9f1c310c5bed85` is accepted offline, but no native task
-started and there is no A/B/C result. No Provider or targeted/final run started.
-This does not reopen the resolved security incident. A later authentication
-attempt requires a new isolated environment before native probing can proceed.
+The 2026-09-12 checkpoint has verified independent browser authentication and
+attempted the pinned native probe twice. Both stopped before `turn/start`:
+the first failed during initialization because CLI dotted permission keys were
+quoted; the second rejected `remoteControl/status/changed` during thread startup.
+Neither reached a pending interaction, restart, answer, or continuation, so neither
+establishes an A/B/C recovery result or a native protocol limitation.
+Both process groups were cleaned up. Consumed authentication environments are
+not reused; intervening expired logins were removed by the login controller.
+
+The startup fixes now use the product's unquoted generated permission-profile
+key and the pinned `optOutNotificationMethods` capability for the unrelated
+remote-control status notification. An unauthenticated check using the actual
+probe transport and pinned binary passed initialization, thread creation, exact
+permission-profile ID confirmation, and cleanup without starting a Turn. This
+is not behavioral proof of every filesystem/network rule; that remains a native
+acceptance gap. The full
+live-harness contracts pass 139/139. A fresh authenticated recovery probe remains
+required. Targeted and final A–J runs have not started.
 
 Every new live run requires a fresh CODEX_HOME, Desktop profile, database, bearer,
 device identity, allowed root, owner marker, launchd labels, and run ID. Prior
@@ -261,16 +270,15 @@ The user requested execution of the Phase 9B instructions in the ChatGPT convers
 Azure OpenAI Realtime and DeepSeek Responses configuration. This replaces the original
 official-OpenAI-only provider requirement. It does not turn missing live evidence into a pass.
 
-The original Phase 9B run selected provider settings through ASP.NET Core User
-Secrets. For this resumption, the user identifies `appsettings.secrets.json` as
-the actual Azure OpenAI and DeepSeek key source. Its explicit location is still
-pending; filename-only checks found no such file in either Jarvis worktree.
-The existing loader supports an explicit JSON source and selects only provider
-settings. The resumed run must use the confirmed source; it must not silently
-substitute the historical default. The daily database, local bearer, Desktop
-profile and Codex home are not reused. Environment overrides retain their
-existing precedence. Credential values and any derived representations are
-excluded from reports and command output.
+The user has now supplied the exact ASP.NET Core User Secrets source privately
+in this task. Only the Azure OpenAI and DeepSeek fields needed by Phase 9B may be
+selected. No provider-source content has been read in this resumption. The source
+must not be replaced by a fallback or ambient environment values. Credential
+contents must not be copied, summarized, hashed, logged, committed, or included in
+arguments or evidence. The current interactive harness still materializes provider
+keys in temporary production JSON; that path must be replaced and verified before
+any provider configuration is loaded for a new live run. The daily database,
+local bearer, Desktop profile, and Codex home are not reused.
 
 | Component | Selected configuration | Acceptance boundary |
 | --- | --- | --- |
@@ -349,8 +357,9 @@ commands and results in the acceptance report.
 
 - Use a unique owner-only temporary runtime root with fresh local bearer, safety salt,
   isolated DB, profile, Codex home, allowed files and dynamically allocated loopback ports.
-- Keep credentials in the trusted parent or an owner-only temporary production configuration;
-  no credentials in arguments, plists, Renderer state, logs or committed files.
+- Keep provider credentials only in trusted process memory; the current user restriction
+  forbids copying them into temporary production JSON. No credentials in arguments,
+  plists, Renderer state, logs, evidence, or committed files.
 - Do not print the generated local bearer, salt, device bootstrap credential or test nonce.
   Use a run-specific Desktop application name to isolate its safeStorage Keychain entry.
 - Limit paid provider requests to 12, Realtime connections to 4, delegation attempts to 2,

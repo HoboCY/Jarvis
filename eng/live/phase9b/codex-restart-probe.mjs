@@ -1012,9 +1012,9 @@ export function buildProductPermissionArguments({ taskId, allowedRoot }) {
     "-c",
     `default_permissions=${tomlString(profileId)}`,
     "-c",
-    `permissions.${tomlString(profileId)}.filesystem=${filesystem}`,
+    `permissions.${profileId}.filesystem=${filesystem}`,
     "-c",
-    `permissions.${tomlString(profileId)}.network.enabled=false`,
+    `permissions.${profileId}.network.enabled=false`,
     "-c",
     `cli_auth_credentials_store=${tomlString("file")}`
   ];
@@ -1824,7 +1824,11 @@ class JsonRpcAppServer {
         title: "Jarvis Phase 9B Probe",
         version: "0.1.0"
       },
-      capabilities: { experimentalApi: false, requestAttestation: false }
+      capabilities: {
+        experimentalApi: false,
+        requestAttestation: false,
+        optOutNotificationMethods: ["remoteControl/status/changed"]
+      }
     }, deadline);
     await this.notify(CODEX_APP_SERVER_METHODS.initialized, null, deadline);
   }

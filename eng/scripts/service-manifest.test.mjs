@@ -153,6 +153,9 @@ test("macOS service publish is self-contained and lockfile-repeatable", async ()
   assert.match(script, /packages\.lock\.json/);
   assert.match(script, /lock_snapshot_before/);
   assert.match(script, /deterministic-archive\.mjs/);
+  assert.match(script, /artifact-file-policy\.mjs" --rsync-excludes/);
+  assert.match(script, /source_exclusions\+=\(--exclude "\$pattern"\)/);
+  assert.match(script, /rsync -a "\$\{source_exclusions\[@\]\}"/);
   const desktopScript = await readFile(join(process.cwd(), "eng/scripts/package-desktop-macos.sh"), "utf8");
   assert.match(desktopScript, /deterministic-archive\.mjs/);
   assert.match(desktopScript, /node "\$desktop_root\/scripts\/assert-package\.mjs" "\$app_source\/Contents\/Resources\/app\.asar"/);

@@ -35,7 +35,12 @@ lock_snapshot_before="$(lock_snapshot)"
 # locks. The second restore is the release gate that proves the generated lock
 # files are complete and reproducible.
 mkdir -p "$publish_root/src" "$publish_root/eng"
-rsync -a --exclude bin --exclude obj --exclude packages.lock.json "$repo_root/src/backend" "$publish_root/src/"
+credential_exclusions="$(node "$repo_root/eng/scripts/artifact-file-policy.mjs" --rsync-excludes)"
+source_exclusions=(--exclude bin --exclude obj --exclude packages.lock.json)
+while IFS= read -r pattern; do
+  source_exclusions+=(--exclude "$pattern")
+done <<< "$credential_exclusions"
+rsync -a "${source_exclusions[@]}" "$repo_root/src/backend" "$publish_root/src/"
 for root_file in Directory.Build.props Directory.Packages.props NuGet.config global.json; do
   cp "$repo_root/$root_file" "$publish_root/$root_file"
 done

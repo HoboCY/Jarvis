@@ -1,6 +1,61 @@
 # Phase 9B Result
 
-## Phase 9B-R 当前执行记录 — 2026-09-10
+## Phase 9B-R 追加检查点 — 2026-09-12
+
+本节为最新进度；下方 2026-09-10 记录及原 live 结果保留为历史，不转移到本次候选。
+安全状态继续为 `RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE`。仍使用原分支和 Draft PR #8，
+未创建新 PR、未合并、未进入 Phase 9C；尚未冻结最终候选，也未推送本轮修复。
+
+- 两次全新独立环境的官方浏览器登录通过静默 `codex login status` 验证，仅检查认证
+  文件元数据。中间超时登录由控制器清理；成功环境被探针消费后不再复用。
+- 原生探针一：run `16421e8b-0665-48b9-a64e-4708a72685fe`，`FAIL` /
+  `first-initialize` / `PROBE_RUNTIME_ERROR`，0.86 秒。CLI 权限 profile 的点分隔键
+  被多余引号改变；参数改为与产品实现一致的受控 profile ID 后，无认证初始化成功。
+- 原生探针二：run `a0a51e4a-14eb-4693-b0a2-f9d76a60cfb7`，`FAIL` /
+  `thread-start` / `UNSUPPORTED_REQUEST`，0.81 秒。固定版本发送的
+  `remoteControl/status/changed` 被探针拒绝；按其 schema 使用
+  `optOutNotificationMethods` 排除该无关通知，其他 fail-closed 限制保持生效。
+- 两次探针均未启动 Turn，restart / answer / continuation 均为 0，所属进程组已清理。
+  因此没有原生 A/B/C 恢复结论，不能归类为已证实的 Codex 协议限制。
+- 修后由真实 `createAppServer` 和固定二进制完成无认证 initialize / thread/start /
+  exact permission-profile / cleanup 检查，无 Turn；对应回归先 RED 后 GREEN。
+  最新 `pnpm test:phase9b-live-contract` 为 139/139（70.96 秒）。
+- 退出与 descendant 清理夹具改用可控时钟和真实 readiness 握手，本地提交
+  `90ecb2ec3502533e1aff7969350c03b15f5fea0f`。依赖修补后 headless 296/296
+  （20.13 秒），frozen-lockfile 安装通过（1.74 秒）；
+  .NET locked restore、tool restore、Release build/test、format、EF migration drift、
+  workspace typecheck/lint/build、OpenAPI/schema、built renderer 和 offline E2E 已通过。
+- NuGet 审计在继承环境下多次超时；收紧子进程环境并关闭自动 workload 更新通知后，
+  原官方 NuGet 数据源上的 `dotnet list Jarvis.sln package --vulnerable --include-transitive
+  --no-restore --format json --config NuGet.config` 通过（21.91 秒）：13 项目，0 漏洞，
+  0 warning/error，stderr 为空。这不确定超时由哪一个环境项引起，未降低审计要求。
+- npm 审计发现当前新公告。两个 js-yaml 分支修至 3.15.2 / 4.3.2；仅将 Electron
+  packager 的 extract-zip 替换为 Electron 自己使用的 1.0.5 实现，移除旧 extract-zip
+  豁免，未增加漏洞豁免。`pnpm check:package-audit` 通过；真实 packager 解压安全
+  夹具和 CI 合同合计 43/43。普通文件/内部符号链接保留，重复符号链接 ZIP 不越界写。
+- 发布源复制前按大小写无关文件名排除四种运行期配置；tar/ZIP 在打开内容前再次拒绝。
+  `pnpm test:service-manifest` 初次为 22/22，审查补测后为 23/23。macOS 服务 publish 通过（41.22 秒），
+  修补依赖后 Desktop package 再次通过（50.15 秒，14/14）；实际归档清单中两个
+  service 各 372 项、Desktop 594 项，禁入配置文件均为 0。产物为未签名测试包。
+- 独立 Standards / Spec 审查已完成，未发现新增实现错误。新增文件已纳入精确路径暂存，
+  脚本接线、策略 CLI 和两个进程的 initialize 断言补齐；实际 archive inventory 已执行。
+  `permissionProfileConfirmed` 只证明固定版本回显的 profile ID 与请求一致，不证明
+  所有 read/deny/network 规则的实际行为；该行为验证保留为原生验收缺口。
+- 影响范围：profile 参数修复仅作用于受控探针；归档策略对 Desktop 和两种服务包均
+  拒绝四个运行期文件名，包括任意目录层级与大小写变体。固定错误码不附带路径，避免
+  诊断扩大输出范围。Provider 来源文件不受修改。可单独回退本次代码/锁文件变更，
+  但回退后原生启动或依赖/发布门禁会重新失败，必须停用 live 并重新验证后再开放。
+  已构建包不作为最终冻结候选；如回退构建输入，须重新生成并验证产物。
+- 移除的 `CVE-2026-56876` 属于旧 `extract-zip`，该包已从锁文件完全移除；原有
+  `CVE-2025-71330` / `CVE-2025-71329` 未扩大范围。新修复依据
+  [extract-zip 公告](https://github.com/advisories/GHSA-7pqw-9j4j-h8q3)、
+  [js-yaml 公告](https://github.com/advisories/GHSA-2883-xcg3-v3hh) 及
+  [Electron 解压器说明](https://github.com/electron/extract-zip)。
+- Provider 配置的准确来源已由用户私下指定；本轮尚未读取。当前限制禁止复制凭据，
+  现有 interactive harness 将 Provider Key 写入临时 Production JSON 的行为必须
+  在 live 前替换并验证。targeted 与最终 A–J 均未运行。
+
+## Phase 9B-R 历史执行记录 — 2026-09-10
 
 - 安全门禁：`RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE`。依据用户明确的非敏感确认，
   本次没有仍有效或可复用认证材料的泄露；不要求轮换 Azure OpenAI / DeepSeek Key。
