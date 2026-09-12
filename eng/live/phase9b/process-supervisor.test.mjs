@@ -7,6 +7,8 @@ import {
   assertSafeProcessLaunch
 } from "./process-supervisor.mjs";
 
+const blockedEnvironmentFixture = "controlled-noncredential-fixture";
+
 test("owned process supervisor returns bounded output summaries and restart counts", async () => {
   const supervisor = new ProcessSupervisor({ maxRestarts: 1, timeoutMs: 1_000 });
   const result = await supervisor.run(execPath, ["-e", "process.stdout.write('ok'); process.exit(0)"]);
@@ -53,7 +55,7 @@ test("live child receives only the explicit nonsecret control environment", asyn
     JARVIS_PHASE9B_ADMISSION_DESCRIPTOR: "/private/run/admission.json",
     JARVIS_PHASE9B_REALTIME_CALL_URL: "https://fixture.openai.azure.com/openai/v1/realtime/calls",
     JARVIS_PHASE9B_FORGED_CONTROL: "must-not-pass",
-    OPENAI_API_KEY: "provider-key-must-not-pass",
+    OPENAI_API_KEY: blockedEnvironmentFixture,
     DEEPSEEK_API_KEY: "provider-key-must-not-pass",
     UNRELATED_ENVIRONMENT: "must-not-pass"
   };
@@ -76,6 +78,29 @@ test("live child receives only the explicit nonsecret control environment", asyn
   assert.equal("length" in result.stdout, false);
   assert.equal("sha256" in result.stdout, false);
   await supervisor.stopAll();
+});
+
+test("live rotation interval reaches the real child without admitting unrelated controls", async () => {
+  const supervisor = new ProcessSupervisor({ timeoutMs: 1_000 });
+  const handle = await supervisor.start(execPath, ["-e", [
+    "const valid = process.env.JARVIS_PHASE9B_ROTATION_AFTER_MS === '60000'",
+    "&& process.env.JARVIS_PHASE9B_FORGED_CONTROL === undefined",
+    "&& process.env.OPENAI_API_KEY === undefined;",
+    "process.exit(valid ? 0 : 9);"
+  ].join(" ")], { env: {
+    JARVIS_PHASE9B_ROTATION_AFTER_MS: "60000",
+    JARVIS_PHASE9B_FORGED_CONTROL: "must-not-pass",
+    OPENAI_API_KEY: blockedEnvironmentFixture
+  } });
+  try {
+    const result = await handle.waitForExit();
+    assert.equal(result.status, "PASS");
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(result.stdout, { observed: false, suppressed: false });
+    assert.deepEqual(result.stderr, { observed: false, suppressed: false });
+  } finally {
+    await supervisor.stopAll();
+  }
 });
 
 test("unknown free text from either stream is represented only by fixed booleans", async () => {

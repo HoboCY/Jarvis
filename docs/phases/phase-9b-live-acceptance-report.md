@@ -37,8 +37,34 @@
   本次后端全量回归 355/355、headless 296/296、typecheck、lint、format 验证、
   source/package/renderer secrets scan 与独立 15 个暂存源码路径检查均通过。
 - 影响限于跨进程恢复和失败任务的输入清理；没有 schema migration。回退应同时
-  停用旧输入恢复 live 场景，避免重新开放未证明安全的旧请求回答路径。新的服务包、
-  targeted Desktop 验证和最终 A–J 仍待后续门禁，不将上述离线结果当作 live 验收。
+  停用旧输入恢复 live 场景，避免重新开放未证明安全的旧请求回答路径。
+- 源码提交 `e7534e857fa9e33092767ed073528625b9bbd89a` 的 OpenAPI 身份检查、
+  离线 E2E（152/152）、macOS 服务发布、发布后受控 API 启动和 Desktop 打包
+  （14/14）通过。原始 built-renderer 门禁首次缺失观察、stderr 非空；单独诊断和
+  原命令重跑通过（观察完整、stderr 为空、进程及 profile 清理成功），首次原因未确认。
+  此记录保留失败，不把重跑解释为已修复一个未知根因。
+- 私有 CDP 驱动只接受固定 test ID 与预先定义的操作；离线 Electron 夹具验证了
+  状态读取、输入提交、SignalR 控制及按所属 PID 正常退出，不读取认证或调用 Provider。
+  首次准备失败源于启动器缺失私有 TMPDIR；随后在相同认证下重建运行目录解决。
+- targeted 尝试如下；所有失败运行均已清理其运行目录，成功登录目录始终保留。
+  表中请求数为各个独立运行的 admission 计数，不包含此前四个原生探针任务。
+
+| Run ID | 实际结果 | Provider 请求 / Realtime / 委派 / Codex |
+| --- | --- | --- |
+| `ee276341-bebb-46b4-aaf1-57454a1d84e4` | 准备失败；未启动服务，无完整证据包 | 0 / 0 / 0 / 0 |
+| `089b9717-15fc-4f93-a461-92b31125fdc9` | `UNSAFE_TEMP_ROOT`；失败证据包验证通过 | 0 / 0 / 0 / 0 |
+| `45dcaf4b-f750-4b62-8e47-3fa0497df3e9` | WebRTC 与音轨成立；驱动误等 paused，实际 UI 为 disconnected | 2 / 1 / 0 / 0 |
+| `3aec6bba-8d17-4c76-b31e-383e83f1cdaa` | 真实 DeepSeek 终态成立；恢复后驱动检查失败，尚未等待完整补拉 | 3 / 1 / 1 / 0 |
+| `828b5ed8-67e8-4a7d-a5c9-2b3738ba4d5d` | SignalR 补拉通过；自动轮换等待超时 | 3 / 1 / 1 / 0 |
+
+- 自动轮换超时已定位到真实进程边界：interactive 提供了测试轮换间隔，但
+  ProcessSupervisor 的环境白名单遗漏该字段，Desktop 使用默认 50 分钟。
+  新增真实子进程回归先失败，再由仅添加 `JARVIS_PHASE9B_ROTATION_AFTER_MS`
+  到白名单修复；未知控制字段和 Provider key 字段仍不传入子进程。未放宽生产
+  轮换间隔或已验证 live profile 的 20–120 秒限制。完整 live 合同 148/148、lint
+  和 secrets scan 通过。产品源码及打包输入未改动；继续使用已验证的同一产品包。
+- targeted 尚未整体通过；Device Node 重启、正常退出及冷启动恢复仍待本轮真实验证。
+  最终候选未冻结，完整 A–J 尚未运行。
 
 ## Phase 9B-R 此前检查点 — 2026-09-12（历史）
 

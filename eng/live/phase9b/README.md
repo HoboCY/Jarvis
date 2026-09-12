@@ -221,12 +221,13 @@ must stop owned processes and remove the newly created runtime. These launcher
 requirements are outside the interactive CLI; the CLI is not a safe collector
 for arbitrary login output.
 
-The restart protocol probe consumes its own fresh login environment once.
-Targeted and final A-J runs each require a different new login environment,
-Desktop profile, database, device identity, bearer, allowed root, and runtime
-root. Only the two App Server processes within the one bounded restart probe
-may share that probe's home. A consumed probe or previous live runtime must
-never be adopted by a later run.
+For the current Phase 9B-R targeted gap run, the user's retention controls above
+take precedence over the earlier consume-once authentication contract. Its
+verified authentication remains separate from each attempt's fresh Desktop
+profile, database, device identity, bearer, allowed root, and runtime root.
+Probe or product failure must not remove that authentication. The final frozen
+A-J run still requires a separate new authentication environment; prepare it
+only after the targeted gaps are complete and the candidate is frozen.
 
 The interactive harness's external-home adoption also requires the regular
 owner-only `.phase9b-owned` marker with exactly
