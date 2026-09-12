@@ -74,8 +74,13 @@ Product recovery now refuses old-process input before another Codex launch,
 including an answer already committed to the original interaction. Failure ends
 Task/Execution and clears pending input/notification in one transaction. There is
 no automatic replay or old waiter. Device Node tests pass 81/81 and database/HTTP
-recovery tests pass 3/3, including expired-but-unsettled input. Actual Desktop
-targeted and final A–J runs remain pending.
+recovery tests pass 3/3, including expired-but-unsettled input. Targeted run
+`a2965956-c65a-4f47-8010-2fb4f4967497` on `d3489c0bef6ce1844b087d5a05daeb341bf8a22b`
+passed real rotation, SignalR catch-up, restart C handling in 1.978 seconds,
+automatic selection restoration, normal quit and cleanup. Its evidence remains
+`LIVE_PARTIAL`: independent Desktop cancellation still needs a targeted check,
+and full A–J has not run. The existing cancel button now has a fixed automation
+ID; the driver must require exactly one matching actionable button.
 
 The interactive runner now requires the explicit private Provider source and
 disables ambient Provider overrides. Runtime configuration contains a source
@@ -100,6 +105,10 @@ Each targeted attempt creates a fresh Desktop profile, database, bearer, device
 identity, allowed root, owner marker, launchd labels, and run ID, while reusing the
 current verified targeted authentication. Only the final frozen A–J run may require
 one final fresh CODEX_HOME under the complete-run contract. Automation output remains limited
+to the safe boundary below. Final authentication has a separate private retention
+marker bound to the frozen candidate SHA; product failures preserve it and the
+standalone protocol probe cannot consume it. No final login has started.
+Automation output remains limited
 to approved state fields, enums, counts, UUIDs, booleans, bounded error codes, and
 SHAs; OAuth URLs, tokens, credentials, private text, generic DOM/UI dumps, full
 accessibility trees, and unrestricted screenshots remain prohibited.

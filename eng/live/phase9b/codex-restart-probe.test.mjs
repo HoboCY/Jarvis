@@ -84,8 +84,9 @@ function readHistory(overrides = {}) {
   };
 }
 
-async function createAuthFixture(overrides = {}, targeted = false) {
-  const root = await mkdtemp(join(await realpath(tmpdir()), targeted ? "targeted-auth-phase9b-" : "protocol-auth-phase9b-"));
+async function createAuthFixture(overrides = {}, targeted = false, finalCandidateSha) {
+  const prefix = finalCandidateSha !== undefined ? "final-auth-phase9b-" : targeted ? "targeted-auth-phase9b-" : "protocol-auth-phase9b-";
+  const root = await mkdtemp(join(await realpath(tmpdir()), prefix));
   const paths = {
     codexHome: join(root, "codex-home"),
     allowedRoot: join(root, "allowed-root"),
@@ -115,6 +116,13 @@ async function createAuthFixture(overrides = {}, targeted = false) {
       schemaVersion: 1, runId: metadata.runId, purpose: "current-targeted-gap-run",
       codexHome: paths.codexHome, metadataPath, authenticationVerified: true,
       retainOnProbeOrProductFailure: true, reuseUntilTargetedRunComplete: true
+    }), { mode: 0o600 });
+  }
+  if (finalCandidateSha !== undefined) {
+    await writeFile(join(root, "final-auth-retention.json"), JSON.stringify({
+      schemaVersion: 1, runId: metadata.runId, purpose: "final-frozen-a-j-run",
+      codexHome: paths.codexHome, metadataPath, authenticationVerified: true,
+      retainOnProductFailure: true, candidateSha: finalCandidateSha
     }), { mode: 0o600 });
   }
   return {
@@ -1939,6 +1947,32 @@ test("targeted authentication survives failed probes with distinct runtimes and 
     assert.notEqual(runs[0].cwd, runs[1].cwd);
     await rm(join(fixture.root, "targeted-auth-retention.json"));
     await assert.rejects(verifyAuthMetadata(fixture.metadataPath), error => error.code === PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("final authentication is candidate-bound and cannot be consumed by the standalone probe", async () => {
+  const finalCandidateSha = "a".repeat(40);
+  const fixture = await createAuthFixture({}, false, finalCandidateSha);
+  try {
+    const verified = await verifyAuthMetadata(fixture.metadataPath, { finalCandidateSha });
+    assert.equal(verified.reusableFinalAuth, true);
+    assert.equal(verified.candidateSha, finalCandidateSha);
+    await assert.rejects(verifyAuthMetadata(fixture.metadataPath, { finalCandidateSha: "b".repeat(40) }),
+      error => error.code === PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+    const fake = createFakeNative({ mode: "input-then-effectful" });
+    const output = await runCodexRestartProbe({
+      securityRemediationStatus: "RESOLVED_NO_REUSABLE_CREDENTIAL_EXPOSURE", offlineGatesPassed: true,
+      codexPath: "/private/fake/codex", authMetadataPath: fixture.metadataPath, spawnProcess: fake.spawnProcess,
+      testSeam: { verifyAuthMetadata, claimProbeConsumption, verifyPinnedCodex: async () => true,
+        createProcessLifecycle: createCodeOwnedTestProcessLifecycle }
+    });
+    assert.equal(output.status, "FAIL");
+    assert.equal(output.errorCode, PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+    assert.equal(output.taskCount, 0);
+    assert.equal(fake.spawnCalls.length, 0);
+    assert.equal((await lstat(join(fixture.paths.codexHome, "auth.json"))).isFile(), true);
   } finally {
     await fixture.cleanup();
   }

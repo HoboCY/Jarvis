@@ -61,10 +61,12 @@ test("desktop automation reads only fixed data-testid state through the page sea
 
   const click = await driver.run({ action: "click-test-id", testId: DESKTOP_AUTOMATION_ACTION_IDS.pauseSignalr });
   assert.deepEqual(click, { status: "PASS" });
+  assert.deepEqual(await driver.run({ action: "click-test-id", testId: DESKTOP_AUTOMATION_ACTION_IDS.cancelTask }), { status: "PASS" });
   assert.deepEqual(calls, [
     ["read", DESKTOP_AUTOMATION_TEST_IDS.realtimeStatus],
     ["read", DESKTOP_AUTOMATION_TEST_IDS.remoteTrackCount],
-    ["click", DESKTOP_AUTOMATION_ACTION_IDS.pauseSignalr]
+    ["click", DESKTOP_AUTOMATION_ACTION_IDS.pauseSignalr],
+    ["click", DESKTOP_AUTOMATION_ACTION_IDS.cancelTask]
   ]);
 });
 

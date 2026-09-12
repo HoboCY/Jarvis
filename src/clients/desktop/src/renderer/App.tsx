@@ -2063,6 +2063,7 @@ export function App() {
                     ) : null}
                     {task.status !== "succeeded" && task.status !== "failed" && task.status !== "cancelled" ? (
                       <button
+                        data-testid="phase9b-cancel-task"
                         className="text-action"
                         type="button"
                         disabled={actionUnavailable(getActionState(`task-cancel:${task.id}`))}

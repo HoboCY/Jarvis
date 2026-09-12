@@ -206,13 +206,18 @@ export class InteractiveSession {
       this.#secretValues = collectSecretValues(this.#providerConfig, this.#isolation);
 
       await this.#writeNonceFixture();
-      if (options.targetedAuthMetadataPath !== undefined) {
-        if (options.externalCodexHome !== undefined) {
+      if (options.targetedAuthMetadataPath !== undefined || options.finalAuthMetadataPath !== undefined) {
+        const finalAuth = options.finalAuthMetadataPath !== undefined;
+        if (options.externalCodexHome !== undefined
+            || options.targetedAuthMetadataPath !== undefined && finalAuth
+            || finalAuth && !/^[a-f0-9]{40}$/.test(options.finalCandidateSha ?? "")) {
           throw safeError("UNSAFE_CODEX_HOME", "Authentication source is ambiguous.");
         }
-        const authentication = await verifyAuthMetadata(options.targetedAuthMetadataPath);
-        if (authentication.reusableTargetedAuth !== true) {
-          throw safeError("UNSAFE_CODEX_HOME", "Targeted authentication retention is required.");
+        const authentication = await verifyAuthMetadata(
+          options.finalAuthMetadataPath ?? options.targetedAuthMetadataPath,
+          finalAuth ? { finalCandidateSha: options.finalCandidateSha } : {});
+        if (finalAuth ? authentication.reusableFinalAuth !== true : authentication.reusableTargetedAuth !== true) {
+          throw safeError("UNSAFE_CODEX_HOME", "Authentication retention is required.");
         }
         await assertSafeTempRoot(authentication.codexHome, { repositoryRoot: this.#isolation.root });
         this.#isolation.runtimeEnvironment.CODEX_HOME = authentication.codexHome;
@@ -1760,6 +1765,8 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === currentFile) {
       repositoryRoot: process.cwd(),
       userSecretsPath: process.env.PHASE9B_PROVIDER_CONFIG_FILE,
       targetedAuthMetadataPath: process.env.PHASE9B_TARGETED_AUTH_METADATA,
+      finalAuthMetadataPath: process.env.PHASE9B_FINAL_AUTH_METADATA,
+      finalCandidateSha: process.env.PHASE9B_FINAL_CANDIDATE_SHA,
       rotationAfterMs: process.env.PHASE9B_ROTATION_AFTER_MS === undefined
         ? undefined : Number(process.env.PHASE9B_ROTATION_AFTER_MS),
       codexPath: process.env.PHASE9B_CODEX_PATH,

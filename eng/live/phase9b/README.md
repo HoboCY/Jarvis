@@ -49,6 +49,10 @@ probe and product failures. The metadata must have the private retention marker;
 do not also set `PHASE9B_CODEX_HOME`. Cleanup removes only each attempt's owned
 runtime resources. Login has no assistant-imposed waiting deadline. A final frozen
 A–J run may require one final new authentication under its separate contract.
+That final authentication uses `PHASE9B_FINAL_AUTH_METADATA` together with
+`PHASE9B_FINAL_CANDIDATE_SHA`. Its owner-only retention marker binds the login to
+that frozen candidate. It cannot be consumed by the standalone native probe or
+combined with targeted authentication. Product cleanup preserves it as well.
 An explicit `PHASE9B_ROTATION_AFTER_MS` integer from 20000 through 120000 exercises
 automatic rotation through the existing validated live-profile policy. Omission
 keeps the production interval; ordinary Desktop launches receive no override.
@@ -104,11 +108,11 @@ state ids are `phase9b-app-status`, `phase9b-realtime-status`,
 `phase9b-terminal-task-status`, `phase9b-artifact-count`, and
 `phase9b-artifact-restore-status` projections, with the same typed allowlist.
 The fixed action ids cover connect/disconnect
-Realtime, send fixture, pause/resume SignalR, load conversation, answer input,
+Realtime, send fixture, pause/resume SignalR, load conversation, answer input, cancel task,
 approve, deny, restart Device Node, and quit: `phase9b-connect-realtime`,
 `phase9b-disconnect-realtime`, `phase9b-send-fixture`,
 `phase9b-pause-signalr`, `phase9b-resume-signalr`,
-`phase9b-load-conversation`, `phase9b-answer-input`, `phase9b-approve`,
+`phase9b-load-conversation`, `phase9b-answer-input`, `phase9b-cancel-task`, `phase9b-approve`,
 `phase9b-deny`, `phase9b-restart-device-node`, and `phase9b-quit`. The adapter exports only bounded
 states and enums, counts, UUIDs, booleans, error codes, and SHA-256 values;
 caller selectors, evaluation, scripts, DOM or accessibility text, clipboard,

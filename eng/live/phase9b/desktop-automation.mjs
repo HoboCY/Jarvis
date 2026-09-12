@@ -43,6 +43,7 @@ export const DESKTOP_AUTOMATION_ACTION_IDS = Object.freeze({
   resumeSignalr: "phase9b-resume-signalr",
   loadConversation: "phase9b-load-conversation",
   answerInput: "phase9b-answer-input",
+  cancelTask: "phase9b-cancel-task",
   approve: "phase9b-approve",
   deny: "phase9b-deny",
   restartDeviceNode: "phase9b-restart-device-node",

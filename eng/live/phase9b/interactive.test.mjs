@@ -366,49 +366,57 @@ test("prepare references the private provider source without copying keys into r
   }
 });
 
-test("targeted product cleanup retains authentication across failed startup and a new runtime", async () => {
-  const fixture = await createFixture();
-  const authRoot = await mkdtemp(join(await realpath(fixture.baseDirectory), "targeted-auth-fixture-"));
-  await chmod(authRoot, 0o700);
-  const codexHome = join(authRoot, "codex-home");
-  for (const name of ["codex-home", "home", "tmp", "allowed-root"]) {
-    await mkdir(join(authRoot, name), { mode: 0o700 });
-  }
-  await writeFile(join(codexHome, "auth.json"), "controlled-auth-fixture", { mode: 0o600 });
-  const metadataPath = join(authRoot, "login-metadata.json");
-  const runId = randomUUID();
-  await writeFile(metadataPath, JSON.stringify({ schemaVersion: 1, runId, codexHome,
-    runtimeRoot: authRoot, allowedRoot: join(authRoot, "allowed-root"), authenticationCompleted: true,
-    credentialStore: "file", previousRuntimeReused: false }), { mode: 0o600 });
-  await writeFile(join(authRoot, "targeted-auth-retention.json"), JSON.stringify({ schemaVersion: 1, runId,
-    purpose: "current-targeted-gap-run", codexHome, metadataPath, authenticationVerified: true,
-    retainOnProbeOrProductFailure: true, reuseUntilTargetedRunComplete: true }), { mode: 0o600 });
-  const roots = [];
-  try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const session = createInteractiveSession({ repositoryRoot: fixture.repositoryRoot,
-        homeDirectory: fixture.homeDirectory, baseDirectory: fixture.baseDirectory,
-        desktopAppPath: fixture.desktopAppPath, providerConfig: fixtureProvider,
-        preflightResult: fixturePreflight(), targetedAuthMetadataPath: metadataPath,
-        codexPath: join(fixture.root, "missing-controlled-executable") });
-      try {
-        assert.equal((await session.prepare()).status, "PREPARED");
-        roots.push(session.isolation.root);
-        assert.equal(session.isolation.runtimeEnvironment.CODEX_HOME, codexHome);
-        const device = JSON.parse(await readFile(session.privatePaths.deviceConfigPath, "utf8"));
-        assert.equal(device.DeviceNode.CodexHome, codexHome);
-        await assert.rejects(session.start(), error => error.code === "CODEX_PATH_REQUIRED");
-      } finally {
-        await session.finish();
-      }
-      await assert.rejects(stat(roots.at(-1)), { code: "ENOENT" });
-      assert.equal((await stat(join(codexHome, "auth.json"))).isFile(), true);
+for (const authenticationKind of ["targeted", "final"]) {
+  test(`${authenticationKind} product cleanup retains authentication across failed startup and a new runtime`, async () => {
+    const fixture = await createFixture();
+    const authRoot = await mkdtemp(join(await realpath(fixture.baseDirectory), `${authenticationKind}-auth-fixture-`));
+    await chmod(authRoot, 0o700);
+    const codexHome = join(authRoot, "codex-home");
+    for (const name of ["codex-home", "home", "tmp", "allowed-root"]) {
+      await mkdir(join(authRoot, name), { mode: 0o700 });
     }
-    assert.notEqual(roots[0], roots[1]);
-  } finally {
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
+    await writeFile(join(codexHome, "auth.json"), "controlled-auth-fixture", { mode: 0o600 });
+    const metadataPath = join(authRoot, "login-metadata.json");
+    const runId = randomUUID();
+    await writeFile(metadataPath, JSON.stringify({ schemaVersion: 1, runId, codexHome,
+      runtimeRoot: authRoot, allowedRoot: join(authRoot, "allowed-root"), authenticationCompleted: true,
+      credentialStore: "file", previousRuntimeReused: false }), { mode: 0o600 });
+    const finalCandidateSha = "a".repeat(40);
+    const retention = authenticationKind === "final"
+      ? { purpose: "final-frozen-a-j-run", retainOnProductFailure: true, candidateSha: finalCandidateSha }
+      : { purpose: "current-targeted-gap-run", retainOnProbeOrProductFailure: true, reuseUntilTargetedRunComplete: true };
+    await writeFile(join(authRoot, `${authenticationKind}-auth-retention.json`), JSON.stringify({ schemaVersion: 1, runId,
+      codexHome, metadataPath, authenticationVerified: true, ...retention }), { mode: 0o600 });
+    const roots = [];
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const session = createInteractiveSession({ repositoryRoot: fixture.repositoryRoot,
+          homeDirectory: fixture.homeDirectory, baseDirectory: fixture.baseDirectory,
+          desktopAppPath: fixture.desktopAppPath, providerConfig: fixtureProvider,
+          preflightResult: fixturePreflight(),
+          ...(authenticationKind === "final"
+            ? { finalAuthMetadataPath: metadataPath, finalCandidateSha }
+            : { targetedAuthMetadataPath: metadataPath }),
+          codexPath: join(fixture.root, "missing-controlled-executable") });
+        try {
+          assert.equal((await session.prepare()).status, "PREPARED");
+          roots.push(session.isolation.root);
+          assert.equal(session.isolation.runtimeEnvironment.CODEX_HOME, codexHome);
+          const device = JSON.parse(await readFile(session.privatePaths.deviceConfigPath, "utf8"));
+          assert.equal(device.DeviceNode.CodexHome, codexHome);
+          await assert.rejects(session.start(), error => error.code === "CODEX_PATH_REQUIRED");
+        } finally {
+          await session.finish();
+        }
+        await assert.rejects(stat(roots.at(-1)), { code: "ENOENT" });
+        assert.equal((await stat(join(codexHome, "auth.json"))).isFile(), true);
+      }
+      assert.notEqual(roots[0], roots[1]);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("runtime secret scanning includes only secrets written by this isolation", async () => {
   const fixture = await createFixture();

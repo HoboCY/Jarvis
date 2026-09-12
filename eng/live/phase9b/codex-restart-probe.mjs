@@ -1147,7 +1147,10 @@ export function buildProbeEnvironment({
   };
 }
 
-export async function verifyAuthMetadata(metadataPath, { expectedUid = process.getuid?.() ?? -1 } = {}) {
+export async function verifyAuthMetadata(metadataPath, {
+  expectedUid = process.getuid?.() ?? -1,
+  finalCandidateSha
+} = {}) {
   if (typeof metadataPath !== "string" || !isAbsolute(metadataPath)) {
     throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
   }
@@ -1156,9 +1159,13 @@ export async function verifyAuthMetadata(metadataPath, { expectedUid = process.g
   }
   await assertNoSymlinkPath(metadataPath);
   const authRoot = dirname(metadataPath);
+  const finalAuth = finalCandidateSha !== undefined;
+  if (finalAuth && (typeof finalCandidateSha !== "string" || !/^[a-f0-9]{40}$/.test(finalCandidateSha))) {
+    throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+  }
   const rootStat = await lstat(authRoot).catch(() => null);
   if (rootStat === null || !rootStat.isDirectory() || !isOwnerOnly(rootStat, 0o700, expectedUid)
-      || !/^(protocol|targeted)-auth-[A-Za-z0-9_-]+$/.test(basename(authRoot))) {
+      || !(finalAuth ? /^final-auth-[A-Za-z0-9_-]+$/ : /^(protocol|targeted)-auth-[A-Za-z0-9_-]+$/).test(basename(authRoot))) {
     throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
   }
   const metadata = await readPrivateJson(metadataPath, expectedUid, MAX_AUTH_METADATA_BYTES);
@@ -1216,8 +1223,20 @@ export async function verifyAuthMetadata(metadataPath, { expectedUid = process.g
       throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
     }
   }
+  if (finalAuth) {
+    const retention = await readPrivateJson(join(authRoot, "final-auth-retention.json"), expectedUid, MAX_AUTH_METADATA_BYTES);
+    if (!isPlainObject(retention) || !sameKeys(retention, ["schemaVersion", "runId", "purpose", "codexHome", "metadataPath",
+      "authenticationVerified", "retainOnProductFailure", "candidateSha"])
+      || retention.schemaVersion !== 1 || retention.runId !== metadata.runId
+      || retention.purpose !== "final-frozen-a-j-run" || retention.codexHome !== directories.codexHome
+      || retention.metadataPath !== metadataPath || retention.authenticationVerified !== true
+      || retention.retainOnProductFailure !== true || retention.candidateSha !== finalCandidateSha) {
+      throw probeError(PROBE_ERROR_CODES.AUTH_METADATA_INVALID);
+    }
+  }
   return Object.freeze({
     ...(reusableTargetedAuth ? { reusableTargetedAuth: true } : {}),
+    ...(finalAuth ? { reusableFinalAuth: true, candidateSha: finalCandidateSha } : {}),
     runId: metadata.runId,
     codexHome: directories.codexHome,
     runtimeRoot: directories.runtimeRoot,
