@@ -18,7 +18,7 @@
     "lint": "eslint .",
     "test": "pnpm --recursive --if-present run test",
     "test:headless": "pnpm --filter @jarvis/contracts-ts test && pnpm --filter @jarvis/realtime-agent test && pnpm --filter @jarvis/api-client-ts test && pnpm --filter @jarvis/desktop test:headless",
-    "test:ci-contract": "node --test eng/scripts/prepare-electron-linux-sandbox.test.mjs eng/scripts/ci-workflow-contract.test.mjs eng/scripts/check-package-audit.test.mjs",
+    "test:ci-contract": "node --test eng/scripts/prepare-electron-linux-sandbox.test.mjs eng/scripts/ci-workflow-contract.test.mjs eng/scripts/check-package-audit.test.mjs eng/scripts/electron-extraction.test.mjs",
     "build": "pnpm --recursive --if-present run build",
     "generate:openapi": "node eng/scripts/generate-openapi.mjs",
     "check:openapi": "node eng/scripts/check-openapi-diff.mjs",
@@ -30,7 +30,12 @@
     "check:package-audit": "node eng/scripts/check-package-audit.mjs",
     "check:mobile-native-config": "node eng/scripts/check-mobile-native-config.mjs",
     "test:secret-scan": "node --test eng/scripts/secret-scan.test.mjs",
+    "test:phase9b-live-contract": "node --test eng/live/phase9b/*.test.mjs",
     "test:service-manifest": "node --test eng/scripts/service-manifest.test.mjs eng/scripts/secure-service-config.test.mjs eng/scripts/deterministic-archive.test.mjs",
+    "phase9b:preflight": "node eng/live/phase9b/preflight.mjs",
+    "phase9b:live": "node eng/live/phase9b/interactive.mjs",
+    "phase9b:live-batch": "node eng/live/phase9b/live.mjs",
+    "phase9b:validate-live-evidence": "node eng/live/phase9b/validate-live-evidence.mjs",
     "package:desktop:mac": "bash eng/scripts/package-desktop-macos.sh",
     "publish:services:mac": "eng/scripts/publish-macos-arm64.sh"
   }

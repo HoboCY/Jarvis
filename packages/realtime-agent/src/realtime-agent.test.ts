@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { ScriptedRealtimeTransport } from "@openai/agents-realtime/testing";
 import { RealtimeSession } from "@openai/agents-realtime";
 import {
+  REALTIME_ROTATION_AFTER_MS,
   SessionRotationStateMachine,
   createRealtimeAgent,
   createTextOnlyResponseEvent,
@@ -75,6 +76,13 @@ test("rotation only becomes consumable at an idle boundary", () => {
   rotation.setAssistantSpeaking(false, 50 * 60 * 1000 + 1);
   assert.equal(rotation.canRotate(), true);
   assert.equal(rotation.consumeRotation(), true);
+});
+
+test("the default rotation interval remains exactly fifty minutes", () => {
+  const rotation = new SessionRotationStateMachine();
+  rotation.connected(0);
+  assert.equal(rotation.tick(REALTIME_ROTATION_AFTER_MS - 1), "active");
+  assert.equal(rotation.tick(REALTIME_ROTATION_AFTER_MS), "rotation-ready");
 });
 
 test("routes a real SDK function call through the injected backend with a stable bounded key", async () => {

@@ -40,7 +40,12 @@ const workspaceSourcePlugin = {
 
 const taskId = "0198b0a1-0000-7000-8000-000000000201";
 const executionId = "0198b0a1-0000-7000-8000-000000000202";
+const artifactTaskId = "0198b0a1-0000-7000-8000-000000000215";
+const artifactExecutionId = "0198b0a1-0000-7000-8000-000000000216";
+const artifactSha256 = "fb1019e653464e719e6484b1d245c025a1b2402f19f55346f2c55d9b89be40a2";
 const conversationId = "0198b0a1-0000-7000-8000-000000000203";
+const replacementConversationId = "0198b0a1-0000-7000-8000-000000000214";
+const partialConversationId = "0198b0a1-0000-7000-8000-000000000217";
 const approvalId = "0198b0a1-0000-7000-8000-000000000204";
 const notificationId = "0198b0a1-0000-7000-8000-000000000205";
 const inputTaskId = "0198b0a1-0000-7000-8000-000000000206";
@@ -48,6 +53,8 @@ const inputExecutionId = "0198b0a1-0000-7000-8000-000000000207";
 const approvalIdTwo = "0198b0a1-0000-7000-8000-000000000210";
 const notificationIdTwo = "0198b0a1-0000-7000-8000-000000000211";
 const notificationIdThree = "0198b0a1-0000-7000-8000-000000000213";
+const unscopedTaskId = "0198b0a1-0000-7000-8000-000000000220";
+const catchupNotificationId = "0198b0a1-0000-7000-8000-000000000221";
 const scenarioUserDataPrefix = "jarvis-desktop-scenario-";
 const maxScenarioObservationBytes = 512 * 1024;
 const registeredChannels = new Set();
@@ -119,6 +126,19 @@ let notificationDeliveryDeferredEntered;
 let notificationDeliveryDeferredEnteredResolve;
 let notificationDeliveryDeferred;
 let notificationDeliveryDeferredResolve;
+let selectedConversationId = conversationId;
+let deferNextRealtimeClientSecret = false;
+let realtimeClientSecretDeferredEntered;
+let realtimeClientSecretDeferredEnteredResolve;
+let realtimeClientSecretDeferred;
+let realtimeClientSecretDeferredResolve;
+let failNextConversationLoad = false;
+let startupSelectionReads = 0;
+let unscopedTaskRefreshCalls = 0;
+let catchupNotificationVisible = false;
+let catchupTaskRefreshWindow = false;
+let catchupTaskRefreshCalls = 0;
+let catchupNotificationDeliveryCount = 0;
 
 function assertScenarioUserDataPath() {
   if (typeof scenarioUserDataPath !== "string") {
@@ -166,6 +186,28 @@ function armNotificationDeliveryDeferred() {
     notificationDeliveryDeferredResolve = resolve;
   });
   notificationDeliveryOutcomes.set(notificationIdTwo, "deferred");
+}
+
+function armRealtimeClientSecretDeferred() {
+  realtimeClientSecretDeferredEntered = new Promise(resolve => {
+    realtimeClientSecretDeferredEnteredResolve = resolve;
+  });
+  realtimeClientSecretDeferred = new Promise(resolve => {
+    realtimeClientSecretDeferredResolve = resolve;
+  });
+  deferNextRealtimeClientSecret = true;
+}
+
+async function waitForRealtimeClientSecretDeferred() {
+  if (!realtimeClientSecretDeferredEntered) {
+    throw new Error("The renderer scenario did not arm deferred Realtime secret delivery.");
+  }
+  await Promise.race([
+    realtimeClientSecretDeferredEntered,
+    wait(2_000).then(() => {
+      throw new Error("The renderer scenario did not enter deferred Realtime secret delivery.");
+    })
+  ]);
 }
 
 async function waitForNotificationDeliveryDeferred() {
@@ -285,6 +327,26 @@ const conversation = {
   messageCount: 2
 };
 
+const replacementConversation = {
+  id: replacementConversationId,
+  title: "Renderer scenario replacement",
+  messages: [],
+  messageCount: 0
+};
+
+const partialConversation = {
+  id: partialConversationId,
+  title: "Renderer scenario partial artifacts",
+  messages: [],
+  messageCount: 0
+};
+
+const scenarioConversations = new Map([
+  [conversation.id, conversation],
+  [replacementConversation.id, replacementConversation],
+  [partialConversation.id, partialConversation]
+]);
+
 const tasks = [
   { id: taskId, status: "running", goal: "检查控制面板", execution: { id: executionId }, progressSummary: "正在收集状态" },
   {
@@ -304,6 +366,41 @@ const tasks = [
     }
   }
 ];
+
+const artifactTask = {
+  id: artifactTaskId,
+  status: "succeeded",
+  goal: "恢复已完成产物",
+  execution: {
+    id: artifactExecutionId,
+    artifacts: [{
+      path: "/private/worker/phase9b-artifact-fixture.txt",
+      size: 26,
+      sha256: artifactSha256,
+      contentType: "text/plain"
+    }]
+  },
+  artifacts: [{
+    path: "/private/worker/phase9b-artifact-fixture.txt",
+    size: 26,
+    sha256: artifactSha256,
+    contentType: "text/plain"
+  }]
+};
+
+const allTasksByConversation = new Map([
+  [conversationId, [...tasks, artifactTask]],
+  [replacementConversationId, []],
+  [partialConversationId, Array.from({ length: 257 }, (_, index) => ({
+    id: `0198b0a1-0000-7000-8000-${String(300 + index).padStart(12, "0")}`,
+    status: "succeeded",
+    artifacts: [{
+      size: index,
+      sha256: index.toString(16).padStart(64, "0"),
+      contentType: "application/json"
+    }]
+  }))]
+]);
 
 const approvals = [
   {
@@ -352,6 +449,14 @@ const notifications = [
   }
 ];
 
+const catchupNotification = {
+  id: catchupNotificationId,
+  status: "pending",
+  title: "任务已完成",
+  body: "控制面板任务已在连接恢复后同步",
+  actionsJson: "[]"
+};
+
 // Keep this list at the user-surface boundary. It is intentionally explicit so
 // the built scenario cannot pass while only a handful of action buttons happen
 // to be visible. Retry controls are conditional because their truthful UI is
@@ -365,7 +470,7 @@ const requiredControlSpecs = [
   { id: "header-notifications", selector: ".notification-button", container: "viewport" },
   { id: "header-connection", selector: ".connection-button", container: "viewport" },
   { id: "header-session-summary", selector: '.session-menu > summary[aria-label="会话选项"]', container: "viewport" },
-  { id: "header-session-new", selector: ".session-popover button", text: "新建", container: "viewport" },
+  { id: "header-session-new", selector: '[data-testid="phase9b-create-conversation"]', container: "viewport" },
   { id: "header-conversation-input", selector: '#conversation-id[aria-label="Conversation ID"]', container: "viewport" },
   { id: "header-conversation-load", selector: ".session-input-row button", text: "加载", container: "viewport" },
   { id: "realtime-persistence-retry", selector: ".header-actions .quiet-button", text: "重试保存", required: false, container: "viewport" },
@@ -426,10 +531,58 @@ function registerScenarioIpc() {
     status: "offline"
   }));
   registerHandler("backend:getConnectionState", () => ({ state: "connected", revision: 1 }));
-  registerHandler("backend:getConversation", () => conversation);
+  registerHandler("backend:getConversation", (_event, input) => {
+    const requestedConversationId = input?.conversationId;
+    if (failNextConversationLoad && requestedConversationId === replacementConversationId) {
+      failNextConversationLoad = false;
+      return scenarioIpcFailure("retryable", "backend_unavailable");
+    }
+    return scenarioConversations.get(requestedConversationId)
+      ?? scenarioIpcFailure("terminal", "not_found");
+  });
   registerHandler("backend:createConversation", () => conversation);
-  registerHandler("backend:getTasks", () => ({ items: tasks, nextCursor: null }));
-  registerHandler("backend:getNotifications", () => ({ items: notifications }));
+  registerHandler("conversationSelection:get", async () => {
+    startupSelectionReads++;
+    if (startupSelectionReads === 1) {
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    return selectedConversationId
+      ? {
+        schemaVersion: 1,
+        conversationId: selectedConversationId,
+        updatedAt: "2026-09-10T00:00:00.000Z"
+      }
+      : null;
+  });
+  registerHandler("conversationSelection:set", (_event, input) => {
+    if (!scenarioConversations.has(input?.conversationId)) {
+      throw new Error("The renderer scenario received an unknown conversation id.");
+    }
+    selectedConversationId = input.conversationId;
+    return undefined;
+  });
+  registerHandler("conversationSelection:clear", () => {
+    selectedConversationId = undefined;
+    return undefined;
+  });
+  registerHandler("backend:getTasks", (_event, input) => {
+    if (input?.conversationId === undefined) {
+      unscopedTaskRefreshCalls++;
+    }
+    if (catchupTaskRefreshWindow && input?.conversationId === conversationId) {
+      catchupTaskRefreshCalls++;
+    }
+    const allTasks = allTasksByConversation.get(input?.conversationId) ?? [];
+    const items = typeof input?.status === "string"
+      ? allTasks.filter(task => task.status === input.status)
+      : allTasks;
+    return { items, nextCursor: null };
+  });
+  registerHandler("backend:getNotifications", () => ({
+    items: catchupNotificationVisible
+      ? [...notifications, catchupNotification]
+      : notifications
+  }));
   registerHandler("backend:getApprovals", () => ({ items: approvals }));
   registerHandler("backend:getDiagnostics", () => {
     diagnosticsAttempts++;
@@ -478,6 +631,9 @@ function registerScenarioIpc() {
       return undefined;
     }
     notificationActions.push({ action: "delivered", notificationId: deliveredNotificationId });
+    if (deliveredNotificationId === catchupNotificationId) {
+      catchupNotificationDeliveryCount++;
+    }
     return undefined;
   });
   registerHandler("backend:readNotification", (_event, input) => {
@@ -553,8 +709,13 @@ function registerScenarioIpc() {
       expiresAtMs: Date.now() + 60_000
     };
   });
-  registerHandler("backend:createRealtimeClientSecret", () => {
+  registerHandler("backend:createRealtimeClientSecret", async () => {
     realtimeClientSecretRequests++;
+    if (deferNextRealtimeClientSecret) {
+      deferNextRealtimeClientSecret = false;
+      realtimeClientSecretDeferredEnteredResolve?.();
+      await realtimeClientSecretDeferred;
+    }
     return {
       realtimeSessionId: "0198b0a1-0000-7000-8000-000000000209",
       clientSecret: "scenario-client-secret",
@@ -623,12 +784,14 @@ async function waitForConversationProjection(window) {
     try {
       latest = await evaluate(window, `(() => ({
         title: document.querySelector(".workspace-context")?.textContent ?? "",
-        messagePresent: document.body.textContent?.includes("控制面板已连接") === true
+        messagePresent: document.body.textContent?.includes("控制面板已连接") === true,
+        artifactReady: document.querySelector('[data-testid="phase9b-artifact-count"]')?.textContent?.trim() === "1"
+          && document.querySelector('[data-testid="phase9b-artifact-section"]') !== null
       }))()`);
     } catch {
       latest = undefined;
     }
-    if (latest?.title === conversation.title && latest.messagePresent) {
+    if (latest?.title === conversation.title && latest.messagePresent && latest.artifactReady) {
       return latest;
     }
     await wait(40);
@@ -667,6 +830,74 @@ async function waitForStableStartupConnection(window) {
     await wait(50);
   }
   throw new Error("The renderer startup Realtime connection did not reach a stable state.");
+}
+
+async function readPhase9bState(window) {
+  return evaluate(window, `(() => {
+    const read = selector => document.querySelector(selector)?.textContent?.trim() ?? null;
+    const readCount = selector => {
+      const value = read(selector);
+      return value !== null && /^\\d+$/.test(value) ? Number(value) : null;
+    };
+    const connect = document.querySelector('[data-testid="phase9b-connect-realtime"]');
+    const disconnect = document.querySelector('[data-testid="phase9b-disconnect-realtime"]');
+    const activeConnection = connect ?? disconnect;
+    return {
+      appStatus: read('[data-testid="phase9b-app-status"]'),
+      realtimeStatus: read('[data-testid="phase9b-realtime-status"]'),
+      backendConnectionState: read('[data-testid="phase9b-signalr-status"]'),
+      conversationId: read('[data-testid="phase9b-conversation-id"]'),
+      taskCount: readCount('[data-testid="phase9b-task-count"]'),
+      terminalTaskCount: readCount('[data-testid="phase9b-terminal-task-count"]'),
+      terminalTaskId: read('[data-testid="phase9b-terminal-task-id"]'),
+      terminalTaskStatus: read('[data-testid="phase9b-terminal-task-status"]'),
+      artifactCount: readCount('[data-testid="phase9b-artifact-count"]'),
+      artifactRestoreStatus: read('[data-testid="phase9b-artifact-restore-status"]'),
+      notificationCount: readCount('[data-testid="phase9b-notification-count"]'),
+      connectionIntent: connect ? "connect" : disconnect ? "disconnect" : null,
+      connectionDisabled: activeConnection instanceof HTMLButtonElement
+        ? activeConnection.disabled
+        : null
+    };
+  })()`);
+}
+
+async function waitForPhase9bState(window, predicate, timeoutMessage) {
+  const deadline = Date.now() + 5_000;
+  let latest;
+  while (Date.now() < deadline) {
+    try {
+      latest = await readPhase9bState(window);
+    } catch {
+      latest = undefined;
+    }
+    if (latest && predicate(latest)) {
+      return latest;
+    }
+    await wait(40);
+  }
+  const timeoutError = new Error(timeoutMessage);
+  Error.captureStackTrace(timeoutError, waitForPhase9bState);
+  throw timeoutError;
+}
+
+async function setConversationFromScenarioSurface(window, nextConversationId) {
+  await evaluate(window, `(() => {
+    const menu = document.querySelector('[data-testid="phase9b-conversation-menu"]');
+    const details = menu?.parentElement;
+    if (details instanceof HTMLDetailsElement && !details.open) {
+      menu.click();
+    }
+    const input = document.querySelector('[data-testid="phase9b-conversation-input"]');
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, ${JSON.stringify(nextConversationId)});
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  })()`);
+  await wait(20);
+  await evaluate(window, `document.querySelector('[data-testid="phase9b-load-conversation"]')?.click()`);
 }
 
 async function writeAtomicJson(path, value) {
@@ -895,23 +1126,36 @@ async function runScenario() {
   window.show();
   window.focus();
   await waitForRendererSurface(window);
-  await evaluate(window, `(() => {
-    document.querySelector(".session-menu summary")?.click();
-    const input = document.querySelector('input[aria-label="Conversation ID"]');
-    if (!(input instanceof HTMLInputElement)) {
-      return;
+  const preSelectionReady = await waitForPhase9bState(
+    window,
+    state => state.backendConnectionState === "connected"
+      && state.conversationId === null
+      && state.taskCount === 0
+      && state.terminalTaskCount === 0,
+    "The renderer did not expose the connected, unselected startup boundary.");
+  window.webContents.send("backend:event", {
+    eventId: "0198b0a1-0000-7000-8000-000000000223",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      userId: "scenario-user",
+      taskId: unscopedTaskId,
+      status: "running",
+      eventType: "task.updated",
+      occurredAt: 2,
+      entityVersion: 1
     }
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    setter?.call(input, "${conversationId}");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  })()`);
-  await wait(30);
-  await evaluate(window, `(() => {
-    const button = [...document.querySelectorAll(".session-popover button")]
-      .find(element => element.textContent?.includes("加载"));
-    button?.click();
-  })()`);
-  await wait(100);
+  });
+  await wait(40);
+  const preSelectionState = await readPhase9bState(window);
+  const preSelectionGate = {
+    backendConnectionState: preSelectionReady.backendConnectionState,
+    selectionCommitted: preSelectionState.conversationId !== null,
+    taskCount: preSelectionState.taskCount,
+    terminalTaskCount: preSelectionState.terminalTaskCount,
+    artifactCount: preSelectionState.artifactCount,
+    unscopedTaskRefreshCalls
+  };
   await waitForConversationProjection(window);
   const initial = await evaluate(window, `(() => {
     const root = document.querySelector("#root");
@@ -929,6 +1173,23 @@ async function runScenario() {
       realProjectionPresent: document.body.textContent?.includes("检查控制面板") === true
         && document.body.textContent?.includes("保存报告到工作区") === true
         && document.body.textContent?.includes("控制面板场景通知") === true,
+      artifactProjection: (() => {
+        const section = document.querySelector('[data-testid="phase9b-artifact-section"]');
+        const task = document.querySelector('[data-testid="phase9b-artifact-task"]');
+        const terminalSection = document.querySelector('[data-testid="phase9b-terminal-task-section"]');
+        return {
+          sectionPresent: Boolean(section),
+          taskPresent: Boolean(task),
+          activeTaskCount: document.querySelectorAll(".task-list .task-item").length,
+          terminalSectionPresent: Boolean(terminalSection),
+          terminalTaskId: document.querySelector('[data-testid="phase9b-terminal-task-id"]')?.textContent?.trim() ?? null,
+          terminalTaskStatus: document.querySelector('[data-testid="phase9b-terminal-task-status"]')?.textContent?.trim() ?? null,
+          sha256: document.querySelector('[data-testid="phase9b-artifact-sha256"]')?.textContent?.trim() ?? null,
+          size: document.querySelector('[data-testid="phase9b-artifact-size"]')?.textContent?.trim() ?? null,
+          contentType: document.querySelector('[data-testid="phase9b-artifact-content-type"]')?.textContent?.trim() ?? null,
+          pathFree: section !== null && !section.textContent?.includes("/private/worker")
+        };
+      })(),
       persistedConversationPresent: document.querySelector(".workspace-context")?.textContent === "Renderer scenario conversation"
         && document.body.textContent?.includes("控制面板已连接") === true,
       secretFree: !document.body.textContent?.includes("scenario-client-secret"),
@@ -982,6 +1243,226 @@ async function runScenario() {
     clientSecretRequests: realtimeClientSecretRequests,
     connection: startupConnection
   };
+  const initialSurfaceState = await readPhase9bState(window);
+  const originalConversationTasks = allTasksByConversation.get(conversationId);
+  window.webContents.send("backend:connectionState", { state: "disconnected", revision: 2 });
+  const offlineStateBeforeFixture = await waitForPhase9bState(
+    window,
+    state => state.backendConnectionState === "disconnected"
+      && state.conversationId === conversationId
+      && state.taskCount === 2
+      && state.terminalTaskCount === 1
+      && state.notificationCount === 3,
+    "The renderer did not expose the disconnected Realtime state before catch-up data changed.");
+  allTasksByConversation.set(conversationId, [{
+    ...tasks[0],
+    status: "succeeded",
+    entityVersion: 2,
+    progressSummary: null,
+    resultSummary: "控制面板任务已完成"
+  }, tasks[1], artifactTask]);
+  catchupNotificationVisible = true;
+  const offlineCatchupState = await waitForPhase9bState(
+    window,
+    state => state.backendConnectionState === "disconnected"
+      && state.conversationId === conversationId
+      && state.taskCount === 2
+      && state.terminalTaskCount === 1
+      && state.terminalTaskId === artifactTaskId
+      && state.notificationCount === 3,
+    "The renderer changed its task or notification projection before Realtime catch-up.");
+  catchupTaskRefreshCalls = 0;
+  catchupTaskRefreshWindow = true;
+  window.webContents.send("backend:connectionState", { state: "connected", revision: 3 });
+  const connectedCatchupState = await waitForPhase9bState(
+    window,
+    state => state.backendConnectionState === "connected"
+      && state.conversationId === conversationId
+      && state.taskCount === 1
+      && state.terminalTaskCount === 2
+      && state.terminalTaskId === taskId
+      && state.terminalTaskStatus === "succeeded"
+      && state.notificationCount === 4,
+    "The renderer did not restore the terminal task after a normal connected state.");
+  const connectedCatchupProjection = await evaluate(window, `(() => {
+    const terminalIds = [...document.querySelectorAll('[data-testid="phase9b-terminal-task-section"] [data-testid="phase9b-terminal-task-id"]')]
+      .map(element => element.textContent?.trim() ?? "");
+    return {
+      task0TerminalCount: terminalIds.filter(id => id === ${JSON.stringify(taskId)}).length,
+      artifactTerminalCount: terminalIds.filter(id => id === ${JSON.stringify(artifactTaskId)}).length,
+      activeTaskCount: document.querySelectorAll('.task-list .task-item').length
+    };
+  })()`);
+  const catchupRefreshCountAfterFirstConnect = catchupTaskRefreshCalls;
+  window.webContents.send("backend:connectionState", { state: "connected", revision: 3 });
+  await wait(120);
+  const catchupRefreshCountAfterDuplicateConnect = catchupTaskRefreshCalls;
+  const duplicateConnectedRefreshPreserved = catchupRefreshCountAfterDuplicateConnect
+    === catchupRefreshCountAfterFirstConnect;
+  catchupTaskRefreshWindow = false;
+  const connectionCatchup = {
+    disconnectedBeforeFixture: offlineStateBeforeFixture,
+    offline: offlineCatchupState,
+    restored: connectedCatchupState,
+    restoredProjection: connectedCatchupProjection,
+    refreshCallCount: catchupRefreshCountAfterFirstConnect,
+    duplicateRefreshCallCount: catchupRefreshCountAfterDuplicateConnect,
+    duplicateConnectedRefreshPreserved,
+    terminalTaskId: connectedCatchupState.terminalTaskId,
+    terminalTaskStatus: connectedCatchupState.terminalTaskStatus,
+    activeTaskCount: connectedCatchupState.taskCount,
+    terminalTaskCount: connectedCatchupState.terminalTaskCount,
+    notificationCount: connectedCatchupState.notificationCount,
+    notificationDeliveryCount: catchupNotificationDeliveryCount
+  };
+  catchupNotificationVisible = false;
+  allTasksByConversation.set(conversationId, originalConversationTasks ?? [...tasks, artifactTask]);
+  if (initialSurfaceState.realtimeStatus === "connected") {
+    await evaluate(window, `document.querySelector('[data-testid="phase9b-disconnect-realtime"]')?.click()`);
+    await waitForPhase9bState(
+      window,
+      state => state.connectionIntent === "connect" && state.connectionDisabled === false,
+      "The renderer did not expose a manual Realtime connect control after disconnect.");
+  }
+  const secretRequestsBeforeInterleaving = realtimeClientSecretRequests;
+  armRealtimeClientSecretDeferred();
+  await evaluate(window, `document.querySelector('[data-testid="phase9b-connect-realtime"]')?.click()`);
+  await waitForRealtimeClientSecretDeferred();
+  const pendingConversationState = await readPhase9bState(window);
+  await setConversationFromScenarioSurface(window, replacementConversationId);
+  const replacementConversationState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === replacementConversationId
+      && state.taskCount === 0
+      && state.terminalTaskCount === 0
+      && state.notificationCount === 3,
+    "The renderer did not commit the replacement conversation feed state.");
+  if (!realtimeClientSecretDeferredResolve) {
+    throw new Error("The renderer scenario did not expose the deferred Realtime resolver.");
+  }
+  realtimeClientSecretDeferredResolve();
+  const staleConnectState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === replacementConversationId
+      && state.realtimeStatus === "disconnected"
+      && state.connectionIntent === "connect"
+      && state.connectionDisabled === false,
+    "The stale Realtime connection did not fail closed after the conversation switch.");
+
+  await setConversationFromScenarioSurface(window, conversationId);
+  const restoredConversationState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === conversationId
+      && state.taskCount === 2
+      && state.terminalTaskCount === 1
+      && state.terminalTaskStatus === "succeeded",
+    "The renderer did not restore the original conversation task feed.");
+  await setConversationFromScenarioSurface(window, partialConversationId);
+  const partialConversationState = await waitForPhase9bState(
+    window,
+    state => state.conversationId === partialConversationId
+      && state.taskCount === 0
+      && state.terminalTaskCount === 128
+      && state.terminalTaskStatus === "succeeded"
+      && state.artifactRestoreStatus === "partial"
+      && state.artifactCount === 128,
+    "The renderer did not expose the bounded partial artifact recovery state.");
+  const partialArtifactProjection = await evaluate(window, `(() => {
+    const section = document.querySelector('[data-testid="phase9b-artifact-section"]');
+    const notice = section?.querySelector('[data-testid="phase9b-artifact-restore-notice"]');
+    return {
+      sectionPresent: Boolean(section),
+      noticePresent: Boolean(notice),
+      manifestPresent: section?.querySelector('[data-testid="phase9b-artifact-sha256"]') !== null,
+      terminalSectionPresent: document.querySelector('[data-testid="phase9b-terminal-task-section"]') !== null,
+      activeTaskListEmpty: document.querySelectorAll('.task-list .task-item').length === 0,
+      pathFree: section !== null && !section.textContent?.includes('/private/worker')
+    };
+  })()`);
+  await setConversationFromScenarioSurface(window, conversationId);
+  await waitForPhase9bState(
+    window,
+    state => state.conversationId === conversationId
+      && state.taskCount === 2
+      && state.artifactRestoreStatus === "complete",
+    "The renderer did not restore the original conversation after the partial artifact check.");
+  failNextConversationLoad = true;
+  await setConversationFromScenarioSurface(window, replacementConversationId);
+  await wait(100);
+  const failedReplacementState = await readPhase9bState(window);
+  await setConversationFromScenarioSurface(window, conversationId);
+  await waitForPhase9bState(
+    window,
+    state => state.conversationId === conversationId && state.taskCount === 2,
+    "The renderer did not retain the original conversation after a failed switch.");
+  const sameConversationReloadState = await readPhase9bState(window);
+  const conversationInterleaving = {
+    secretRequestCount: realtimeClientSecretRequests - secretRequestsBeforeInterleaving,
+    pendingConversation: pendingConversationState.conversationId,
+    replacementConversation: replacementConversationState,
+    staleConnect: staleConnectState,
+    restoredConversation: restoredConversationState,
+    partialArtifacts: {
+      state: partialConversationState,
+      projection: partialArtifactProjection
+    },
+    failedReplacement: {
+      conversationId: failedReplacementState.conversationId,
+      taskCount: failedReplacementState.taskCount,
+      terminalTaskCount: failedReplacementState.terminalTaskCount,
+      notificationCount: failedReplacementState.notificationCount
+    },
+    sameConversationReload: {
+      conversationId: sameConversationReloadState.conversationId,
+      taskCount: sameConversationReloadState.taskCount,
+      terminalTaskCount: sameConversationReloadState.terminalTaskCount,
+      realtimeStatus: sameConversationReloadState.realtimeStatus
+    },
+    failedSwitchPreservedOriginal: failedReplacementState.conversationId === conversationId
+      && failedReplacementState.taskCount === 2
+      && failedReplacementState.terminalTaskCount === 1,
+    sameConversationBindingPreserved: sameConversationReloadState.conversationId === conversationId
+      && sameConversationReloadState.taskCount === 2
+      && sameConversationReloadState.terminalTaskCount === 1
+  };
+  if (conversationInterleaving.secretRequestCount !== 1) {
+    throw new Error("The renderer interleaving did not issue one deferred secret request.");
+  }
+  if (conversationInterleaving.replacementConversation.conversationId !== replacementConversationId
+    || conversationInterleaving.replacementConversation.taskCount !== 0
+    || conversationInterleaving.replacementConversation.terminalTaskCount !== 0
+    || conversationInterleaving.replacementConversation.artifactCount !== 0
+    || conversationInterleaving.replacementConversation.notificationCount !== 3) {
+    throw new Error("The renderer interleaving did not isolate replacement conversation feed state.");
+  }
+  if (conversationInterleaving.staleConnect.conversationId !== replacementConversationId
+    || conversationInterleaving.staleConnect.realtimeStatus !== "disconnected"
+    || conversationInterleaving.staleConnect.connectionIntent !== "connect"
+    || conversationInterleaving.staleConnect.connectionDisabled) {
+    throw new Error("The renderer interleaving did not fail closed for the stale connection.");
+  }
+  if (conversationInterleaving.restoredConversation.conversationId !== conversationId
+    || conversationInterleaving.restoredConversation.taskCount !== 2
+    || conversationInterleaving.restoredConversation.terminalTaskCount !== 1
+    || conversationInterleaving.restoredConversation.terminalTaskStatus !== "succeeded"
+    || conversationInterleaving.restoredConversation.artifactCount !== 1
+    || conversationInterleaving.restoredConversation.artifactRestoreStatus !== "complete"
+    || conversationInterleaving.partialArtifacts.state.conversationId !== partialConversationId
+    || conversationInterleaving.partialArtifacts.state.taskCount !== 0
+    || conversationInterleaving.partialArtifacts.state.terminalTaskCount !== 128
+    || conversationInterleaving.partialArtifacts.state.terminalTaskStatus !== "succeeded"
+    || conversationInterleaving.partialArtifacts.state.artifactRestoreStatus !== "partial"
+    || conversationInterleaving.partialArtifacts.state.artifactCount !== 128
+    || !conversationInterleaving.partialArtifacts.projection.sectionPresent
+    || !conversationInterleaving.partialArtifacts.projection.noticePresent
+    || !conversationInterleaving.partialArtifacts.projection.manifestPresent
+    || !conversationInterleaving.partialArtifacts.projection.terminalSectionPresent
+    || !conversationInterleaving.partialArtifacts.projection.activeTaskListEmpty
+    || !conversationInterleaving.partialArtifacts.projection.pathFree
+    || !conversationInterleaving.failedSwitchPreservedOriginal
+    || !conversationInterleaving.sameConversationBindingPreserved) {
+    throw new Error("The renderer interleaving did not preserve the original conversation binding.");
+  }
   const initialDeliveryFeedback = await readInitialNotificationDeliveryFeedback(window);
   const expectedInitialDeliveryFeedback = [
     {
@@ -1593,6 +2074,11 @@ async function runScenario() {
   const ownedAppPids = app.getAppMetrics()
     .map(metric => metric.pid)
     .filter(pid => Number.isInteger(pid) && pid > 0);
+  const startupSelectionGate = {
+    selectionReads: startupSelectionReads,
+    unscopedTaskRefreshCalls,
+    preSelection: preSelectionGate
+  };
 
   const observation = {
     initial,
@@ -1600,6 +2086,9 @@ async function runScenario() {
     ipcBridgeProbe,
     ipcRecovery,
     startupRealtime,
+    startupSelectionGate,
+    connectionCatchup,
+    conversationInterleaving,
     dist: {
       canonical: canonicalDistProof,
       identity: "src/clients/desktop/dist",
@@ -1634,6 +2123,16 @@ async function runScenario() {
   }
   if (!initial.mounted || !initial.requiredLabelsPresent || !initial.realProjectionPresent
     || !initial.persistedConversationPresent
+    || !initial.artifactProjection.sectionPresent
+    || !initial.artifactProjection.taskPresent
+    || initial.artifactProjection.activeTaskCount !== 2
+    || !initial.artifactProjection.terminalSectionPresent
+    || initial.artifactProjection.terminalTaskId !== artifactTaskId
+    || initial.artifactProjection.terminalTaskStatus !== "succeeded"
+    || initial.artifactProjection.sha256 !== artifactSha256
+    || initial.artifactProjection.size !== "26"
+    || initial.artifactProjection.contentType !== "text/plain"
+    || !initial.artifactProjection.pathFree
     || !initial.secretFree
     || !initial.deviceStatus
     || !initial.localAudioAvailable
@@ -1647,6 +2146,50 @@ async function runScenario() {
     || !startupRealtime.connection?.stable
     || startupRealtime.connection.disabled
     || startupRealtime.connection.status === "connecting"
+    || startupSelectionGate.selectionReads < 1
+    || startupSelectionGate.unscopedTaskRefreshCalls !== 0
+    || startupSelectionGate.preSelection.backendConnectionState !== "connected"
+    || startupSelectionGate.preSelection.selectionCommitted
+    || startupSelectionGate.preSelection.taskCount !== 0
+    || startupSelectionGate.preSelection.terminalTaskCount !== 0
+    || startupSelectionGate.preSelection.artifactCount !== 0
+    || startupSelectionGate.preSelection.unscopedTaskRefreshCalls !== 0
+    || connectionCatchup.offline.backendConnectionState !== "disconnected"
+    || connectionCatchup.offline.taskCount !== 2
+    || connectionCatchup.offline.terminalTaskCount !== 1
+    || connectionCatchup.offline.notificationCount !== 3
+    || connectionCatchup.restored.backendConnectionState !== "connected"
+    || connectionCatchup.restored.terminalTaskId !== taskId
+    || connectionCatchup.restored.terminalTaskStatus !== "succeeded"
+    || connectionCatchup.restored.taskCount !== 1
+    || connectionCatchup.restored.terminalTaskCount !== 2
+    || connectionCatchup.restored.notificationCount !== 4
+    || connectionCatchup.restoredProjection.task0TerminalCount !== 1
+    || connectionCatchup.restoredProjection.artifactTerminalCount !== 1
+    || connectionCatchup.restoredProjection.activeTaskCount !== 1
+    || connectionCatchup.refreshCallCount !== 8
+    || connectionCatchup.duplicateRefreshCallCount !== connectionCatchup.refreshCallCount
+    || !connectionCatchup.duplicateConnectedRefreshPreserved
+    || connectionCatchup.notificationDeliveryCount !== 1
+    || conversationInterleaving.secretRequestCount !== 1
+    || conversationInterleaving.pendingConversation !== conversationId
+    || conversationInterleaving.replacementConversation.conversationId !== replacementConversationId
+    || conversationInterleaving.replacementConversation.taskCount !== 0
+    || conversationInterleaving.replacementConversation.terminalTaskCount !== 0
+    || conversationInterleaving.replacementConversation.artifactCount !== 0
+    || conversationInterleaving.replacementConversation.notificationCount !== 3
+    || conversationInterleaving.staleConnect.conversationId !== replacementConversationId
+    || conversationInterleaving.staleConnect.realtimeStatus !== "disconnected"
+    || conversationInterleaving.staleConnect.connectionIntent !== "connect"
+    || conversationInterleaving.staleConnect.connectionDisabled
+    || conversationInterleaving.restoredConversation.conversationId !== conversationId
+    || conversationInterleaving.restoredConversation.taskCount !== 2
+    || conversationInterleaving.restoredConversation.terminalTaskCount !== 1
+    || conversationInterleaving.restoredConversation.terminalTaskStatus !== "succeeded"
+    || conversationInterleaving.restoredConversation.artifactCount !== 1
+    || conversationInterleaving.restoredConversation.artifactRestoreStatus !== "complete"
+    || !conversationInterleaving.failedSwitchPreservedOriginal
+    || !conversationInterleaving.sameConversationBindingPreserved
     || !["connected", "degraded"].includes(realtimeRecoveryPersistence.failure.status)
     || realtimeRecoveryPersistence.failure.persistenceRetryReason !== "event-ingest"
     || realtimeRecoveryPersistence.failure.ingestCalls !== 1
@@ -1810,6 +2353,22 @@ runScenario()
     if (finished) {
       return;
     }
-    console.error(error instanceof Error ? error.message : error);
-    void finish(1);
+    const stack = error instanceof Error ? error.stack ?? "" : "";
+    const location = /renderer-scenario\.mjs:(\d+):(\d+)/.exec(stack);
+    const failureObservation = {
+      status: "failed",
+      observationAvailable: false,
+      failureReason: "SCENARIO_STEP_FAILED",
+      errorLocation: location
+        ? { line: Number(location[1]), column: Number(location[2]) }
+        : null
+    };
+    void (async () => {
+      if (scenarioOutput) {
+        await writeAtomicJson(scenarioOutput, failureObservation);
+      }
+      await finish(1);
+    })().catch(() => {
+      void finish(1);
+    });
   });

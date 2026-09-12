@@ -571,6 +571,33 @@ public sealed class Phase4ApiTests : IDisposable
             Assert.Equal("thread-bounded", persisted.Execution!.CodexThreadId);
             Assert.Equal("turn-bounded", persisted.Execution.CodexTurnId);
             Assert.NotNull(persisted.Execution.CodexTurnStartRequestedAtMs);
+
+            using var scope = factory.Services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+            var taskOutbox = await db.OutboxMessages
+                .Where(message => message.EventType == "task.updated"
+                    && message.PayloadJson.Contains(accepted.TaskId.ToString()))
+                .Select(message => message.PayloadJson)
+                .ToListAsync();
+            var completedEvents = new List<JsonElement>();
+            foreach (var payload in taskOutbox)
+            {
+                using var document = JsonDocument.Parse(payload);
+                var eventPayload = document.RootElement.GetProperty("payload");
+                if (eventPayload.TryGetProperty("eventType", out var type)
+                    && type.GetString() == "task.completed")
+                {
+                    completedEvents.Add(eventPayload.Clone());
+                }
+            }
+            var completedEvent = Assert.Single(completedEvents);
+            var summary = Assert.Single(completedEvent.GetProperty("artifacts").EnumerateArray());
+            Assert.Equal(["contentType", "sha256", "size"], summary.EnumerateObject().Select(property => property.Name).Order());
+            Assert.Equal(artifactBytes.LongLength, summary.GetProperty("size").GetInt64());
+            Assert.Equal(artifactHash, summary.GetProperty("sha256").GetString());
+            Assert.Equal("text/plain", summary.GetProperty("contentType").GetString());
+            Assert.False(completedEvent.TryGetProperty("resultSummary", out _));
+            Assert.DoesNotContain(artifactPath, completedEvent.GetRawText(), StringComparison.Ordinal);
         }
         finally
         {

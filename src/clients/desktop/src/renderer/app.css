@@ -952,15 +952,77 @@ ol {
 }
 
 .task-item,
+.terminal-task-item,
 .notification-item {
   padding: 17px 0;
   border-top: 1px solid var(--line);
 }
 
 .task-item:first-child,
+.terminal-task-item:first-child,
 .notification-item:first-child {
   padding-top: 0;
   border-top: 0;
+}
+
+.terminal-task-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.artifact-restore-note {
+  margin: 10px 0 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.artifact-task {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.artifact-task + .artifact-task {
+  margin-top: 0;
+}
+
+.artifact-manifest {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.artifact-manifest li {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.artifact-manifest li > span {
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.artifact-manifest small {
+  color: var(--text-dim);
+  font-size: 9px;
 }
 
 .task-heading {

@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Jarvis.Application.Devices;
 using Jarvis.Contracts;
 using Jarvis.DeviceNode.Codex;
+using Jarvis.Infrastructure.Budgets;
 using Jarvis.Infrastructure.Observability;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -141,7 +143,8 @@ public sealed partial class DeviceNodeWorker(
     IDeviceApprovalDecisionWaiter? approvalWaiter = null,
     TimeProvider? timeProvider = null,
     IDeviceUserInputWaiter? userInputWaiter = null,
-    IDeviceNodeWakeSignal? wakeSignal = null) : BackgroundService
+    IDeviceNodeWakeSignal? wakeSignal = null,
+    IPhase9bBudgetAdmission? budgetAdmission = null) : BackgroundService
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly DeviceNodeOptions nodeOptions = options.Value;
@@ -149,6 +152,7 @@ public sealed partial class DeviceNodeWorker(
     private readonly IDeviceUserInputWaiter userInputWaiter = userInputWaiter ?? new FailClosedUserInputWaiter();
     private readonly TimeProvider timeProvider = timeProvider ?? TimeProvider.System;
     private readonly IDeviceNodeWakeSignal wakeSignal = wakeSignal ?? new DeviceNodeWakeSignal(timeProvider ?? TimeProvider.System);
+    private readonly IPhase9bBudgetAdmission? budgetAdmission = budgetAdmission;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -226,6 +230,12 @@ public sealed partial class DeviceNodeWorker(
         var task = claim.Task;
         var execution = claim.Execution;
         var leaseOwner = claim.LeaseOwner;
+        if (task.Status == TaskStatusValue.CancellationRequested)
+        {
+            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (claim.CapabilityEnvelope is null)
         {
             await AppendEventSafeAsync(
@@ -267,8 +277,20 @@ public sealed partial class DeviceNodeWorker(
             execution.CodexTurnId,
             execution.CodexTurnStartRequestedAtMs is not null);
         var supervisor = new CodexProcessSupervisor(
-            _ =>
+            async token =>
             {
+                // A JSON-RPC request belongs to the process that emitted it.
+                // Durable input (including an answer awaiting consumption) is
+                // insufficient evidence that a replacement process can accept it.
+                if (turnState.StartAttempted || turnState.TurnId is not null || task.PendingUserInput is not null)
+                {
+                    var durableTask = await controlPlane.GetTaskAsync(task.Id, token).ConfigureAwait(false);
+                    if (durableTask.PendingUserInput is not null)
+                    {
+                        throw new CodexPendingInteractionNotResumableException();
+                    }
+                }
+
                 var runtimeOptions = new CodexRuntimeOptions(nodeOptions.CodexBinaryPath, nodeOptions.CodexArguments)
                 {
                     Policy = effectivePolicy,
@@ -280,12 +302,14 @@ public sealed partial class DeviceNodeWorker(
                         ["CODEX_HOME"] = nodeOptions.CodexHome
                     })
                 };
-                return Task.FromResult<ICodexRuntime>(new CodexAppServerClient(runtimeOptions));
+                return new CodexAppServerClient(runtimeOptions);
             },
             new CodexSupervisorOptions(
                 Math.Max(0, nodeOptions.MaxRestartAttempts),
-                TimeSpan.FromMilliseconds(Math.Max(0, nodeOptions.RestartDelayMs))));
+                TimeSpan.FromMilliseconds(Math.Max(0, nodeOptions.RestartDelayMs))),
+            budgetAdmission);
 
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
             await supervisor.RunAsync(
@@ -301,15 +325,34 @@ public sealed partial class DeviceNodeWorker(
                     turnState,
                     effectivePolicy,
                     token),
-                onStateAsync: (state, token) => ObserveSupervisorStateAsync(state, task, execution, leaseOwner, token),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                onStateAsync: (state, token) => ObserveSupervisorStateAsync(state, task, execution, leaseOwner, executionCancellation, token),
+                cancellationToken: executionCancellation.Token,
+                logicalTaskId: task.Id).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (CodexPendingInteractionNotResumableException)
+        {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+            await AppendFailureAsync(
+                task,
+                execution,
+                leaseOwner,
+                "CODEX_PENDING_INTERACTION_NOT_RESUMABLE",
+                "The original Codex user-input interaction cannot be safely resumed after process restart.",
+                cancellationToken).ConfigureAwait(false);
+        }
         catch (CodexTurnStartUncertainException exception)
         {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
             LogExecutionFailure(logger, exception, task.Id);
             await AppendEventSafeAsync(
                 task.Id,
@@ -324,8 +367,27 @@ public sealed partial class DeviceNodeWorker(
                 $"device-turn-uncertain:{execution.Id:D}",
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (Phase9bBudgetAdmissionException exception)
+        {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+            LogExecutionFailure(logger, exception, task.Id);
+            await AppendFailureAsync(
+                task,
+                execution,
+                leaseOwner,
+                "phase9b_budget_admission_failed",
+                "The live budget admission boundary rejected this Codex attempt.",
+                cancellationToken).ConfigureAwait(false);
+        }
         catch (Exception exception)
         {
+            if (await ResolveDurableCancellationAfterRuntimeExitAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
             LogExecutionFailure(logger, exception, task.Id);
             await AppendEventSafeAsync(
                 task.Id,
@@ -352,13 +414,19 @@ public sealed partial class DeviceNodeWorker(
         CapabilityPolicy policy,
         CancellationToken cancellationToken)
     {
-        // A restarted app-server must reconstruct pending input from the
-        // Control Plane claim, never from runtime memory or the old process.
+        // Re-read after initialization to close the race with a late durable
+        // input write from the previous process. Never reconstruct its waiter.
         var durableTask = await controlPlane.GetTaskAsync(claimedTask.Id, cancellationToken).ConfigureAwait(false);
         var durableExecution = durableTask.Execution is { Id: var executionId } execution
             && executionId == claimedExecution.Id
             ? execution
             : claimedExecution;
+        if (durableTask.Status == TaskStatusValue.CancellationRequested)
+        {
+            await AppendCancellationAsync(durableTask, durableExecution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return "The durable Codex task was cancelled before turn execution.";
+        }
+
         if (durableTask.Status is TaskStatusValue.Succeeded or TaskStatusValue.Failed or TaskStatusValue.Cancelled
             || durableExecution.Status is TaskExecutionStatusValue.Succeeded or TaskExecutionStatusValue.Failed or TaskExecutionStatusValue.Cancelled)
         {
@@ -366,6 +434,11 @@ public sealed partial class DeviceNodeWorker(
             // process exit) is already durable. Do not let the supervisor
             // restart boundary create another turn for that terminal outcome.
             return "The durable Codex task is already terminal.";
+        }
+
+        if (durableTask.PendingUserInput is not null)
+        {
+            throw new CodexPendingInteractionNotResumableException();
         }
 
         return await ExecuteTurnAsync(
@@ -419,7 +492,7 @@ public sealed partial class DeviceNodeWorker(
             turn = await StartTurnOnceAsync(runtime, threadId, task.Goal, turnState, cancellationToken).ConfigureAwait(false);
         }
 
-        await controlPlane.AppendEventAsync(
+        var turnStarted = await controlPlane.AppendEventAsync(
             task.Id,
             new DeviceTaskEventRequest(
                 $"codex-turn-started:{turn.TurnId}",
@@ -430,6 +503,14 @@ public sealed partial class DeviceNodeWorker(
             leaseOwner,
             $"codex-turn-started:{turn.TurnId}",
             cancellationToken).ConfigureAwait(false);
+        if (turnStarted.Status == TaskStatusValue.CancellationRequested)
+        {
+            // The start intent may have committed before cancellation arrived.
+            // Interrupt its accepted native turn before handling further events.
+            await runtime.InterruptTurnAsync(threadId, turn.TurnId, cancellationToken).ConfigureAwait(false);
+            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return "Codex task cancelled during turn start.";
+        }
 
         using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var cancellationRequested = false;
@@ -442,19 +523,9 @@ public sealed partial class DeviceNodeWorker(
             () => cancellationRequested = true,
             turnCancellation);
         var progressNumber = 0;
-        var pendingUserInputRequestId = task.PendingUserInput?.RequestId;
-        var pendingUserInputRequestIdIsString = task.PendingUserInput?.RequestIdIsString ?? true;
+        string? pendingUserInputRequestId = null;
+        var pendingUserInputRequestIdIsString = true;
         Task<DeviceUserInputResolution?>? userInputTask = null;
-        if (task.PendingUserInput is not null)
-        {
-            userInputTask = userInputWaiter.WaitAsync(
-                task.Id,
-                execution.Id,
-                task.PendingUserInput.RequestId,
-                pendingUserInputRequestIdIsString,
-                leaseOwner,
-                turnCancellation.Token);
-        }
 
         await using var runtimeEvents = runtime.ReadEventsAsync(turnCancellation.Token).GetAsyncEnumerator(turnCancellation.Token);
         Task<bool>? nextRuntimeEvent = null;
@@ -543,6 +614,47 @@ public sealed partial class DeviceNodeWorker(
 
                         if (eventWhileWaiting.Method is "turn/completed" or "turn/complete")
                         {
+                            if (!CodexCompletionProjection.HasNestedTurn(eventWhileWaiting.Params))
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_completion_incomplete",
+                                    "Codex completion data did not include the active turn.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex completion was incomplete.";
+                            }
+
+                            string? completionStatus;
+                            try
+                            {
+                                completionStatus = CodexCompletionProjection.ExtractStatus(eventWhileWaiting.Params, turn);
+                            }
+                            catch (InvalidDataException)
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_completion_incomplete",
+                                    "Codex completion data was incomplete or did not match the active turn.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex completion was incomplete.";
+                            }
+
+                            if (completionStatus is null)
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_completion_incomplete",
+                                    "Codex completion data was missing its turn status.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex completion was incomplete.";
+                            }
+
                             await ResolveUserInputSafelyAsync(
                                 task,
                                 execution,
@@ -551,7 +663,54 @@ public sealed partial class DeviceNodeWorker(
                                 leaseOwner,
                                 $"codex-user-input-completed:{task.Id:D}:{RequestIdentitySuffix(pendingUserInputRequestId, pendingUserInputRequestIdIsString)}",
                                 turnCancellation.Token).ConfigureAwait(false);
-                            return "Codex completed while the user-input request was pending.";
+
+                            if (cancellationRequested)
+                            {
+                                await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                                return "Codex task cancelled.";
+                            }
+
+                            if (string.Equals(completionStatus, "cancelled", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(completionStatus, "interrupted", StringComparison.OrdinalIgnoreCase))
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    string.Equals(completionStatus, "interrupted", StringComparison.OrdinalIgnoreCase)
+                                        ? "codex_turn_interrupted"
+                                        : "codex_turn_cancelled",
+                                    "Codex ended the turn before the pending user-input request was answered.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex turn ended before user input was answered.";
+                            }
+
+                            if (string.Equals(completionStatus, "failed", StringComparison.OrdinalIgnoreCase))
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_turn_failed",
+                                    "Codex turn failed while a user-input request was pending.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex turn failed.";
+                            }
+
+                            await AppendFailureAsync(
+                                task,
+                                execution,
+                                leaseOwner,
+                                completionStatus is "completed"
+                                    ? "codex_user_input_unresolved"
+                                    : "codex_completion_incomplete",
+                                completionStatus is "completed"
+                                    ? "Codex completed while a user-input request was still pending."
+                                    : "Codex reported a non-terminal turn status while a user-input request was pending.",
+                                cancellationToken).ConfigureAwait(false);
+                            return completionStatus is "completed"
+                                ? "Codex completed with unresolved user input."
+                                : "Codex completion was incomplete.";
                         }
 
                         continue;
@@ -816,7 +975,12 @@ public sealed partial class DeviceNodeWorker(
                 if (runtimeEvent.Method.StartsWith("item/", StringComparison.Ordinal)
                     || runtimeEvent.Method.StartsWith("turn/", StringComparison.Ordinal))
                 {
-                    var progress = ExtractProgress(runtimeEvent.Params);
+                    var isCompletion = runtimeEvent.Method is "turn/completed" or "turn/complete";
+                    // A completion with a nested turn must be validated inside
+                    // the terminal branch. Do not let progress projection
+                    // consume malformed or partial completion data first.
+                    var hasNestedTurn = isCompletion && CodexCompletionProjection.HasNestedTurn(runtimeEvent.Params);
+                    var progress = isCompletion ? null : ExtractProgress(runtimeEvent.Params);
                     if (!string.IsNullOrWhiteSpace(progress))
                     {
                         progressNumber++;
@@ -833,35 +997,148 @@ public sealed partial class DeviceNodeWorker(
                             cancellationToken).ConfigureAwait(false);
                     }
 
-                    if (runtimeEvent.Method is "turn/completed" or "turn/complete")
+                    if (isCompletion)
                     {
-                        var status = ExtractStatus(runtimeEvent.Params);
-                        var summary = progress ?? "Codex task completed.";
-                        if (pendingUserInputRequestId is not null)
+                        try
+                        {
+                            if (!hasNestedTurn)
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_completion_incomplete",
+                                    "Codex completion data did not include the active turn.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex completion was incomplete.";
+                            }
+
+                            var status = CodexCompletionProjection.ExtractStatus(runtimeEvent.Params, turn);
+                            JsonElement? completionParameters = runtimeEvent.Params;
+                            string? summary;
+                            if (hasNestedTurn
+                                && string.Equals(status, "completed", StringComparison.Ordinal))
+                            {
+                                if (CodexCompletionProjection.RequiresFullThreadRead(runtimeEvent.Params, turn))
+                                {
+                                    JsonElement threadRead;
+                                    try
+                                    {
+                                        threadRead = await runtime.ReadThreadAsync(turn.ThreadId, cancellationToken).ConfigureAwait(false);
+                                    }
+                                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                                    {
+                                        throw;
+                                    }
+                                    catch (Exception exception)
+                                    {
+                                        throw new InvalidDataException(
+                                            "Codex thread history could not be read for completion.",
+                                            exception);
+                                    }
+
+                                    completionParameters = CodexCompletionProjection.CreateFullCompletionParameters(threadRead, turn);
+                                    if (!string.Equals(
+                                            CodexCompletionProjection.ExtractStatus(completionParameters, turn),
+                                            status,
+                                            StringComparison.Ordinal))
+                                    {
+                                        throw new InvalidDataException("Codex thread history status did not match completion.");
+                                    }
+                                }
+
+                                summary = CodexCompletionProjection.ExtractFinalAnswer(completionParameters, turn);
+                            }
+                            else
+                            {
+                                summary = hasNestedTurn ? null : progress ?? "Codex task completed.";
+                            }
+                            if (hasNestedTurn
+                                && string.Equals(status, "completed", StringComparison.Ordinal)
+                                && string.IsNullOrWhiteSpace(summary))
+                            {
+                                throw new InvalidDataException("Codex completed turn has no final answer.");
+                            }
+
+                            if (pendingUserInputRequestId is not null)
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_user_input_unresolved",
+                                    "Codex completed while a user-input request was still pending.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex completed with unresolved user input.";
+                            }
+                            if (cancellationRequested)
+                            {
+                                await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+                                return "Codex task cancelled.";
+                            }
+
+                            if (string.Equals(status, "cancelled", StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(status, "interrupted", StringComparison.OrdinalIgnoreCase))
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    string.Equals(status, "interrupted", StringComparison.OrdinalIgnoreCase)
+                                        ? "codex_turn_interrupted"
+                                        : "codex_turn_cancelled",
+                                    "Codex ended the turn without a confirmed Control Plane cancellation.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex turn ended without a confirmed cancellation.";
+                            }
+
+                            if (string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase))
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_turn_failed",
+                                    summary ?? "Codex turn failed.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return summary ?? "Codex turn failed.";
+                            }
+
+                            if (!string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase))
+                            {
+                                await AppendFailureAsync(
+                                    task,
+                                    execution,
+                                    leaseOwner,
+                                    "codex_turn_status_invalid",
+                                    "Codex reported a non-terminal turn status.",
+                                    cancellationToken).ConfigureAwait(false);
+                                return "Codex turn status was not completed.";
+                            }
+
+                            await AppendResultAsync(
+                                task,
+                                execution,
+                                leaseOwner,
+                                turn,
+                                completionParameters,
+                                runtimeEvent.Params,
+                                summary!,
+                                policy,
+                                cancellationToken).ConfigureAwait(false);
+                            return summary!;
+                        }
+                        catch (InvalidDataException)
                         {
                             await AppendFailureAsync(
                                 task,
                                 execution,
                                 leaseOwner,
-                                "codex_user_input_unresolved",
-                                "Codex completed while a user-input request was still pending.",
+                                "codex_completion_incomplete",
+                                "Codex completion data was incomplete or did not match the active turn.",
                                 cancellationToken).ConfigureAwait(false);
-                            return "Codex completed with unresolved user input.";
+                            return "Codex completion was incomplete.";
                         }
-                        if (cancellationRequested || string.Equals(status, "cancelled", StringComparison.OrdinalIgnoreCase))
-                        {
-                            await AppendCancellationAsync(task, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
-                            return "Codex task cancelled.";
-                        }
-
-                        if (string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase))
-                        {
-                            await AppendFailureAsync(task, execution, leaseOwner, "codex_turn_failed", summary, cancellationToken).ConfigureAwait(false);
-                            return summary;
-                        }
-
-                        await AppendResultAsync(task, execution, leaseOwner, turn, runtimeEvent, summary, policy, cancellationToken).ConfigureAwait(false);
-                        return summary;
                     }
                 }
                 else if (runtimeEvent.Method == "protocol/error")
@@ -885,7 +1162,13 @@ public sealed partial class DeviceNodeWorker(
             turnCancellation.Cancel();
             try
             {
-                await Task.WhenAll(leaseRenewal, cancellationMonitor).ConfigureAwait(false);
+                // An async iterator cannot be disposed while MoveNextAsync is
+                // still pending. Drain the cancelled read before leaving its scope.
+                await Task.WhenAll(
+                    leaseRenewal,
+                    cancellationMonitor,
+                    (Task?)nextRuntimeEvent ?? Task.CompletedTask,
+                    (Task?)userInputTask ?? Task.CompletedTask).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (turnCancellation.IsCancellationRequested)
             {
@@ -1099,12 +1382,13 @@ public sealed partial class DeviceNodeWorker(
         TaskExecutionResponse execution,
         string leaseOwner,
         CodexTurnHandle turn,
-        CodexRuntimeEvent runtimeEvent,
+        JsonElement? completionParameters,
+        JsonElement? notificationParameters,
         string summary,
         CapabilityPolicy policy,
         CancellationToken cancellationToken)
     {
-        var artifacts = ExtractArtifacts(runtimeEvent.Params);
+        var artifacts = CodexCompletionProjection.ExtractArtifacts(completionParameters, policy, turn);
         ArtifactManifestValidator.EnsureLocalFilesValid(policy, artifacts);
         await controlPlane.AppendEventAsync(
             task.Id,
@@ -1112,12 +1396,30 @@ public sealed partial class DeviceNodeWorker(
                 $"codex-completed:{turn.TurnId}",
                 execution.Id,
                 "task.completed",
-                PayloadJson: runtimeEvent.Params?.GetRawText(),
+                PayloadJson: notificationParameters?.GetRawText(),
                 ResultSummary: summary,
                 Artifacts: artifacts),
             leaseOwner,
             $"codex-completed:{turn.TurnId}",
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> ResolveDurableCancellationAfterRuntimeExitAsync(
+        TaskResponse task,
+        TaskExecutionResponse execution,
+        string leaseOwner,
+        CancellationToken cancellationToken)
+    {
+        // RunAsync disposes the native process before an exception escapes.
+        // Cancellation therefore remains authoritative even if interrupt failed.
+        var durableTask = await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false);
+        if (durableTask.Status == TaskStatusValue.CancellationRequested)
+        {
+            await AppendCancellationAsync(durableTask, execution, leaseOwner, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+
+        return durableTask.Status is TaskStatusValue.Succeeded or TaskStatusValue.Failed or TaskStatusValue.Cancelled;
     }
 
     private async Task AppendCancellationAsync(
@@ -1164,10 +1466,20 @@ public sealed partial class DeviceNodeWorker(
         TaskResponse task,
         TaskExecutionResponse execution,
         string leaseOwner,
+        CancellationTokenSource executionCancellation,
         CancellationToken cancellationToken)
     {
         if (state.Status == CodexSupervisorStatus.Recovering)
         {
+            var durableTask = await controlPlane.GetTaskAsync(task.Id, cancellationToken).ConfigureAwait(false);
+            if (durableTask.Status == TaskStatusValue.CancellationRequested)
+            {
+                // Leave the supervisor so its runtime is disposed before the
+                // outer cancellation path acknowledges the durable request.
+                executionCancellation.Cancel();
+                return;
+            }
+
             await AppendEventSafeAsync(
                 task.Id,
                 new DeviceTaskEventRequest(
@@ -1303,6 +1615,23 @@ public sealed partial class DeviceNodeWorker(
 
     private static string? ExtractProgress(JsonElement? parameters)
     {
+        string? nested;
+        try
+        {
+            // Progress notifications can carry a summary/not-loaded nested
+            // view. Terminal completion is responsible for the strict
+            // thread/read projection; partial progress is simply ignored.
+            nested = CodexCompletionProjection.ExtractFinalAnswer(parameters);
+        }
+        catch (InvalidDataException)
+        {
+            nested = null;
+        }
+        if (!string.IsNullOrWhiteSpace(nested))
+        {
+            return nested;
+        }
+
         if (parameters is not JsonElement value || value.ValueKind != JsonValueKind.Object)
         {
             return null;
@@ -1322,28 +1651,298 @@ public sealed partial class DeviceNodeWorker(
 
     private static string? ExtractStatus(JsonElement? parameters)
     {
-        if (parameters is not JsonElement value || value.ValueKind != JsonValueKind.Object)
+        return CodexCompletionProjection.ExtractStatus(parameters);
+    }
+
+    [LoggerMessage(EventId = 5101, Level = LogLevel.Warning, Message = "Device Node is disabled because its identity is not configured.")]
+    private static partial void LogIdentityNotConfigured(ILogger logger);
+
+    [LoggerMessage(EventId = 5102, Level = LogLevel.Error, Message = "Device Node loop failed; retrying after a bounded delay.")]
+    private static partial void LogWorkerLoopFailure(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 5103, Level = LogLevel.Error, Message = "Codex execution failed after recovery attempts for task {TaskId}.")]
+    private static partial void LogExecutionFailure(ILogger logger, Exception exception, Guid taskId);
+
+    [LoggerMessage(EventId = 5104, Level = LogLevel.Warning, Message = "Could not persist Device Node event {EventType} for task {TaskId}.")]
+    private static partial void LogEventPersistenceFailure(ILogger logger, Exception exception, string eventType, Guid taskId);
+}
+
+/// <summary>
+/// Projects the bounded, persisted parts of a Codex turn completion. The
+/// app-server completion notification nests authoritative output under
+/// <c>params.turn.items</c>; legacy top-level fields remain supported for
+/// already deployed protocol fixtures.
+/// </summary>
+public static class CodexCompletionProjection
+{
+    private const int MaximumFinalAnswerLength = 100_000;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static string? ExtractFinalAnswer(JsonElement? parameters, CodexTurnHandle? expectedTurn = null)
+    {
+        if (!TryGetNestedTurn(parameters, expectedTurn, out _, out var items))
         {
             return null;
         }
 
-        if (value.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String)
+        string? last = null;
+        string? finalAnswer = null;
+        foreach (var item in items.EnumerateArray())
         {
-            return status.GetString();
+            if (item.ValueKind != JsonValueKind.Object
+                || !item.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String
+                || !string.Equals(type.GetString(), "agentMessage", StringComparison.Ordinal)
+                || !item.TryGetProperty("text", out var text)
+                || text.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var value = text.GetString();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            last = value;
+            if (item.TryGetProperty("phase", out var phase)
+                && phase.ValueKind == JsonValueKind.String
+                && string.Equals(phase.GetString(), "final_answer", StringComparison.Ordinal))
+            {
+                finalAnswer = value;
+            }
         }
 
-        if (value.TryGetProperty("turn", out var turn)
-            && turn.ValueKind == JsonValueKind.Object
-            && turn.TryGetProperty("status", out var turnStatus)
-            && turnStatus.ValueKind == JsonValueKind.String)
-        {
-            return turnStatus.GetString();
-        }
-
-        return null;
+        return BoundFinalAnswer(finalAnswer ?? last);
     }
 
-    private static ArtifactManifestEntry[] ExtractArtifacts(JsonElement? parameters)
+    public static string? ExtractStatus(JsonElement? parameters, CodexTurnHandle? expectedTurn = null)
+    {
+        if (!TryGetNestedTurnIdentity(parameters, expectedTurn, out var nestedTurn))
+        {
+            if (parameters is not JsonElement value || value.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            return value.TryGetProperty("status", out var status) && status.ValueKind == JsonValueKind.String
+                ? status.GetString()
+                : null;
+        }
+
+        return nestedTurn.GetProperty("status").GetString();
+    }
+
+    public static bool HasNestedTurn(JsonElement? parameters) => parameters is JsonElement value
+        && value.ValueKind == JsonValueKind.Object
+        && value.TryGetProperty("turn", out _);
+
+    /// <summary>
+    /// Codex completion notifications may contain a summary or an intentionally
+    /// empty not-loaded view. Those views are a request to read the persisted
+    /// thread, never a source of completion artifacts.
+    /// </summary>
+    public static bool RequiresFullThreadRead(JsonElement? parameters, CodexTurnHandle expectedTurn)
+    {
+        ArgumentNullException.ThrowIfNull(expectedTurn);
+        if (!TryGetNestedTurnIdentity(parameters, expectedTurn, out var turn))
+        {
+            return false;
+        }
+
+        if (!turn.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
+            throw InvalidCompletionData();
+        }
+
+        if (!turn.TryGetProperty("itemsView", out var itemsView))
+        {
+            return false;
+        }
+
+        return !string.Equals(itemsView.GetString(), "full", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Converts a pinned <c>thread/read(includeTurns:true)</c> response into
+    /// the small completion envelope consumed by the existing projection.
+    /// The thread and turn IDs are checked before any item is trusted.
+    /// </summary>
+    public static JsonElement CreateFullCompletionParameters(
+        JsonElement threadReadResponse,
+        CodexTurnHandle expectedTurn)
+    {
+        ArgumentNullException.ThrowIfNull(expectedTurn);
+        if (threadReadResponse.ValueKind != JsonValueKind.Object
+            || !threadReadResponse.TryGetProperty("thread", out var thread)
+            || thread.ValueKind != JsonValueKind.Object
+            || !thread.TryGetProperty("id", out var threadId)
+            || threadId.ValueKind != JsonValueKind.String
+            || !string.Equals(threadId.GetString(), expectedTurn.ThreadId, StringComparison.Ordinal)
+            || !thread.TryGetProperty("turns", out var turns)
+            || turns.ValueKind != JsonValueKind.Array)
+        {
+            throw InvalidCompletionData();
+        }
+
+        JsonElement matchingTurn = default;
+        var matchCount = 0;
+        foreach (var candidate in turns.EnumerateArray())
+        {
+            if (candidate.ValueKind != JsonValueKind.Object
+                || !candidate.TryGetProperty("id", out var candidateId)
+                || candidateId.ValueKind != JsonValueKind.String)
+            {
+                throw InvalidCompletionData();
+            }
+
+            if (string.Equals(candidateId.GetString(), expectedTurn.TurnId, StringComparison.Ordinal))
+            {
+                matchingTurn = candidate.Clone();
+                matchCount++;
+            }
+        }
+
+        if (matchCount != 1)
+        {
+            throw InvalidCompletionData();
+        }
+
+        var parameters = JsonSerializer.SerializeToElement(new
+        {
+            threadId = expectedTurn.ThreadId,
+            turn = matchingTurn
+        });
+        TryGetNestedTurn(parameters, expectedTurn, out _, out _);
+        return parameters;
+    }
+
+    public static ArtifactManifestEntry[] ExtractArtifacts(
+        JsonElement? parameters,
+        CapabilityPolicy policy,
+        CodexTurnHandle? expectedTurn = null)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        if (TryGetNestedTurn(parameters, expectedTurn, out _, out var items))
+        {
+            return ExtractNestedArtifacts(items, policy);
+        }
+
+        return ExtractLegacyArtifacts(parameters);
+    }
+
+    private static ArtifactManifestEntry[] ExtractNestedArtifacts(
+        JsonElement items,
+        CapabilityPolicy policy)
+    {
+        var pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var finalPaths = new List<string>();
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object
+                || !item.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String
+                || !string.Equals(type.GetString(), "fileChange", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!item.TryGetProperty("status", out var status)
+                || status.ValueKind != JsonValueKind.String)
+            {
+                throw InvalidCompletionData();
+            }
+
+            switch (status.GetString())
+            {
+                case "declined":
+                case "failed":
+                    continue;
+                case "completed":
+                    break;
+                default:
+                    throw InvalidCompletionData();
+            }
+
+            if (!item.TryGetProperty("changes", out var changes)
+                || changes.ValueKind != JsonValueKind.Array)
+            {
+                throw InvalidCompletionData();
+            }
+
+            foreach (var change in changes.EnumerateArray())
+            {
+                if (change.ValueKind != JsonValueKind.Object
+                    || !change.TryGetProperty("kind", out var kind)
+                    || kind.ValueKind != JsonValueKind.Object
+                    || !kind.TryGetProperty("type", out var kindType)
+                    || kindType.ValueKind != JsonValueKind.String)
+                {
+                    throw InvalidCompletionData();
+                }
+
+                var operation = kindType.GetString();
+                if (operation is not ("add" or "update" or "delete")
+                    || !change.TryGetProperty("path", out var path)
+                    || path.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(path.GetString()))
+                {
+                    throw InvalidCompletionData();
+                }
+
+                var sourcePath = CanonicalArtifactPath(path.GetString(), policy, allowMissingLeaf: true);
+                if (string.Equals(operation, "delete", StringComparison.Ordinal))
+                {
+                    RemovePath(sourcePath);
+                    continue;
+                }
+
+                var candidatePath = sourcePath;
+                if (string.Equals(operation, "update", StringComparison.Ordinal)
+                    && kind.TryGetProperty("move_path", out var movePath))
+                {
+                    if (movePath.ValueKind == JsonValueKind.String)
+                    {
+                        if (string.IsNullOrWhiteSpace(movePath.GetString()))
+                        {
+                            throw InvalidCompletionData();
+                        }
+
+                        candidatePath = CanonicalArtifactPath(movePath.GetString(), policy, allowMissingLeaf: true);
+                    }
+                    else if (movePath.ValueKind != JsonValueKind.Null)
+                    {
+                        throw InvalidCompletionData();
+                    }
+                }
+
+                if (string.Equals(operation, "update", StringComparison.Ordinal)
+                    && !pathComparer.Equals(candidatePath, sourcePath))
+                {
+                    RemovePath(sourcePath);
+                }
+
+                AddPath(candidatePath);
+            }
+        }
+
+        return finalPaths.Select(path => ReadArtifact(path, policy)).ToArray();
+
+        void AddPath(string path)
+        {
+            if (!finalPaths.Any(candidate => pathComparer.Equals(candidate, path)))
+            {
+                finalPaths.Add(path);
+            }
+        }
+
+        void RemovePath(string path) => finalPaths.RemoveAll(candidate => pathComparer.Equals(candidate, path));
+    }
+
+    private static ArtifactManifestEntry[] ExtractLegacyArtifacts(JsonElement? parameters)
     {
         if (parameters is not JsonElement value
             || value.ValueKind != JsonValueKind.Object
@@ -1364,17 +1963,219 @@ public sealed partial class DeviceNodeWorker(
         }
     }
 
-    [LoggerMessage(EventId = 5101, Level = LogLevel.Warning, Message = "Device Node is disabled because its identity is not configured.")]
-    private static partial void LogIdentityNotConfigured(ILogger logger);
+    private static ArtifactManifestEntry ReadArtifact(string path, CapabilityPolicy policy)
+    {
+        var canonicalPath = CanonicalArtifactPath(path, policy);
 
-    [LoggerMessage(EventId = 5102, Level = LogLevel.Error, Message = "Device Node loop failed; retrying after a bounded delay.")]
-    private static partial void LogWorkerLoopFailure(ILogger logger, Exception exception);
+        try
+        {
+            var fileInfo = new FileInfo(canonicalPath);
+            if (!fileInfo.Exists
+                || (fileInfo.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            {
+                throw InvalidCompletionData();
+            }
 
-    [LoggerMessage(EventId = 5103, Level = LogLevel.Error, Message = "Codex execution failed after recovery attempts for task {TaskId}.")]
-    private static partial void LogExecutionFailure(ILogger logger, Exception exception, Guid taskId);
+            var bytes = File.ReadAllBytes(canonicalPath);
+            return new ArtifactManifestEntry(
+                canonicalPath,
+                bytes.LongLength,
+                Convert.ToHexString(SHA256.HashData(bytes)),
+                "application/octet-stream");
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (IOException)
+        {
+            throw InvalidCompletionData();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw InvalidCompletionData();
+        }
+    }
 
-    [LoggerMessage(EventId = 5104, Level = LogLevel.Warning, Message = "Could not persist Device Node event {EventType} for task {TaskId}.")]
-    private static partial void LogEventPersistenceFailure(ILogger logger, Exception exception, string eventType, Guid taskId);
+    private static string CanonicalArtifactPath(
+        string? path,
+        CapabilityPolicy policy,
+        bool allowMissingLeaf = false)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path)
+                || !CapabilityPolicy.TryGetCanonicalPath(path, out var canonicalPath)
+                || !policy.IsAllowedPath(path, write: false)
+                || !PathsEqual(Path.GetFullPath(path), canonicalPath)
+                || HasReparsePoint(policy, canonicalPath, allowMissingLeaf))
+            {
+                throw InvalidCompletionData();
+            }
+
+            return canonicalPath;
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is ArgumentException
+            or IOException
+            or UnauthorizedAccessException
+            or NotSupportedException
+            or System.Security.SecurityException)
+        {
+            throw InvalidCompletionData();
+        }
+    }
+
+    private static bool TryGetNestedTurn(
+        JsonElement? parameters,
+        CodexTurnHandle? expectedTurn,
+        out JsonElement turn,
+        out JsonElement items)
+    {
+        turn = default;
+        items = default;
+        if (!TryGetNestedTurnIdentity(parameters, expectedTurn, out turn))
+        {
+            return false;
+        }
+
+        if (!turn.TryGetProperty("items", out items)
+            || items.ValueKind != JsonValueKind.Array
+            || turn.TryGetProperty("itemsView", out var itemsView)
+                && (itemsView.ValueKind != JsonValueKind.String
+                    || !string.Equals(itemsView.GetString(), "full", StringComparison.Ordinal)))
+        {
+            throw InvalidCompletionData();
+        }
+
+        if (string.Equals(turn.GetProperty("status").GetString(), "completed", StringComparison.Ordinal)
+            && items.GetArrayLength() == 0)
+        {
+            throw InvalidCompletionData();
+        }
+
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object
+                || !item.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(type.GetString()))
+            {
+                throw InvalidCompletionData();
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryGetNestedTurnIdentity(
+        JsonElement? parameters,
+        CodexTurnHandle? expectedTurn,
+        out JsonElement turn)
+    {
+        turn = default;
+        if (parameters is not JsonElement value
+            || value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("turn", out turn))
+        {
+            return false;
+        }
+
+        if (turn.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("threadId", out var threadId)
+            || threadId.ValueKind != JsonValueKind.String
+            || !turn.TryGetProperty("id", out var turnId)
+            || turnId.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(threadId.GetString())
+            || string.IsNullOrWhiteSpace(turnId.GetString())
+            || expectedTurn is not null
+                && (!string.Equals(threadId.GetString(), expectedTurn.ThreadId, StringComparison.Ordinal)
+                    || !string.Equals(turnId.GetString(), expectedTurn.TurnId, StringComparison.Ordinal))
+            || !turn.TryGetProperty("status", out var status)
+            || status.ValueKind != JsonValueKind.String
+            || !IsTurnStatus(status.GetString())
+            || turn.TryGetProperty("itemsView", out var itemsView)
+                && (itemsView.ValueKind != JsonValueKind.String
+                    || itemsView.GetString() is not ("full" or "summary" or "notLoaded")))
+        {
+            throw InvalidCompletionData();
+        }
+
+        if (value.TryGetProperty("status", out var topLevelStatus)
+            && (topLevelStatus.ValueKind != JsonValueKind.String
+                || !string.Equals(topLevelStatus.GetString(), status.GetString(), StringComparison.Ordinal)))
+        {
+            throw InvalidCompletionData();
+        }
+
+        return true;
+    }
+
+    private static bool IsTurnStatus(string? status) => status is
+        "completed" or "interrupted" or "failed" or "inProgress";
+
+    private static bool HasReparsePoint(CapabilityPolicy policy, string path, bool allowMissingLeaf = false)
+    {
+        var declaredRoot = policy.AllowedRoots.FirstOrDefault(root => IsWithinLexicalRoot(root, path));
+        if (declaredRoot is null)
+        {
+            return true;
+        }
+
+        var current = declaredRoot;
+        var parts = Path.GetRelativePath(declaredRoot, path)
+            .Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = 0; index < parts.Length; index++)
+        {
+            var part = parts[index];
+            current = Path.Combine(current, part);
+            try
+            {
+                if (!File.Exists(current) && !Directory.Exists(current))
+                {
+                    return allowMissingLeaf && index == parts.Length - 1 ? false : true;
+                }
+
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return true;
+                }
+            }
+            catch (IOException)
+            {
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsWithinLexicalRoot(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, path);
+        return relative != ".."
+            && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            && !Path.IsPathRooted(relative);
+    }
+
+    private static bool PathsEqual(string left, string right) => string.Equals(
+        left.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+        right.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    private static string? BoundFinalAnswer(string? value) => value is null
+        ? null
+        : value.Length > MaximumFinalAnswerLength ? value[..MaximumFinalAnswerLength] : value;
+
+    private static InvalidDataException InvalidCompletionData() =>
+        new("Codex completion data did not identify a permitted local artifact.");
 }
 
 public static class CodexApprovalResponseFactory
@@ -1451,6 +2252,9 @@ internal sealed class ActiveTurnState(string? threadId, string? turnId, bool sta
     public string? TurnId { get; set; } = turnId;
     public bool StartAttempted { get; set; } = startAttempted;
 }
+
+internal sealed class CodexPendingInteractionNotResumableException() : Exception(
+    "CODEX_PENDING_INTERACTION_NOT_RESUMABLE");
 
 public sealed class CodexTurnStartUncertainException(string threadId, Exception innerException) : Exception(
     $"Codex turn/start outcome is uncertain for thread '{threadId}'; refusing to replay the turn.", innerException)

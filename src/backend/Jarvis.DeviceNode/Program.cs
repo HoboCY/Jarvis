@@ -2,6 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Jarvis.DeviceNode;
+using Jarvis.Infrastructure.Budgets;
 using Jarvis.Infrastructure.Resilience;
 using Jarvis.Infrastructure.Observability;
 
@@ -10,6 +11,13 @@ builder.Logging.ClearProviders();
 builder.Logging.AddJarvisConsole(builder.Configuration);
 builder.Services.AddJarvisTelemetry(builder.Configuration, "jarvis.device-node");
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddOptions<Phase9bBudgetAdmissionOptions>()
+    .Bind(builder.Configuration.GetSection(Phase9bBudgetAdmissionOptions.SectionName))
+    .Validate(options => !options.Enabled
+        || (Path.IsPathFullyQualified(options.DescriptorPath) && Guid.TryParse(options.RunId, out _)),
+        "BudgetAdmission requires an absolute descriptor path and run id when enabled.")
+    .ValidateOnStart();
+builder.Services.AddSingleton<IPhase9bBudgetAdmission, Phase9bBudgetAdmissionClient>();
 builder.Services.AddOptions<ResilienceOptions>()
     .Bind(builder.Configuration.GetSection(ResilienceOptions.SectionName))
     .Validate(options => options.MaxRetryAttempts is >= 0 and <= 5, "Resilience:MaxRetryAttempts must be between 0 and 5.")

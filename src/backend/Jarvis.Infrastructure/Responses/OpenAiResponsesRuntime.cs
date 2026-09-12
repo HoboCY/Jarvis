@@ -2,6 +2,7 @@ using System.ClientModel;
 using System.ClientModel.Primitives;
 using Jarvis.Application.Responses;
 using Jarvis.Infrastructure.Realtime;
+using Jarvis.Infrastructure.Budgets;
 using Microsoft.Extensions.Options;
 using OpenAI.Responses;
 
@@ -94,18 +95,29 @@ public interface IResponsesClientFactory
 }
 
 public sealed class OpenAiResponsesClientFactory(
-    IOptions<OpenAiRealtimeOptions> options) : IResponsesClientFactory
+    IOptions<OpenAiRealtimeOptions> options,
+    IPhase9bBudgetAdmission admission) : IResponsesClientFactory, IDisposable
 {
+    private readonly HttpClient? httpClient = admission.Enabled
+        ? Phase9bProviderHttpClient.Create(admission)
+        : null;
+
     public ResponsesClient Create(string model)
     {
         var settings = options.Value;
-        return new ResponsesClient(
-            new ApiKeyCredential(settings.ApiKey),
-            new ResponsesClientOptions
-            {
-                Endpoint = new Uri(settings.BaseUrl, UriKind.Absolute)
-            });
+        var clientOptions = new ResponsesClientOptions
+        {
+            Endpoint = new Uri(settings.BaseUrl, UriKind.Absolute)
+        };
+        if (httpClient is not null)
+        {
+            clientOptions.Transport = new HttpClientPipelineTransport(httpClient);
+        }
+
+        return new ResponsesClient(new ApiKeyCredential(settings.ApiKey), clientOptions);
     }
+
+    public void Dispose() => httpClient?.Dispose();
 }
 
 internal static class ResponsesRuntimeMapping
