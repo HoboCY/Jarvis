@@ -525,6 +525,41 @@ test("replaces the artifact window across repeated partial scans without accumul
   assert.equal(feed.artifacts.every(state => state.taskId.startsWith("second-partial-")), true);
 });
 
+test("applies a device completion artifact summary immediately without HTTP refresh or replay duplicates", async () => {
+  const feed = new DesktopTaskNotificationFeed({
+    getTasks: async () => { throw new Error("Unexpected HTTP refresh"); },
+    getUnreadNotifications: async () => [],
+    markDelivered: async () => undefined,
+    markRead: async () => undefined,
+    dismiss: async () => undefined
+  });
+  feed.selectConversation("conversation-artifacts");
+  await feed.applyEvent({
+    eventId: "device-task-created",
+    occurredAt: 1,
+    type: "task.updated",
+    payload: { taskId: "device-task", conversationId: "conversation-artifacts", status: "running", entityVersion: 1 }
+  });
+  const completed = {
+    eventId: "device-task-completed",
+    occurredAt: 2,
+    type: "task.updated",
+    payload: {
+      taskId: "device-task", status: "succeeded", entityVersion: 2,
+      eventType: "task.completed", pendingUserInput: null,
+      artifacts: [{ size: 42, sha256: "a".repeat(64), contentType: "text/plain" }]
+    }
+  };
+  await feed.applyEvent(completed);
+  await feed.applyEvent(completed);
+  assert.equal(feed.tasks.length, 0);
+  assert.deepEqual(feed.terminalTasks, [{ taskId: "device-task", status: "succeeded" }]);
+  assert.deepEqual(feed.artifacts, [{
+    taskId: "device-task", status: "succeeded",
+    artifacts: [{ size: 42, sha256: "a".repeat(64), contentType: "text/plain" }]
+  }]);
+});
+
 test("preserves known artifacts when a task event omits its manifest", async () => {
   const feed = new DesktopTaskNotificationFeed({
     getTasks: async () => [],

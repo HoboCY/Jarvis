@@ -78,9 +78,25 @@ recovery tests pass 3/3, including expired-but-unsettled input. Targeted run
 `a2965956-c65a-4f47-8010-2fb4f4967497` on `d3489c0bef6ce1844b087d5a05daeb341bf8a22b`
 passed real rotation, SignalR catch-up, restart C handling in 1.978 seconds,
 automatic selection restoration, normal quit and cleanup. Its evidence remains
-`LIVE_PARTIAL`: independent Desktop cancellation still needs a targeted check,
-and full A–J has not run. The existing cancel button now has a fixed automation
-ID; the driver must require exactly one matching actionable button.
+`LIVE_PARTIAL`. The follow-up `d1e64011-aeed-44e1-84c5-decc45665030` on
+`cbffb24cb7606a291ebd60dd20a43045fb668ecb` also passed independent Desktop cancellation
+in 326 ms, durable notification delivery and continuous message sequence through
+rotation and automatic cold start. Full A–J has not run. The existing cancel button
+has a fixed automation ID; the driver requires exactly one matching actionable button.
+
+Further native checks proved E/F in run `7d4788d1-0411-4146-a682-e6d18c720c97`:
+the real input is answered through Desktop, the same execution/thread/turn completes,
+and the result contains the fixture nonce without changing the fixture. H then exposed
+a separate live artifact projection gap. Its real approval and persisted file/manifest
+passed in `62bb130d-e1e6-4968-b0c8-36a506a4a07f`, but the completion Outbox event omitted
+artifact metadata. The fix projects only size/hash/content type, with no path or result
+text; database RED/GREEN and immediate Desktop projection/replay tests cover it.
+All failures remain in the report. H/G verification, final review/freeze and A–J remain
+pending; successful authentication stays retained throughout these fixes.
+
+Path C proves bounded safe failure, not native resumption. The final I scenario must
+remain BLOCKED if neither reissue nor safe continuation is supported; a passing
+targeted fail-closed check must not be relabelled as full native I PASS.
 
 The interactive runner now requires the explicit private Provider source and
 disables ambient Provider overrides. Runtime configuration contains a source

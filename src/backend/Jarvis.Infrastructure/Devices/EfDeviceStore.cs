@@ -680,6 +680,12 @@ public sealed class EfDeviceStore(
             eventType = request.EventType,
             occurredAt = nowMs,
             entityVersion = task.Version,
+            artifacts = request.ResultSummary is null ? null : request.Artifacts?.Select(artifact => new
+            {
+                size = artifact.Size,
+                sha256 = artifact.Sha256,
+                contentType = artifact.ContentType
+            }).ToArray(),
             pendingUserInput = (object?)null
         }, nowMs);
         response = new DeviceTaskEventResponse(taskId, execution.Id, true, false, ToContractStatus(task.Status), ToContractStatus(execution.Status));

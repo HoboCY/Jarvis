@@ -59,6 +59,7 @@
 | `1bf00bf4-d3fb-4da5-ab54-da014a4fe3e9` | 修后 SignalR 与自动轮换通过；本地任务入库后未产生原生输入，等待超时 | 5 / 2 / 2 / 0 |
 | `f508b778-48ea-4949-87ba-4b23838cfb53` | Desktop 控制连接失败；运行已清理，未调用 Provider | 0 / 0 / 0 / 0 |
 | `a2965956-c65a-4f47-8010-2fb4f4967497` | 已执行的 targeted 场景通过；证据为 `LIVE_PARTIAL`，独立取消仍待补测 | 7 / 3 / 2 / 1 |
+| `d1e64011-aeed-44e1-84c5-decc45665030` | targeted 补全通过，含 Desktop 主动取消、通知送达和消息连续性；证据仍为 `LIVE_PARTIAL` | 7 / 3 / 2 / 2 |
 
 - 自动轮换超时已定位到真实进程边界：interactive 提供了测试轮换间隔，但
   ProcessSupervisor 的环境白名单遗漏该字段，Desktop 使用默认 50 分钟。
@@ -83,12 +84,48 @@
   无回答或重放。运行目录清理、认证保留和证据包验证通过。证据 SHA 为
   `25eaa17bbf54c45fb760b2dcfa449789ce3bf3bf931c9bc95ef46c527e407e00`。
   控制连接改为等待既有 live policy getter 就绪，离线 Electron 夹具覆盖延迟初始化。
-- 对照完整 targeted 合同，独立 Desktop 主动取消仍需真实验证；重启后的失败清理
-  不能替代它。为现有取消按钮补充固定 test ID，通过既有交互路径取消任务，
-  不增加绕过鉴权、事件注入或直接数据库修改的接口。
+- 为现有取消按钮补充固定 test ID，通过既有交互路径取消任务；不增加绕过鉴权、
+  事件注入或直接数据库修改的接口。提交 `cbffb24cb7606a291ebd60dd20a43045fb668ecb`
+  上的补全 run `d1e64011-aeed-44e1-84c5-decc45665030` 通过独立取消（326 毫秒）、
+  重启 C 处理（2.021 秒）、SignalR 通知送达、轮换前后连续消息、冷启动后的下一条
+  消息及正常退出。取消后一个 Task/Execution、一个取消终态事件及通知、输入清除、
+  无审批和文件变化；不是 DeepSeek provider-side cancellation。
+  证据 SHA 为 `ff8a0f64548a50451ec26eb041cabefc8532e9a2f305d481c0e1fcef2f802f72`。
+  认证保留，运行目录清理，证据验证通过；此 targeted 安全行为通过不等于原生旧 Turn 恢复。
 - 最终认证支持另一个私有保留标记，绑定冻结候选 SHA；原生探针拒绝消费它，
   产品失败也不会删除成功认证。候选匹配、拒绝错配和重复运行清理的离线验证通过。
   最终候选未冻结，完整 A–J 尚未运行，也未启动最终登录。
+- `cbffb24` 的完整 live 合同 151/151、Desktop headless 272/272、typecheck、lint、
+  10 个暂存源码路径安全检查、macOS 打包 14/14 和 built-renderer 门禁通过。
+  重新打包后的归档文件名检查未发现禁入配置；没有输出或读取认证材料。
+- 冻结前继续用同一认证验证 E–H，保留以下独立失败，不转写为完整 PASS：
+
+| Run ID | 证据与缺口 | Provider 请求 / Realtime / 委派 / Codex |
+| --- | --- | --- |
+| `b087c4c1-8f7a-4d5a-beb5-52e2b132b81e` | 等待原生输入超时；任务已有终态，未保存足以判断原因的状态 | 3 / 1 / 1 / 1 |
+| `63e26e50-3279-4fbf-9321-4c9e56050496` | 真实输入、Desktop 回答、同执行完成及夹具读取通过；驱动误查终态事件名 | 2 / 1 / 1 / 1 |
+| `7d4788d1-0411-4146-a682-e6d18c720c97` | E/F 通过；H 权限路径表示被驱动拒绝，批准前停止 | 2 / 1 / 1 / 2 |
+| `62bb130d-e1e6-4968-b0c8-36a506a4a07f` | H 批准、文件内容和持久化产物成立；Desktop 即时产物 hash 缺失 | 2 / 1 / 0 / 1 |
+
+- E/F 成功证据来自 `7d4788d1-0411-4146-a682-e6d18c720c97`：同一个 Task、Execution、
+  Thread、Turn；一个真实输入请求，经 Desktop 回答后完成，返回从夹具实际读取的 nonce，
+  夹具未变化。E/F 各 22.415 秒；整轮仍为 FAIL，证据 SHA 为
+  `7af0a7bd3c393932e967b7d1ff2857d8dafdce81ab0ee61c4a46198a86c18645`。
+- 原生完成事件使用 `task.completed`；修正驱动误用的 `task.succeeded`。
+  官方 0.146.0 [权限投影实现](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/app-server-protocol/src/protocol/v2/permissions.rs)
+  同时输出 legacy `write` 与 `entries`。驱动现要求两种表示一致且均为指定的单个文件；
+  额外路径、网络、读权限、重复列表或未知字段仍拒绝。公开 schema 的离线夹具通过，
+  随后的真实请求匹配并经 Desktop 批准；没有放宽授权根目录。
+- `62bb130d-e1e6-4968-b0c8-36a506a4a07f` 的证据 SHA 为
+  `59f11d4ae9c739a588d02c8ae0de923647a40b0a74d2d2b6b6eb052ed029f9ad`。
+  已定位产物显示缺口：Device Node 完成事件的 Outbox 投影遗漏产物，虽然 HTTP 和
+  数据库中已有正确清单。公开 API/真实数据库回归复现缺失字段后，只向完成事件加入
+  `size`、`sha256`、`contentType`；不广播路径或结果正文，不改 schema。
+  修后数据库检查通过，Desktop 53/53 包含无需 HTTP 刷新的即时产物显示和重复事件幂等。
+  修后 .NET 全量 355/355、headless 297/297、typecheck、lint、format、OpenAPI 身份、
+  secrets scan 和离线 E2E 152/152 通过；发布打包和 H/G live 复验仍需完成。
+- 全部补测失败运行均已清理其独立运行目录、保留同一次登录，并通过失败证据包验证。
+  尚未完成最终独立 Standards/Spec 审查、最终候选冻结、最终登录、完整 A–J 或当前 SHA 的 CI。
 
 ## Phase 9B-R 此前检查点 — 2026-09-12（历史）
 
