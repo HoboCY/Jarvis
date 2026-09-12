@@ -25,6 +25,27 @@ Execution order:
 5. Only after the offline gates pass, execute a new isolated targeted gap run,
    freeze the candidate, and run the complete A–J acceptance from that exact SHA.
 
+The final controller must bind the three launched package trees (Desktop, API,
+Device Node), the four private controller sources, and the frozen SHA in an
+owner-only build manifest created after rebuilding from the clean candidate.
+Recheck these identities before launching and after the run. Reject credential
+filenames and links outside the package roots before reading package contents.
+Final evidence distinguishes COMPLETE (all ten scenarios observed) from STOPPED,
+retains bounded failure codes, and records native path C as I BLOCKED with
+LIVE_PARTIAL even when the other nine scenarios pass. A complete execution is
+not a release PASS. Product/harness/test/config edits after full live require a
+new candidate; no silent transfer of live proof is permitted.
+
+A crashed final-login controller does not authorize another login. Keep the
+one-start marker and its owned authentication directory. Continue waiting for a
+still-running owned process. If it exited, silently check official login status
+for that same directory: restore assignment metadata on success, retain on an
+unavailable check, and clean only on explicit cancellation, clear failure, or
+invalid authentication. Never remove the attempt marker to auto-retry. Report a
+confirmed failure and obtain explicit direction before replacing final auth.
+The completed assignment, not the initial AUTH_PENDING attempt marker, is the
+authoritative successful state.
+
 An earlier 2026-09-12 checkpoint verified independent browser authentication and
 attempted the pinned native probe three times. The first two stopped before `turn/start`:
 the first failed during initialization because CLI dotted permission keys were
