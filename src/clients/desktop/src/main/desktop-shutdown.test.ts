@@ -155,7 +155,10 @@ test("a synchronous renderer send can return the exact ACK before requestQuit as
   assert.equal((await coordinator.waitForCompletion()).status, "acknowledged");
 });
 
-test("renderer timeout uses the registered bearer fallback exactly once and remains bounded", async () => {
+test("renderer timeout uses the registered bearer fallback exactly once and remains bounded", { timeout: 5_000 }, async t => {
+  let virtualNow = 10_000;
+  t.mock.method(performance, "now", () => virtualNow);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const fallbackCalls: Array<{ sessionId: string; reason: string; status: string; bearer?: string }> = [];
   const harness = createHarness({
     bearer: trustedBearer,
@@ -165,6 +168,12 @@ test("renderer timeout uses the registered bearer fallback exactly once and rema
     }
   });
   harness.coordinator.requestQuit({ preventDefault: () => {} });
+  virtualNow += 37;
+  t.mock.timers.tick(37);
+  await Promise.resolve();
+  assert.equal(fallbackCalls.length, 0);
+  virtualNow += 1;
+  t.mock.timers.tick(1);
   const result = await harness.coordinator.waitForCompletion();
   assert.equal(result.status, "fallback");
   assert.deepEqual(fallbackCalls, [{
@@ -177,7 +186,8 @@ test("renderer timeout uses the registered bearer fallback exactly once and rema
   assert.deepEqual(harness.events, ["freeze", "stopWake", "stopSignalR", "closeWindows", "continueQuit"]);
 });
 
-test("destroyed renderer falls back only for a registered session, while no bearer closes honestly without fallback", async () => {
+test("destroyed renderer falls back only for a registered session, while no bearer closes honestly without fallback", { timeout: 5_000 }, async t => {
+  t.mock.method(performance, "now", () => 10_000);
   const destroyedFallbackCalls: string[] = [];
   const destroyed = createHarness({
     renderer: "destroyed",
@@ -374,7 +384,7 @@ test("a failed renderer terminal lets Main perform one fallback after the pendin
   assert.deepEqual(events, ["freeze", "stopWake", "stopSignalR", "closeWindows", "continueQuit"]);
 });
 
-test("a hanging normal terminal is taken over in the reserved shutdown slice with the same idempotency key", async t => {
+test("a hanging normal terminal is taken over in the reserved shutdown slice with the same idempotency key", { timeout: 5_000 }, async t => {
   let virtualNow = 10_000;
   t.mock.method(performance, "now", () => virtualNow);
   t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -523,7 +533,10 @@ test("terminal takeover preserves the original request hash when the first respo
   assert.equal(registry.activeSession, undefined);
 });
 
-test("a pending Connected operation is recovered with the original request before quit continues", async () => {
+test("a pending Connected operation is recovered with the original request before quit continues", { timeout: 5_000 }, async t => {
+  let virtualNow = 10_000;
+  t.mock.method(performance, "now", () => virtualNow);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const sender = {};
   const frame = {};
   const requestId = "0199f1b8-1243-7000-8000-0123456789ab";
@@ -562,6 +575,12 @@ test("a pending Connected operation is recovered with the original request befor
   });
 
   coordinator.requestQuit({ preventDefault: () => {} });
+  virtualNow += 59;
+  t.mock.timers.tick(59);
+  await Promise.resolve();
+  assert.equal(recoveryCalls, 0);
+  virtualNow += 1;
+  t.mock.timers.tick(1);
   const result = await coordinator.waitForCompletion();
   assert.equal(result.status, "fallback");
   assert.equal(recoveryCalls, 1);

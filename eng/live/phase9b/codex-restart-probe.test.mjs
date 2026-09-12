@@ -734,10 +734,32 @@ test("cleans a real signal-exited process group", { skip: process.platform === "
 });
 
 test("kills a surviving descendant after the leader exits", { skip: process.platform === "win32" }, async () => {
-  const fixture = await createRealProcessServer(
-    "const child = require('node:child_process').spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\"], { stdio: 'ignore' }); process.on('SIGTERM', () => process.exit(0)); setInterval(() => {}, 1000);");
+  const fixture = await createRealProcessServer(`
+    const child = require('node:child_process').spawn(process.execPath, ['-e',
+      "process.on('SIGTERM', () => {}); process.send('ready'); setInterval(() => {}, 1000);"
+    ], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
+    const descendantReady = new Promise(resolve => child.once('message', message => resolve(message === 'ready')));
+    process.on('SIGTERM', () => process.exit(0));
+    let input = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', chunk => {
+      input += chunk;
+      let index;
+      while ((index = input.indexOf('\\n')) >= 0) {
+        const message = JSON.parse(input.slice(0, index));
+        input = input.slice(index + 1);
+        if (message.method === 'initialize') {
+          void descendantReady.then(ready => process.stdout.write(JSON.stringify({
+            id: message.id, result: { descendantReady: ready }
+          }) + '\\n'));
+        }
+      }
+    });
+  `);
   try {
-    await waitForProcessStartup();
+    assert.deepEqual(await fixture.server.request(CODEX_APP_SERVER_METHODS.initialize, {}), {
+      descendantReady: true
+    });
     const result = await fixture.server.stop();
     assert.equal(result.completed, true);
     assert.equal(result.processGroupGone, true);
