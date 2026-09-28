@@ -399,7 +399,7 @@ while IFS= read -r line; do
   if echo "$line" | grep -q '"method":"initialize"'; then echo '{"id":1,"result":{}}'; fi
   if echo "$line" | grep -q '"method":"thread/start"'; then printf '{"id":2,"result":{"thread":{"id":"thread-e2e-approval"},"activePermissionProfile":{"id":"%s"}}}\n' "$profile_id"; fi
   if echo "$line" | grep -q '"method":"turn/start"'; then echo '{"id":3,"result":{"turn":{"id":"turn-e2e-approval"}}}'; echo '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"pwd","reason":"e2e approval"}}'; fi
-  if echo "$line" | grep -q '"result"' && echo "$line" | grep -q '"decision"'; then echo '{"method":"turn/completed","params":{"turn":{"id":"turn-e2e-approval","status":"completed"},"summary":"approved completion","artifacts":[]}}'; fi
+  if echo "$line" | grep -q '"result"' && echo "$line" | grep -q '"decision"'; then echo '{"method":"turn/completed","params":{"threadId":"thread-e2e-approval","turn":{"id":"turn-e2e-approval","status":"completed","itemsView":"full","items":[{"id":"message-e2e-approval","type":"agentMessage","phase":"final_answer","text":"approved completion"}]}}}'; fi
 done
 """;
         await File.WriteAllTextAsync(script, scriptContents);

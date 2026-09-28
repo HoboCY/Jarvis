@@ -315,7 +315,7 @@ public sealed class JarvisDbContext(DbContextOptions<JarvisDbContext> options) :
             entity.Property(approval => approval.RequestedActionJson).HasMaxLength(1_000_000).IsRequired();
             entity.Property(approval => approval.RequestId).HasMaxLength(200);
             entity.HasIndex(approval => new { approval.TaskId, approval.Status, approval.CreatedAtMs });
-            entity.HasIndex(approval => new { approval.DeviceId, approval.RequestId }).IsUnique();
+            entity.HasIndex(approval => new { approval.DeviceId, approval.ExecutionId, approval.RequestId }).IsUnique();
             entity.HasOne<Jarvis.Domain.Tasks.Task>()
                 .WithMany()
                 .HasForeignKey(approval => approval.TaskId)

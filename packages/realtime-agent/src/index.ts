@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 
 export const realtimeToolNames = ["delegate_task", "get_task_status", "cancel_task", "remember_fact"] as const;
+export const REALTIME_ROTATION_AFTER_MS = 50 * 60 * 1000;
 
 export type RealtimeToolName = (typeof realtimeToolNames)[number];
 
@@ -301,7 +302,7 @@ export class SessionRotationStateMachine {
   private assistantSpeaking = false;
   private rotationReady = false;
 
-  public constructor(rotationAfterMs = 50 * 60 * 1000) {
+  public constructor(rotationAfterMs = REALTIME_ROTATION_AFTER_MS) {
     this.rotationAfterMs = rotationAfterMs;
   }
 

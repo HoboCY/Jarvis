@@ -24,6 +24,10 @@ const jarvisApi = {
     invoke("backend:createConversation", input),
   getConversation: (conversationId: string): Promise<unknown> =>
     invoke("backend:getConversation", { conversationId }),
+  getConversationSelection: (): Promise<unknown> => invoke("conversationSelection:get"),
+  setConversationSelection: (conversationId: string): Promise<unknown> =>
+    invoke("conversationSelection:set", { conversationId }),
+  clearConversationSelection: (): Promise<void> => invoke("conversationSelection:clear"),
   addTypedMessage: (input: {
     conversationId: string;
     clientRequestId: string;
@@ -148,7 +152,37 @@ const jarvisApi = {
     const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => listener(value);
     ipcRenderer.on("backend:connectionState", handler);
     return () => ipcRenderer.removeListener("backend:connectionState", handler);
+  },
+  acknowledgeShutdown: (input: {
+    requestId: string;
+    status: "completed" | "failed";
+  }): Promise<void> => invoke("app:shutdownAcknowledged", input),
+  onPrepareShutdown: (listener: (value: { requestId: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return;
+      }
+      const input = value as Record<string, unknown>;
+      if (Object.keys(input).length !== 1 || typeof input.requestId !== "string") {
+        return;
+      }
+      listener({ requestId: input.requestId });
+    };
+    ipcRenderer.on("app:prepareShutdown", handler);
+    return () => ipcRenderer.removeListener("app:prepareShutdown", handler);
   }
 };
 
 contextBridge.exposeInMainWorld("jarvis", jarvisApi);
+
+if (process.argv.includes("--phase9b-observe-realtime")) {
+  contextBridge.exposeInMainWorld("jarvisPhase9b", {
+    observeRealtimeConnection: (value: unknown): Promise<void> => invoke("phase9b:observeRealtimeConnection", value),
+    getRealtimeRotationPolicy: (): Promise<{ rotationAfterMs: number } | null> =>
+      invoke("phase9b:getRealtimeRotationPolicy"),
+    pauseSignalR: (): Promise<"paused" | "disconnected"> => invoke("phase9b:pauseSignalR"),
+    resumeSignalR: (): Promise<"connected" | "disconnected" | "paused"> => invoke("phase9b:resumeSignalR"),
+    getSignalRState: (): Promise<"connecting" | "connected" | "reconnecting" | "disconnected" | "paused"> =>
+      invoke("phase9b:getSignalRState")
+  });
+}

@@ -642,9 +642,16 @@ public sealed class EfRealtimeStore(
         Guid userId,
         CancellationToken cancellationToken)
     {
-        var device = await db.Devices.SingleOrDefaultAsync(
-            candidate => candidate.UserId == userId && candidate.DeviceType == DeviceType.Desktop,
-            cancellationToken);
+        var device = await db.Devices
+            .Where(candidate => candidate.UserId == userId && candidate.DeviceType == DeviceType.Desktop)
+            // The seeded local Desktop has no device credential. Keep it as
+            // the stable Realtime identity even after additional executor
+            // Desktops are registered. Do not filter status: a disabled
+            // default must remain visible as disabled to the caller.
+            .OrderBy(candidate => candidate.CredentialHash == null ? 0 : 1)
+            .ThenBy(candidate => candidate.PairedAtMs)
+            .ThenBy(candidate => candidate.Id)
+            .FirstOrDefaultAsync(cancellationToken);
         if (device is null)
         {
             device = Device.Create(

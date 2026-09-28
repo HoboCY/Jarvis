@@ -143,6 +143,9 @@ jobs:
       - name: Test CI and sandbox contracts
         run: pnpm test:ci-contract
 
+      - name: Test offline Phase 9B live harness contracts
+        run: pnpm test:phase9b-live-contract
+
   desktop-renderer-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20

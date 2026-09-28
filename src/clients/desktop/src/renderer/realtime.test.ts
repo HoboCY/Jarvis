@@ -61,6 +61,25 @@ test("Realtime connect gate collapses concurrent connect attempts into one sessi
   assert.equal(gate.isRunning, false);
 });
 
+test("Realtime connect gate freezes new work and lets shutdown await its owned connection", async () => {
+  const gate = new RealtimeConnectGate();
+  let release: (() => void) | undefined;
+  const current = gate.run(async () => {
+    await new Promise<void>(resolve => { release = resolve; });
+  });
+
+  gate.freeze();
+  assert.equal(gate.isFrozen, true);
+  await assert.rejects(() => gate.run(async () => undefined), /shutdown/);
+
+  const completion = gate.waitForCompletion(100);
+  await Promise.resolve();
+  release?.();
+  assert.equal(await current, undefined);
+  assert.equal(await completion, true);
+  assert.equal(gate.isRunning, false);
+});
+
 test("startup voice connection runs once and leaves manual retry available after failure", async () => {
   const connectGate = new RealtimeConnectGate();
   const startupGate = new RealtimeAutoConnectGate(connectGate);
@@ -1099,6 +1118,105 @@ test("Desktop controller releases owned audio after a failed connect", async () 
   assert.equal(stopCalls() > 0, true);
 });
 
+test("shutdown-frozen connect does not emit a second failed terminal after Main compensation", async () => {
+  const fakeSession = new FakeSession();
+  const wakeWord = fakeWakeWordDetector();
+  let releaseConnected!: () => void;
+  let connectedStarted!: () => void;
+  const connectedStartedPromise = new Promise<void>(resolve => { connectedStarted = resolve; });
+  const connectedGate = new Promise<void>(resolve => { releaseConnected = resolve; });
+  let endedCalls = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-shutdown-connect",
+    {
+      markConnected: async () => {
+        connectedStarted();
+        await connectedGate;
+      },
+      markEnded: async () => {
+        endedCalls++;
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+  controller.setWakeWordDetector(wakeWord.detector);
+
+  const connecting = controller.connect({
+    realtimeSessionId: "00000000-0000-0000-0000-000000000083",
+    clientSecret: "ek_scripted",
+    model: "model",
+    voice: "voice",
+    instructions: "server context"
+  });
+  await connectedStartedPromise;
+  controller.freezeForShutdown();
+  releaseConnected();
+  await assert.rejects(connecting, /shutdown/);
+  assert.equal(endedCalls, 0);
+  assert.equal(fakeSession.calls.includes("close"), true);
+});
+
+test("a confirmed session is terminalized when selection changes before connect activation", async () => {
+  const fakeSession = new FakeSession();
+  let startWakeWord!: () => void;
+  const wakeWordStarted = new Promise<void>(resolve => { startWakeWord = resolve; });
+  let releaseWakeWord!: () => void;
+  const wakeWordGate = new Promise<void>(resolve => { releaseWakeWord = resolve; });
+  let wakeState: WakeWordState = "stopped";
+  const wakeWord: WakeWordDetector = {
+    get state() {
+      return wakeState;
+    },
+    start: async () => {
+      startWakeWord();
+      await wakeWordGate;
+      wakeState = "listening";
+    },
+    stop: async () => {
+      wakeState = "stopped";
+    },
+    onDetected: () => () => undefined,
+    onStateChange: () => () => undefined
+  };
+  const endedSessionIds: string[] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-selection-race",
+    {
+      markConnected: async () => undefined,
+      markEnded: async input => {
+        endedSessionIds.push(input.sessionId);
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+  controller.setWakeWordDetector(wakeWord);
+
+  const connecting = controller.connect({
+    realtimeSessionId: "00000000-0000-0000-0000-000000000084",
+    clientSecret: "ek_scripted",
+    model: "model",
+    voice: "voice",
+    instructions: "server context"
+  });
+  await wakeWordStarted;
+
+  const disconnecting = controller.disconnect("conversation-switch");
+  assert.equal(await disconnecting, true);
+  releaseWakeWord();
+  await assert.rejects(connecting, /shutdown/);
+
+  assert.deepEqual(endedSessionIds, ["00000000-0000-0000-0000-000000000084"]);
+  assert.equal(controller.status, "disconnected");
+  assert.equal(fakeSession.calls.filter(call => call === "close").length >= 1, true);
+});
+
 test("Desktop controller uses the injected session and preserves typed persistence order", async () => {
   const fakeSession = new FakeSession();
   const lifecycle: string[] = [];
@@ -1364,6 +1482,72 @@ test("rotation marks the replacement connected before closing the old session", 
   }
 });
 
+test("a pending old rotation end blocks the current terminal until one ordered retry completes", async () => {
+  const first = new FakeSession();
+  const second = new FakeSession();
+  const sessions = [first, second];
+  const lifecycle: string[] = [];
+  let sessionIndex = 0;
+  let now = 0;
+  let releaseOldEnd!: () => void;
+  let oldEndStarted!: () => void;
+  const oldEndStartedPromise = new Promise<void>(resolve => { oldEndStarted = resolve; });
+  const oldEndGate = new Promise<void>(resolve => { releaseOldEnd = resolve; });
+  const controller = new DesktopRealtimeController(
+    "conversation-rotation-end-order",
+    {
+      markConnected: async input => lifecycle.push(`connected:${input.sessionId}`),
+      markEnded: async input => {
+        lifecycle.push(`ended:${input.sessionId}:${input.status}`);
+        if (input.sessionId === "00000000-0000-0000-0000-000000000013") {
+          oldEndStarted();
+          await oldEndGate;
+        }
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => sessions[sessionIndex++] as unknown as RealtimeSession
+  );
+
+  await controller.connect({
+    realtimeSessionId: "00000000-0000-0000-0000-000000000013",
+    clientSecret: "ek_scripted",
+    model: "model",
+    voice: "voice",
+    instructions: "server context"
+  });
+  controller.setRotationProvider(async () => ({
+    realtimeSessionId: "00000000-0000-0000-0000-000000000014",
+    clientSecret: "ek_scripted-2",
+    model: "model",
+    voice: "voice",
+    instructions: "server context after rotation"
+  }));
+  now = 50 * 60 * 1000;
+
+  const rotating = controller.rotateIfIdle();
+  await oldEndStartedPromise;
+  const disconnecting = controller.disconnect("desktop-quit");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(lifecycle, [
+    "connected:00000000-0000-0000-0000-000000000013",
+    "connected:00000000-0000-0000-0000-000000000014",
+    "ended:00000000-0000-0000-0000-000000000013:rotated"
+  ]);
+
+  releaseOldEnd();
+  await rotating;
+  assert.equal(await disconnecting, true);
+  assert.deepEqual(lifecycle, [
+    "connected:00000000-0000-0000-0000-000000000013",
+    "connected:00000000-0000-0000-0000-000000000014",
+    "ended:00000000-0000-0000-0000-000000000013:rotated",
+    "ended:00000000-0000-0000-0000-000000000014:disconnected"
+  ]);
+});
+
 test("failed rotation keeps the old session open and does not end it", async () => {
   const first = new FakeSession();
   const failedReplacement = new FakeSession(false, new Error("network unavailable"));
@@ -1524,6 +1708,129 @@ test("rotation provider failure keeps the active wake turn fail-closed", async (
   }
 });
 
+test("idle rotation is single-flight while the next client secret is pending", async () => {
+  const first = new FakeSession();
+  let providerCalls = 0;
+  let providerStarted!: () => void;
+  const providerStartedPromise = new Promise<void>(resolve => { providerStarted = resolve; });
+  let releaseProvider!: () => void;
+  const providerGate = new Promise<void>(resolve => { releaseProvider = resolve; });
+  let now = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-rotation-single-flight",
+    {
+      markConnected: async () => undefined,
+      markEnded: async () => undefined,
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => first as unknown as RealtimeSession,
+    () => new FakeTransport() as never
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000096",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => {
+      providerCalls++;
+      providerStarted();
+      await providerGate;
+      return {
+        realtimeSessionId: "00000000-0000-0000-0000-000000000097",
+        clientSecret: "ek_scripted-2",
+        model: "model",
+        voice: "voice",
+        instructions: "server context after rotation"
+      };
+    });
+    now = 50 * 60 * 1000;
+
+    const firstRotation = controller.rotateIfIdle();
+    await providerStartedPromise;
+    const secondRotation = controller.rotateIfIdle();
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    assert.equal(providerCalls, 1);
+    releaseProvider();
+    await Promise.all([firstRotation, secondRotation]);
+  } finally {
+    await controller.disconnect();
+  }
+});
+
+test("conversation disconnect invalidates a pending rotation before it can activate", async () => {
+  const first = new FakeSession();
+  let providerStarted!: () => void;
+  const providerStartedPromise = new Promise<void>(resolve => { providerStarted = resolve; });
+  let releaseProvider!: () => void;
+  const providerGate = new Promise<void>(resolve => { releaseProvider = resolve; });
+  let sessionFactoryCalls = 0;
+  let now = 0;
+  const lifecycle: string[] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-rotation-invalidation",
+    {
+      markConnected: async input => { lifecycle.push(`connected:${input.sessionId}`); },
+      markEnded: async input => { lifecycle.push(`ended:${input.sessionId}:${input.status}`); },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => {
+      sessionFactoryCalls++;
+      if (sessionFactoryCalls > 1) {
+        throw new Error("late rotation must not create a session");
+      }
+      return first as unknown as RealtimeSession;
+    }
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-000000000098",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => {
+      providerStarted();
+      await providerGate;
+      return {
+        realtimeSessionId: "00000000-0000-0000-0000-000000000099",
+        clientSecret: "ek_scripted-2",
+        model: "model",
+        voice: "voice",
+        instructions: "server context after rotation"
+      };
+    });
+    now = 50 * 60 * 1000;
+
+    const rotating = controller.rotateIfIdle();
+    await providerStartedPromise;
+    const disconnecting = controller.disconnect("conversation-switch");
+    assert.equal(await disconnecting, true);
+    releaseProvider();
+    await rotating;
+
+    assert.equal(sessionFactoryCalls, 1);
+    assert.equal(controller.realtimeSessionId, undefined);
+    assert.deepEqual(lifecycle, [
+      "connected:00000000-0000-0000-0000-000000000098",
+      "ended:00000000-0000-0000-0000-000000000098:disconnected"
+    ]);
+  } finally {
+    releaseProvider();
+    await controller.disconnect();
+  }
+});
+
 test("rotation prepare failure does not restore an awake wake turn", async () => {
   const first = new FakeSession();
   const failedReplacement = new FakeSession(false, new Error("replacement unavailable"));
@@ -1627,6 +1934,92 @@ test("disconnect persistence failure keeps the controller reachable for an expli
     failPersistence = false;
     await controller.disconnect();
   }
+});
+
+test("quit waits for an in-flight manual disconnect and concurrent disconnects share one terminal update", async () => {
+  const fakeSession = new FakeSession();
+  let releaseEnd!: () => void;
+  const endGate = new Promise<void>(resolve => { releaseEnd = resolve; });
+  let endCalls = 0;
+  const endKeys: string[] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-disconnect-shared-terminal",
+    {
+      markConnected: async () => undefined,
+      markEnded: async input => {
+        endCalls++;
+        endKeys.push(input.idempotencyKey);
+        await endGate;
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  await controller.connect({
+    realtimeSessionId: "00000000-0000-0000-0000-000000000099",
+    clientSecret: "ek_scripted",
+    model: "model",
+    voice: "voice",
+    instructions: "server context"
+  });
+
+  const manualDisconnect = controller.disconnect("user-requested");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const quitDisconnect = controller.disconnect("desktop-quit");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(endCalls, 1);
+
+  releaseEnd();
+  assert.equal(await manualDisconnect, true);
+  assert.equal(await quitDisconnect, true);
+  assert.equal(endKeys.length, 1);
+  assert.equal(controller.status, "disconnected");
+});
+
+test("a failed disconnect terminal keeps one idempotency key for retry and quit cannot claim completion", async () => {
+  const fakeSession = new FakeSession();
+  let failEnd = true;
+  const endKeys: string[] = [];
+  const controller = new DesktopRealtimeController(
+    "conversation-disconnect-terminal-retry",
+    {
+      markConnected: async () => undefined,
+      markEnded: async input => {
+        endKeys.push(input.idempotencyKey);
+        if (failEnd) {
+          throw new Error("terminal update unavailable");
+        }
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => 0,
+    () => fakeSession as unknown as RealtimeSession
+  );
+
+  await controller.connect({
+    realtimeSessionId: "00000000-0000-0000-0000-00000000009a",
+    clientSecret: "ek_scripted",
+    model: "model",
+    voice: "voice",
+    instructions: "server context"
+  });
+
+  const manualDisconnect = controller.disconnect("user-requested");
+  const quitDisconnect = controller.disconnect("desktop-quit");
+  assert.equal(await manualDisconnect, false);
+  assert.equal(await quitDisconnect, false);
+  assert.equal(endKeys.length, 1);
+  assert.equal(controller.persistenceRetryReason, "session-end");
+
+  failEnd = false;
+  assert.equal(await controller.retryPersistence(), true);
+  assert.equal(endKeys.length, 2);
+  assert.equal(endKeys[0], endKeys[1]);
+  assert.equal(controller.persistenceRetryReason, undefined);
 });
 
 test("disconnect fails closed before waiting for a persistence retry", async () => {
@@ -1893,6 +2286,86 @@ test("failed rotated lifecycle closes the old transport and retries with the sam
     assert.equal(controller.persistenceRetryReason, undefined);
   } finally {
     failRotatedEnd = false;
+    await controller.disconnect();
+  }
+});
+
+test("retains terminal intents for every confirmed session when two terminal writes fail", async () => {
+  const first = new FakeSession();
+  const second = new FakeSession();
+  const sessions = [first, second];
+  const ended: Array<{
+    sessionId: string;
+    status: string;
+    reason: string;
+    idempotencyKey: string;
+  }> = [];
+  let failEnds = true;
+  let sessionIndex = 0;
+  let now = 0;
+  const controller = new DesktopRealtimeController(
+    "conversation-multiple-terminal-intents",
+    {
+      markConnected: async () => undefined,
+      markEnded: async input => {
+        ended.push({
+          sessionId: input.sessionId,
+          status: input.status,
+          reason: input.reason,
+          idempotencyKey: input.idempotencyKey
+        });
+        if (failEnds) {
+          throw new Error("terminal write unavailable");
+        }
+      },
+      ingest: async () => undefined
+    },
+    () => undefined,
+    () => now,
+    () => sessions[sessionIndex++] as unknown as RealtimeSession
+  );
+
+  try {
+    await controller.connect({
+      realtimeSessionId: "00000000-0000-0000-0000-0000000000a1",
+      clientSecret: "ek_scripted",
+      model: "model",
+      voice: "voice",
+      instructions: "server context"
+    });
+    controller.setRotationProvider(async () => ({
+      realtimeSessionId: "00000000-0000-0000-0000-0000000000a2",
+      clientSecret: "ek_scripted-2",
+      model: "model",
+      voice: "voice",
+      instructions: "server context after rotation"
+    }));
+    now = 50 * 60 * 1000;
+
+    await controller.rotateIfIdle();
+    assert.equal(controller.realtimeSessionId, "00000000-0000-0000-0000-0000000000a2");
+    assert.equal(controller.persistenceRetryReason, "session-end");
+
+    assert.equal(await controller.disconnect("desktop-quit"), false);
+    assert.equal(controller.persistenceRetryReason, "session-end");
+    assert.equal(ended.filter(input => input.sessionId === "00000000-0000-0000-0000-0000000000a1").length, 2);
+    assert.equal(ended.filter(input => input.sessionId === "00000000-0000-0000-0000-0000000000a2").length, 1);
+
+    failEnds = false;
+    assert.equal(await controller.retryPersistence(), true);
+    assert.equal(controller.persistenceRetryReason, undefined);
+    assert.equal(controller.status, "disconnected");
+
+    for (const sessionId of [
+      "00000000-0000-0000-0000-0000000000a1",
+      "00000000-0000-0000-0000-0000000000a2"
+    ]) {
+      const attempts = ended.filter(input => input.sessionId === sessionId);
+      assert.equal(new Set(attempts.map(input => input.idempotencyKey)).size, 1);
+      assert.equal(new Set(attempts.map(input => `${input.reason}:${input.status}`)).size, 1);
+    }
+  } finally {
+    failEnds = false;
     await controller.disconnect();
   }
 });

@@ -27,3 +27,17 @@ test("accepts the current backend connection snapshot after renderer startup", (
 
   assert.deepEqual(current, { state: "connected", revision: 1 });
 });
+
+test("ignores a duplicate backend connection revision", () => {
+  const connected = applyBackendConnectionState(initialBackendConnectionState, {
+    state: "connected",
+    revision: 3
+  });
+  const duplicate = applyBackendConnectionState(connected, {
+    state: "disconnected",
+    revision: 3
+  });
+
+  assert.equal(duplicate, connected);
+  assert.deepEqual(duplicate, { state: "connected", revision: 3 });
+});

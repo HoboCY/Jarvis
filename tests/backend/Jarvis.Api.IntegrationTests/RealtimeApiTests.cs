@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Jarvis.Application.Realtime;
 using Jarvis.Contracts;
+using Jarvis.Domain.Devices;
 using Jarvis.Infrastructure.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +15,73 @@ namespace Jarvis.Api.IntegrationTests;
 
 public sealed class RealtimeApiTests
 {
+    [Fact]
+    public async Task DesktopBootstrapKeepsTheSeededLocalDeviceWhenAnotherDesktopIsRegistered()
+    {
+        var provider = new FakeRealtimeClientSecretProvider();
+        using var factory = new TestApplicationFactory(null, true, null, null, null, provider);
+        using var client = CreateAuthenticatedClient(factory);
+
+        using var firstBootstrap = await PostAsync(
+            client,
+            "/api/v1/realtime/desktop-device",
+            new { },
+            "stable-desktop-bootstrap-first");
+        Assert.Equal(HttpStatusCode.OK, firstBootstrap.StatusCode);
+        var seeded = await firstBootstrap.Content.ReadFromJsonAsync<DesktopDeviceBootstrapResponse>();
+        Assert.NotNull(seeded);
+
+        using var registration = await PostAsync(
+            client,
+            "/api/v1/devices/register",
+            new DeviceRegistrationRequest(
+                "Second Desktop",
+                DeviceTypeValue.Desktop,
+                "macos",
+                ["localFiles"]),
+            "stable-desktop-register-second");
+        Assert.Equal(HttpStatusCode.Created, registration.StatusCode);
+        var registered = await registration.Content.ReadFromJsonAsync<DeviceRegistrationResponse>();
+        Assert.NotNull(registered);
+        Assert.NotEqual(seeded!.DeviceId, registered!.DeviceId);
+
+        using var secondBootstrap = await PostAsync(
+            client,
+            "/api/v1/realtime/desktop-device",
+            new { },
+            "stable-desktop-bootstrap-second");
+        Assert.Equal(HttpStatusCode.OK, secondBootstrap.StatusCode);
+        var stable = await secondBootstrap.Content.ReadFromJsonAsync<DesktopDeviceBootstrapResponse>();
+        Assert.NotNull(stable);
+        Assert.Equal(seeded.DeviceId, stable!.DeviceId);
+        Assert.Equal(seeded.Status, stable.Status);
+
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<JarvisDbContext>();
+            var devices = await db.Devices
+                .Where(item => item.UserId == registered.UserId && item.DeviceType == DeviceType.Desktop)
+                .ToListAsync();
+            Assert.Contains(devices, item => item.Id == seeded.DeviceId && item.CredentialHash is null);
+            Assert.Contains(devices, item => item.Id == registered.DeviceId && item.CredentialHash is not null);
+
+            var seededEntity = devices.Single(item => item.Id == seeded.DeviceId);
+            Assert.True(seededEntity.Disable(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+            await db.SaveChangesAsync();
+        }
+
+        using var disabledBootstrap = await PostAsync(
+            client,
+            "/api/v1/realtime/desktop-device",
+            new { },
+            "stable-desktop-bootstrap-disabled");
+        Assert.Equal(HttpStatusCode.OK, disabledBootstrap.StatusCode);
+        var disabled = await disabledBootstrap.Content.ReadFromJsonAsync<DesktopDeviceBootstrapResponse>();
+        Assert.NotNull(disabled);
+        Assert.Equal(seeded.DeviceId, disabled!.DeviceId);
+        Assert.Equal(DeviceStatusValue.Disabled, disabled.Status);
+    }
+
     [Fact]
     public async Task AuthenticatedDesktopCanBootstrapSecretLifecycleAndIngestWithoutPersistingSecret()
     {

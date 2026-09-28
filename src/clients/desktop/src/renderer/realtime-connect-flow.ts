@@ -2,12 +2,24 @@ import type { DesktopRealtimeStatus } from "./realtime.js";
 
 export class RealtimeConnectGate {
   private inFlight: Promise<void> | undefined;
+  private frozen = false;
 
   public get isRunning(): boolean {
     return this.inFlight !== undefined;
   }
 
+  public get isFrozen(): boolean {
+    return this.frozen;
+  }
+
+  public freeze(): void {
+    this.frozen = true;
+  }
+
   public run(connect: () => Promise<void>): Promise<void> {
+    if (this.frozen) {
+      return Promise.reject(new Error("Realtime shutdown is already in progress."));
+    }
     if (this.inFlight) {
       return this.inFlight;
     }
@@ -20,6 +32,30 @@ export class RealtimeConnectGate {
     });
     this.inFlight = tracked;
     return tracked;
+  }
+
+  public async waitForCompletion(timeoutMs = 5_000): Promise<boolean> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 5_000) {
+      throw new RangeError("Realtime connection wait timeout is invalid.");
+    }
+    const inFlight = this.inFlight;
+    if (!inFlight) {
+      return true;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<boolean>(resolve => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    });
+    const result = await Promise.race([
+      inFlight.then(() => true, () => false),
+      timeout
+    ]);
+    if (timer) {
+      clearTimeout(timer);
+    }
+    return result;
   }
 }
 

@@ -1,5 +1,5 @@
 import { HubConnectionBuilder, type HubConnection } from "@microsoft/signalr";
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, systemPreferences, Tray } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, session, shell, systemPreferences, Tray } from "electron";
 import { randomUUID } from "node:crypto";
 import { chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,6 +39,21 @@ import {
   type DesktopActionFailureKind,
   type DesktopIpcHandler
 } from "../renderer/desktop-ipc.js";
+import { configurePhase9bLiveProfile } from "./live-profile.js";
+import { configurePhase9bLiveBudget } from "./phase9b-live-budget.js";
+import { createPhase9bRealtimeObserver, phase9bObservationArguments } from "./phase9b-realtime-observation.js";
+import {
+  resolvePhase9bLiveRotationPolicy,
+  type Phase9bLiveRotationPolicy
+} from "./phase9b-live-rotation.js";
+import {
+  DesktopRealtimeSessionRegistry,
+  DesktopShutdownCoordinator,
+  type DesktopPendingConnectionIntent,
+  type DesktopShutdownFallbackSession
+} from "./desktop-shutdown.js";
+import { DesktopConversationSelectionStore } from "./desktop-conversation-selection-store.js";
+import { SignalRControlCoordinator } from "./signalr-controls.js";
 
 type JsonRecord = Record<string, unknown>;
 type BackendConnectionStateValue = "connecting" | "connected" | "reconnecting" | "disconnected";
@@ -126,17 +141,29 @@ let mainWindow: BrowserWindow | undefined;
 let overlayWindow: BrowserWindow | undefined;
 let tray: Tray | undefined;
 let signalRConnection: HubConnection | undefined;
+let signalRControls: SignalRControlCoordinator | undefined;
 let rendererEntryUrl: string | undefined;
 let isQuitting = false;
 let overlayHideTimer: NodeJS.Timeout | undefined;
 let wakeWordService: SherpaWakeWordService | undefined;
 let backendBearer: string | undefined;
 let backendBearerConfigurationError: Error | undefined;
+let conversationSelectionStore: DesktopConversationSelectionStore | undefined;
 let backendConnectionState: BackendConnectionState = {
   state: "disconnected",
   revision: 0
 };
 const notificationProjectionCache = new NotificationProjectionCache();
+const realtimeSessionRegistry = new DesktopRealtimeSessionRegistry();
+
+// This runs before Electron's single-instance lock and ready lifecycle so a
+// live run receives a run-specific safeStorage namespace after its isolated
+// profile and ownership marker have passed validation.
+const phase9bLiveProfile = configurePhase9bLiveProfile(app);
+const phase9bLiveBudget = configurePhase9bLiveBudget(phase9bLiveProfile);
+const phase9bRealtimeObserver = createPhase9bRealtimeObserver(phase9bLiveProfile);
+const phase9bLiveRotationPolicy: Phase9bLiveRotationPolicy | undefined =
+  resolvePhase9bLiveRotationPolicy(phase9bLiveProfile, process.env);
 
 function configureBackendBearer(): void {
   try {
@@ -326,6 +353,130 @@ async function requestBackend(
   return response.json();
 }
 
+function trustedRendererTarget() {
+  const contents = mainWindow?.webContents;
+  if (contents === undefined
+    || contents.isDestroyed()
+    || rendererEntryUrl === undefined
+    || contents.mainFrame.url !== rendererEntryUrl) {
+    return undefined;
+  }
+
+  return {
+    sender: contents as object,
+    frame: contents.mainFrame as object,
+    isDestroyed: () => contents.isDestroyed(),
+    send: (channel: "app:prepareShutdown", value: { requestId: string }) => {
+      contents.send(channel, value);
+    }
+  };
+}
+
+function isTrustedRendererEvent(event: unknown): boolean {
+  const contents = mainWindow?.webContents;
+  return contents !== undefined
+    && !contents.isDestroyed()
+    && typeof event === "object"
+    && event !== null
+    && "sender" in event
+    && event.sender === contents
+    && "senderFrame" in event
+    && event.senderFrame === contents.mainFrame
+    && contents.mainFrame.url === rendererEntryUrl;
+}
+
+async function fallbackMainRealtimeSession(session: DesktopShutdownFallbackSession): Promise<void> {
+  if (backendBearer === undefined || backendBearer !== session.bearer) {
+    throw desktopActionFailure("terminal", "not_configured");
+  }
+
+  const idempotencyKey = session.idempotencyKey
+    ?? realtimeSessionRegistry.getPendingTerminalIdempotencyKey(session.sessionId)
+    ?? randomUUID();
+  const terminalIntent = session.terminalIntent;
+  const runTerminal = session.takeoverPendingTerminal
+    ? realtimeSessionRegistry.takeoverPendingTerminal.bind(realtimeSessionRegistry)
+    : realtimeSessionRegistry.runPendingTerminal.bind(realtimeSessionRegistry);
+  await runTerminal(session.sessionId, async () => {
+    await requestBackend(
+      `/api/v1/realtime/sessions/${encodeURIComponent(session.sessionId)}/ended`,
+      "POST",
+      { reason: terminalIntent?.reason ?? session.reason, status: terminalIntent?.status ?? session.status },
+      idempotencyKey);
+    realtimeSessionRegistry.markTerminalCompleted(session.sessionId);
+  }, {
+    idempotencyKey,
+    intent: terminalIntent ?? { reason: session.reason, status: session.status }
+  });
+}
+
+async function recoverPendingMainRealtimeConnection(
+  intent: DesktopPendingConnectionIntent
+): Promise<void> {
+  if (realtimeSessionRegistry.isTerminalCompleted(intent.sessionId)) {
+    return;
+  }
+  try {
+    await realtimeSessionRegistry.takeoverPendingConnection(intent, async () => {
+      if (backendBearer === undefined || backendBearer !== intent.bearer) {
+        throw desktopActionFailure("terminal", "not_configured");
+      }
+      await requestBackend(
+        `/api/v1/realtime/sessions/${encodeURIComponent(intent.sessionId)}/connected`,
+        "POST",
+        { externalSessionId: intent.externalSessionId },
+        intent.idempotencyKey);
+      if (!realtimeSessionRegistry.acceptPendingConnectionDuringShutdown(intent)) {
+        throw desktopActionFailure("terminal", "cancelled");
+      }
+      await fallbackMainRealtimeSession({
+        sessionId: intent.sessionId,
+        externalSessionId: intent.externalSessionId,
+        ...(intent.bearer === undefined ? {} : { bearer: intent.bearer }),
+        reason: "desktop-quit-main-fallback",
+        status: "disconnected"
+      });
+    });
+  } catch (error) {
+    if (realtimeSessionRegistry.isTerminalCompleted(intent.sessionId)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+const shutdownCoordinator = new DesktopShutdownCoordinator({
+  getRendererTarget: trustedRendererTarget,
+  getActiveSession: () => realtimeSessionRegistry.activeSession,
+  fallbackMainSession: fallbackMainRealtimeSession,
+  clearSession: sessionId => realtimeSessionRegistry.clearIfCurrent(sessionId),
+  freeze: () => {
+    isQuitting = true;
+    realtimeSessionRegistry.freeze();
+  },
+  stopWake: () => stopWakeWordService(),
+  stopSignalR: async () => {
+    const connection = signalRConnection;
+    signalRConnection = undefined;
+    signalRControls = undefined;
+    await connection?.stop();
+  },
+  waitForPendingOperations: () => realtimeSessionRegistry.waitForPendingOperations(),
+  getPendingConnectionIntents: () => realtimeSessionRegistry.getPendingConnectionIntents(),
+  recoverPendingConnection: recoverPendingMainRealtimeConnection,
+  getRegisteredSessions: () => realtimeSessionRegistry.getRegisteredSessions(),
+  getPendingTerminalSessions: () => realtimeSessionRegistry.getPendingTerminalSessions(),
+  getPendingTerminalIdempotencyKey: sessionId =>
+    realtimeSessionRegistry.getPendingTerminalIdempotencyKey(sessionId),
+  getPendingTerminalIntent: sessionId =>
+    realtimeSessionRegistry.getPendingTerminalIntent(sessionId),
+  closeWindows: () => {
+    overlayWindow?.destroy();
+    mainWindow?.destroy();
+  },
+  continueQuit: () => app.quit()
+});
+
 function record(value: unknown): JsonRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw desktopActionFailure("terminal", "invalid_input");
@@ -356,6 +507,14 @@ function requiredString(value: unknown, _name: string, maxLength = 200): string 
     throw desktopActionFailure("terminal", "invalid_input");
   }
   return value.trim();
+}
+
+function requiredUuid(value: unknown, name: string): string {
+  const normalized = requiredString(value, name, 36);
+  if (!isUuid(normalized)) {
+    throw desktopActionFailure("terminal", "invalid_input");
+  }
+  return normalized;
 }
 
 function requiredBody(value: unknown): JsonRecord {
@@ -457,6 +616,7 @@ function createMainWindow(rendererEntryUrl: string): BrowserWindow {
     minHeight: 620,
     webPreferences: {
       ...secureWebPreferences,
+      additionalArguments: phase9bObservationArguments(phase9bLiveProfile),
       preload: new URL("../preload/index.cjs", import.meta.url).pathname
     }
   });
@@ -553,6 +713,9 @@ function configureMainWindow(window: BrowserWindow): void {
 }
 
 function ensureMainWindow(): BrowserWindow | undefined {
+  if (isQuitting) {
+    return undefined;
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show();
     mainWindow.focus();
@@ -588,7 +751,6 @@ function updateTrayMenu(): void {
     {
       label: "Quit",
       click: () => {
-        isQuitting = true;
         app.quit();
       }
     }
@@ -615,6 +777,9 @@ function createTray(): void {
 }
 
 function startSignalR(window: BrowserWindow): HubConnection | undefined {
+  if (isQuitting) {
+    return undefined;
+  }
   const bearer = backendBearer;
   if (!bearer || bearer.length < 32) {
     return undefined;
@@ -627,6 +792,10 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
     .configureLogging(desktopSignalRLogLevel)
     .withAutomaticReconnect()
     .build();
+  const controls = new SignalRControlCoordinator(
+    () => signalRConnection ?? connection,
+    (state, error) => publishBackendConnectionState(window, state, error));
+  signalRControls = controls;
 
   for (const eventType of [
     "task.updated",
@@ -651,12 +820,13 @@ function startSignalR(window: BrowserWindow): HubConnection | undefined {
     });
   }
 
-  connection.onreconnecting(error => publishBackendConnectionState(window, "reconnecting", error));
-  connection.onreconnected(() => publishBackendConnectionState(window, "connected"));
-  connection.onclose(error => publishBackendConnectionState(window, "disconnected", error));
+  connection.onreconnecting(error => controls.reportConnectionState("reconnecting", error));
+  connection.onreconnected(() => controls.reportConnectionState("connected"));
+  connection.onclose(error => controls.reportConnectionState("disconnected", error));
   void connection.start()
-    .then(() => publishBackendConnectionState(window, "connected"))
-    .catch(error => publishBackendConnectionState(window, "disconnected", error instanceof Error ? error : undefined));
+    .then(() => controls.reportConnectionState("connected"))
+    .catch(error => controls.reportConnectionState(
+      "disconnected", error instanceof Error ? error : undefined));
   return connection;
 }
 
@@ -664,7 +834,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.whenReady().then(() => {
+    phase9bLiveBudget?.attach(session.defaultSession);
     configureBackendBearer();
+    conversationSelectionStore = new DesktopConversationSelectionStore(app.getPath("userData"));
     wakeWordService = new SherpaWakeWordService({
       modelRoot: wakeWordModelRoot(),
       onDetected: () => publishWakeWordEvent("wake-word:detected"),
@@ -674,6 +846,91 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
     handleDesktopIpc("app:getVersion", () => app.getVersion());
+    handleDesktopIpc("app:shutdownAcknowledged", (event, value: unknown) => {
+      const contents = mainWindow?.webContents;
+      if (contents === undefined || contents.isDestroyed()
+        || typeof event !== "object" || event === null
+        || !("sender" in event) || event.sender !== contents
+        || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+        || contents.mainFrame.url !== rendererEntryUrl) {
+        throw desktopActionFailure("terminal", "forbidden");
+      }
+      const input = requiredBody(value);
+      if (Object.keys(input).some(key => key !== "requestId" && key !== "status")) {
+        throw desktopActionFailure("terminal", "invalid_input");
+      }
+      const requestId = requiredUuid(input.requestId, "requestId");
+      const status = input.status;
+      if (status !== "completed" && status !== "failed") {
+        throw desktopActionFailure("terminal", "invalid_input");
+      }
+      if (!shutdownCoordinator.handleShutdownAck({
+        sender: contents,
+        frame: contents.mainFrame,
+        requestId,
+        status
+      })) {
+        throw desktopActionFailure("terminal", "forbidden");
+      }
+    });
+    if (phase9bRealtimeObserver !== undefined) {
+      handleDesktopIpc("phase9b:observeRealtimeConnection", (event, value: unknown) => {
+        const contents = mainWindow?.webContents;
+        if (contents === undefined || typeof event !== "object" || event === null
+            || !("sender" in event) || event.sender !== contents
+            || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+            || contents.mainFrame.url !== rendererEntryUrl) {
+          throw desktopActionFailure("terminal", "forbidden");
+        }
+        phase9bRealtimeObserver(value);
+      });
+      handleDesktopIpc("phase9b:getRealtimeRotationPolicy", (event) => {
+        const contents = mainWindow?.webContents;
+        if (contents === undefined || typeof event !== "object" || event === null
+            || !("sender" in event) || event.sender !== contents
+            || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+            || contents.mainFrame.url !== rendererEntryUrl) {
+          throw desktopActionFailure("terminal", "forbidden");
+        }
+        return phase9bLiveRotationPolicy ?? null;
+      });
+      handleDesktopIpc("phase9b:pauseSignalR", async (event) => {
+        const contents = mainWindow?.webContents;
+        if (contents === undefined || typeof event !== "object" || event === null
+            || !("sender" in event) || event.sender !== contents
+            || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+            || contents.mainFrame.url !== rendererEntryUrl) {
+          throw desktopActionFailure("terminal", "forbidden");
+        }
+        if (isQuitting) {
+          throw desktopActionFailure("terminal", "cancelled");
+        }
+        return await signalRControls?.pause() ?? "disconnected";
+      });
+      handleDesktopIpc("phase9b:resumeSignalR", async (event) => {
+        const contents = mainWindow?.webContents;
+        if (contents === undefined || typeof event !== "object" || event === null
+            || !("sender" in event) || event.sender !== contents
+            || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+            || contents.mainFrame.url !== rendererEntryUrl) {
+          throw desktopActionFailure("terminal", "forbidden");
+        }
+        if (isQuitting) {
+          throw desktopActionFailure("terminal", "cancelled");
+        }
+        return await signalRControls?.resume() ?? "disconnected";
+      });
+      handleDesktopIpc("phase9b:getSignalRState", (event) => {
+        const contents = mainWindow?.webContents;
+        if (contents === undefined || typeof event !== "object" || event === null
+            || !("sender" in event) || event.sender !== contents
+            || !("senderFrame" in event) || event.senderFrame !== contents.mainFrame
+            || contents.mainFrame.url !== rendererEntryUrl) {
+          throw desktopActionFailure("terminal", "forbidden");
+        }
+        return signalRControls?.getState() ?? "disconnected";
+      });
+    }
     handleDesktopIpc("wake-word:start", async (_event, value: unknown) => {
       try {
         const input = requiredBody(value);
@@ -697,6 +954,28 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
     handleDesktopIpc("backend:getConnectionState", () => backendConnectionState);
+    handleDesktopIpc("conversationSelection:get", async event => {
+      if (!isTrustedRendererEvent(event)) {
+        throw desktopActionFailure("terminal", "forbidden");
+      }
+      return await conversationSelectionStore?.get() ?? null;
+    });
+    handleDesktopIpc("conversationSelection:set", async (event, value: unknown) => {
+      if (!isTrustedRendererEvent(event)) {
+        throw desktopActionFailure("terminal", "forbidden");
+      }
+      const input = requiredBody(value);
+      if (Object.keys(input).some(key => key !== "conversationId")) {
+        throw desktopActionFailure("terminal", "invalid_input");
+      }
+      return await conversationSelectionStore?.set(requiredUuid(input.conversationId, "conversationId"));
+    });
+    handleDesktopIpc("conversationSelection:clear", async event => {
+      if (!isTrustedRendererEvent(event)) {
+        throw desktopActionFailure("terminal", "forbidden");
+      }
+      await conversationSelectionStore?.clear();
+    });
     handleDesktopIpc("backend:getDiagnostics", () => requestBackend("/api/v1/diagnostics", "GET"));
     handleDesktopIpc("backend:getDesktopDevice", () =>
       requestBackend("/api/v1/realtime/desktop-device", "POST", {}, randomUUID()));
@@ -742,6 +1021,9 @@ if (!app.requestSingleInstanceLock()) {
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
     handleDesktopIpc("backend:createRealtimeClientSecret", (_event, value: unknown) => {
+      if (isQuitting) {
+        throw desktopActionFailure("terminal", "cancelled");
+      }
       const input = requiredBody(value);
       return requestBackend(
         "/api/v1/realtime/client-secrets",
@@ -753,25 +1035,98 @@ if (!app.requestSingleInstanceLock()) {
         },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    handleDesktopIpc("backend:realtimeConnected", (_event, value: unknown) => {
+    handleDesktopIpc("backend:realtimeConnected", async (_event, value: unknown) => {
+      if (isQuitting) {
+        throw desktopActionFailure("terminal", "cancelled");
+      }
       const input = requiredBody(value);
-      return requestBackend(
-        `/api/v1/realtime/sessions/${encodeURIComponent(requiredString(input.sessionId, "sessionId"))}/connected`,
-        "POST",
-        { externalSessionId: requiredString(input.externalSessionId, "externalSessionId") },
-        requiredString(input.idempotencyKey, "idempotencyKey"));
+      const sessionId = requiredUuid(input.sessionId, "sessionId");
+      const externalSessionId = requiredString(input.externalSessionId, "externalSessionId");
+      const idempotencyKey = requiredString(input.idempotencyKey, "idempotencyKey");
+      const connectionIntent: DesktopPendingConnectionIntent = {
+        sessionId,
+        externalSessionId,
+        idempotencyKey,
+        ...(backendBearer === undefined ? {} : { bearer: backendBearer })
+      };
+      let compensationSucceeded = false;
+      const operation = Promise.resolve().then(async () => {
+        if (isQuitting) {
+          throw desktopActionFailure("terminal", "cancelled");
+        }
+        const response = await requestBackend(
+          `/api/v1/realtime/sessions/${encodeURIComponent(sessionId)}/connected`,
+          "POST",
+          { externalSessionId },
+          idempotencyKey);
+        if (realtimeSessionRegistry.markConnected({
+          sessionId,
+          externalSessionId,
+          ...(backendBearer ? { bearer: backendBearer } : {})
+        })) {
+          return response;
+        }
+
+        const pendingRecovery = realtimeSessionRegistry.getPendingConnectionRecovery(sessionId);
+        if (pendingRecovery !== undefined) {
+          try {
+            await pendingRecovery;
+            compensationSucceeded = true;
+          } catch {
+            if (!realtimeSessionRegistry.isTerminalCompleted(sessionId)) {
+              await fallbackMainRealtimeSession({
+                sessionId,
+                externalSessionId,
+                bearer: backendBearer,
+                reason: "desktop-quit-main-fallback",
+                status: "disconnected"
+              });
+              compensationSucceeded = true;
+            }
+          }
+          throw desktopActionFailure("terminal", "cancelled");
+        }
+        if (realtimeSessionRegistry.isTerminalCompleted(sessionId)) {
+          compensationSucceeded = true;
+          throw desktopActionFailure("terminal", "cancelled");
+        }
+
+        // Quit may begin while the renderer is awaiting this acknowledgement.
+        // Keep compensation inside the tracked operation so Main waits for
+        // the one terminal update before allowing Electron to quit.
+        await fallbackMainRealtimeSession({
+          sessionId,
+          externalSessionId,
+          bearer: backendBearer,
+          reason: "desktop-quit-main-fallback",
+          status: "disconnected"
+        });
+        compensationSucceeded = true;
+        throw desktopActionFailure("terminal", "cancelled");
+      });
+      realtimeSessionRegistry.trackPendingConnection(operation.then(
+        () => true,
+        () => compensationSucceeded), connectionIntent);
+      return await operation;
     });
-    handleDesktopIpc("backend:realtimeEnded", (_event, value: unknown) => {
+    handleDesktopIpc("backend:realtimeEnded", async (_event, value: unknown) => {
       const input = requiredBody(value);
       const status = input.status;
       if (status !== "rotated" && status !== "disconnected" && status !== "failed") {
         throw desktopActionFailure("terminal", "invalid_input");
       }
-      return requestBackend(
-        `/api/v1/realtime/sessions/${encodeURIComponent(requiredString(input.sessionId, "sessionId"))}/ended`,
-        "POST",
-        { reason: requiredString(input.reason, "reason", 500), status },
-        requiredString(input.idempotencyKey, "idempotencyKey"));
+      const sessionId = requiredUuid(input.sessionId, "sessionId");
+      const reason = requiredString(input.reason, "reason", 500);
+      const idempotencyKey = requiredString(input.idempotencyKey, "idempotencyKey");
+      return await realtimeSessionRegistry.runPendingTerminal(sessionId, async () => {
+        const response = await requestBackend(
+          `/api/v1/realtime/sessions/${encodeURIComponent(sessionId)}/ended`,
+          "POST",
+          { reason, status },
+          idempotencyKey);
+        realtimeSessionRegistry.markEnded(sessionId);
+        return response;
+      }, { idempotencyKey, intent: { reason, status } });
     });
     handleDesktopIpc("backend:ingestRealtimeEvents", (_event, value: unknown) => {
       const input = requiredBody(value);
@@ -784,7 +1139,7 @@ if (!app.requestSingleInstanceLock()) {
         { version: 1, events: input.events },
         requiredString(input.idempotencyKey, "idempotencyKey"));
     });
-    handleDesktopIpc("backend:delegateTask", (_event, value: unknown) => {
+    handleDesktopIpc("backend:delegateTask", async (_event, value: unknown) => {
       const input = requiredBody(value);
       const requiredCapabilities = requiredStringArray(input.requiredCapabilities, "requiredCapabilities", 20);
       const sourceMessageIds = requiredUuidArray(input.sourceMessageIds, "sourceMessageIds");
@@ -794,6 +1149,11 @@ if (!app.requestSingleInstanceLock()) {
       const expectedOutput = input.expectedOutput === null || input.expectedOutput === undefined
         ? null
         : requiredString(input.expectedOutput, "expectedOutput", 100_000);
+      const logicalId = randomUUID();
+      await phase9bLiveBudget?.reserve(
+        "delegationAttempts",
+        logicalId,
+        `desktop-delegation:${logicalId}`);
       return requestBackend(
         taskApiPath,
         "POST",
@@ -965,10 +1325,10 @@ app.on("activate", () => {
   ensureMainWindow();
 });
 
-app.on("before-quit", () => {
-  isQuitting = true;
-  stopWakeWordService();
-  if (signalRConnection) {
-    void signalRConnection.stop();
+app.on("before-quit", event => {
+  if (shutdownCoordinator.canContinueQuit) {
+    isQuitting = true;
+    return;
   }
+  shutdownCoordinator.requestQuit(event);
 });

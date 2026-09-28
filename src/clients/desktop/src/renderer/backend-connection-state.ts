@@ -38,7 +38,7 @@ export function applyBackendConnectionState(
     throw new Error("Invalid backend connection state.");
   }
 
-  if (item.revision < current.revision) {
+  if (item.revision <= current.revision) {
     return current;
   }
 

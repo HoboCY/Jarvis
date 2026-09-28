@@ -80,7 +80,7 @@ namespace Jarvis.Infrastructure.Data.Migrations
 
                     b.HasIndex("ExecutionId");
 
-                    b.HasIndex("DeviceId", "RequestId")
+                    b.HasIndex("DeviceId", "ExecutionId", "RequestId")
                         .IsUnique();
 
                     b.HasIndex("TaskId", "Status", "CreatedAtMs");

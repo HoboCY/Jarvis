@@ -8,6 +8,7 @@ using Jarvis.Domain.Tasks;
 using Jarvis.Infrastructure.Data;
 using Jarvis.Infrastructure.Observability;
 using Jarvis.Infrastructure.Responses;
+using Jarvis.Infrastructure.Budgets;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -45,6 +46,8 @@ public sealed class ResponsesWorker(
     private const string ProviderFailedErrorCode = "responses_failed";
     private const string ProviderIncompleteErrorCode = "responses_incomplete";
     private const string RecoveryUnsupportedErrorCode = "responses_recovery_unsupported";
+    private const string BudgetAdmissionErrorCode = "responses_budget_exhausted";
+    private const string BudgetAdmissionFailureErrorCode = "responses_budget_admission_failed";
     private readonly SemaphoreSlim processGate = new(1, 1);
 
     public string WorkerId => identity.Value;
@@ -247,6 +250,20 @@ public sealed class ResponsesWorker(
             {
                 throw;
             }
+            catch (Phase9bBudgetAdmissionException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Admission rejection is a durable live-run boundary. It is
+                // not a provider retry and must terminally fail this task so
+                // the next poll cannot reserve the same task again.
+                var errorCode = exception.Code == "BUDGET_EXHAUSTED"
+                    ? BudgetAdmissionErrorCode
+                    : BudgetAdmissionFailureErrorCode;
+                result = new(
+                    null,
+                    ResponsesStatus.Failed,
+                    ErrorCode: errorCode,
+                    ErrorMessage: "The live Responses budget admission rejected the request.");
+            }
             catch (ClientResultException) when (runtime is not IStoredResponsesRuntime && !cancellationToken.IsCancellationRequested)
             {
                 result = CreateSynchronousProviderFailureResult();
@@ -262,7 +279,7 @@ public sealed class ResponsesWorker(
 
             if (string.IsNullOrWhiteSpace(result.ResponseId))
             {
-                if (result.ErrorCode != ProviderFailedErrorCode)
+                if (result.ErrorCode is not (ProviderFailedErrorCode or BudgetAdmissionErrorCode or BudgetAdmissionFailureErrorCode))
                 {
                     result = new(
                         null,
@@ -389,6 +406,8 @@ public sealed class ResponsesWorker(
                     ? "responses_unknown_status"
                     : result.ErrorCode == RecoveryUnsupportedErrorCode
                         ? RecoveryUnsupportedErrorCode
+                    : result.ErrorCode is BudgetAdmissionErrorCode or BudgetAdmissionFailureErrorCode
+                        ? result.ErrorCode
                     : ProviderFailedErrorCode;
             var message = SafeError(result);
             task.MarkFailed(errorCode, message, nowMs);

@@ -16,6 +16,7 @@ public static class CodexProtocolMethods
     public const string Initialized = "initialized";
     public const string ThreadStart = "thread/start";
     public const string ThreadResume = "thread/resume";
+    public const string ThreadRead = "thread/read";
     public const string TurnStart = "turn/start";
     public const string TurnInterrupt = "turn/interrupt";
     public const string ProcessExited = "process/exited";
@@ -228,7 +229,11 @@ public sealed record CodexRuntimeOptions(
     {
         get
         {
-            var result = (Arguments ?? ["app-server"]).ToList();
+            var configuredArguments = Arguments is { Count: > 0 }
+                ? Arguments
+                : ["app-server"];
+            var result = new List<string>(configuredArguments.Count);
+            result.AddRange(configuredArguments);
             if (PermissionProfile is not null)
             {
                 foreach (var overrideValue in PermissionProfile.CliConfigOverrides)
@@ -282,6 +287,14 @@ public interface ICodexRuntime : IAsyncDisposable
     Task<CodexThreadHandle> StartThreadAsync(CapabilityPolicy policy, string? cwd, CancellationToken cancellationToken = default);
 
     Task<CodexThreadHandle> ResumeThreadAsync(string threadId, CapabilityPolicy policy, string? cwd, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the persisted thread history with full turn items. The default
+    /// implementation keeps older test/runtime adapters fail-closed until
+    /// they explicitly support the pinned app-server request.
+    /// </summary>
+    Task<JsonElement> ReadThreadAsync(string threadId, CancellationToken cancellationToken = default) =>
+        Task.FromException<JsonElement>(new NotSupportedException("The Codex runtime does not support thread/read."));
 
     Task<CodexTurnHandle> StartTurnAsync(string threadId, string input, CancellationToken cancellationToken = default);
 
@@ -403,20 +416,27 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 startInfo.ArgumentList.Add(argument);
             }
 
-            process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-            if (!process.Start())
+            var startedProcess = process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            try
             {
-                process.Dispose();
+                if (!startedProcess.Start())
+                {
+                    throw new InvalidOperationException("Codex app-server could not be started.");
+                }
+            }
+            catch
+            {
+                startedProcess.Dispose();
                 process = null;
-                throw new InvalidOperationException("Codex app-server could not be started.");
+                throw;
             }
 
             JarvisTelemetry.CodexProcessStarts.Add(
                 1,
                 JarvisTelemetry.BoundedTags(("operation", "start")).ToArray());
 
-            readTask = ReadStdoutAsync(process, CancellationToken.None);
-            stderrTask = ReadStderrAsync(process, CancellationToken.None);
+            readTask = ReadStdoutAsync(startedProcess, CancellationToken.None);
+            stderrTask = ReadStderrAsync(startedProcess, CancellationToken.None);
         }
 
         var initializeParams = new
@@ -485,6 +505,18 @@ public sealed class CodexAppServerClient : ICodexRuntime
                 JarvisTelemetry.BoundedTags(("operation", "resume")).ToArray());
             throw;
         }
+    }
+
+    public async Task<JsonElement> ReadThreadAsync(
+        string threadId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
+        await EnsureInitializedAsync(cancellationToken);
+        return await SendRequestAsync(
+            CodexProtocolMethods.ThreadRead,
+            new { threadId, includeTurns = true },
+            cancellationToken);
     }
 
     public async Task<CodexTurnHandle> StartTurnAsync(string threadId, string input, CancellationToken cancellationToken = default)

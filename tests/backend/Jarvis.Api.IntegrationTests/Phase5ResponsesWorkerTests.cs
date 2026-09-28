@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Jarvis.Application.Responses;
 using Jarvis.Infrastructure.Data;
+using Jarvis.Infrastructure.Budgets;
 using Jarvis.Infrastructure.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -344,6 +345,37 @@ public sealed class Phase5ResponsesWorkerTests
         Assert.Equal(1, runtime.CreateCalls);
     }
 
+    [Theory]
+    [InlineData("BUDGET_EXHAUSTED", "responses_budget_exhausted")]
+    [InlineData("ADMISSION_UNAVAILABLE", "responses_budget_admission_failed")]
+    public async Task BudgetAdmissionRejectionIsTerminalAndIsNotPolledAgain(
+        string admissionCode,
+        string expectedErrorCode)
+    {
+        var runtime = new BudgetRejectedResponsesRuntime(admissionCode);
+        using var factory = new TestApplicationFactory(null, true, null, null, null, null, null, null, runtime);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", factory.Token);
+        var conversationId = await CreateConversationAsync(client);
+        var taskId = await CreateResponsesTaskAsync(client, conversationId);
+
+        await using (var firstScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.True(await firstScope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        await using (var secondScope = factory.Services.CreateAsyncScope())
+        {
+            Assert.False(await secondScope.ServiceProvider.GetRequiredService<ResponsesWorker>().ProcessOneAsync());
+        }
+
+        var task = await client.GetFromJsonAsync<JsonElement>($"/api/v1/tasks/{taskId}");
+        Assert.Equal("failed", task.GetProperty("status").GetString());
+        Assert.Equal(expectedErrorCode, task.GetProperty("errorCode").GetString());
+        Assert.Equal("The Responses provider failed to complete the task.", task.GetProperty("errorMessage").GetString());
+        Assert.Equal(1, runtime.CreateCalls);
+    }
+
     [Fact]
     public async Task SynchronousProviderFailsClosedForAnExternalIdLeftByACrash()
     {
@@ -482,6 +514,21 @@ public sealed class Phase5ResponsesWorkerTests
         {
             CreateCalls++;
             throw new HttpRequestException("provider secret diagnostics");
+        }
+    }
+
+    private sealed class BudgetRejectedResponsesRuntime : IResponsesRuntime
+    {
+        private readonly string admissionCode;
+
+        public BudgetRejectedResponsesRuntime(string admissionCode = "BUDGET_EXHAUSTED") => this.admissionCode = admissionCode;
+
+        public int CreateCalls { get; private set; }
+
+        public Task<ResponsesResult> CreateAsync(ResponsesCreateRequest request, CancellationToken cancellationToken)
+        {
+            CreateCalls++;
+            throw new Phase9bBudgetAdmissionException(admissionCode);
         }
     }
 
